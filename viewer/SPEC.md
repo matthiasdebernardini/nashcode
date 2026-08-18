@@ -391,6 +391,11 @@ Three complementary indexes make a repo queryable by an agent, all refreshed by 
 trigger and all fronted by brain: full text answers "where does this string appear",
 embeddings answer "what is *about* X", and the code graph answers "who calls this".
 
+Rust-first: everything that can run in-process does (fastembed, the codanna library,
+the `scip` crate for reading indexes). Non-Rust tools appear only as CI subprocesses
+where accuracy demands them (`scip-typescript`, `scip-python`), and losing one degrades
+that language to the in-process graph, never breaks the pipeline.
+
 - **Trigger: every merge to the default branch** (the same post-merge point that flips
   cards), plus a `nashcode index [repo]` CLI command for manual runs and backfills.
   Indexing runs on the CI queue, never on a request path.
