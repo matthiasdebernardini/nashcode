@@ -312,8 +312,10 @@ mod tests {
         assert!(lines[1].starts_with("✗ server "));
         assert!(lines[2].starts_with("- viewer  "));
         // Details are aligned into one column.
-        let col = |s: &str| s.find("  ").unwrap();
-        assert_eq!(col(&lines[0]), col(&lines[1]));
+        assert_eq!(
+            lines[0].find("box ->").unwrap(),
+            lines[1].find("cannot").unwrap()
+        );
     }
 
     #[test]

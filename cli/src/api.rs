@@ -166,7 +166,7 @@ impl Client {
         format!("{}{}", self.base, path)
     }
 
-    fn finish(r: http::Response<ureq::Body>) -> Result<Reply> {
+    fn finish(r: ureq::http::Response<ureq::Body>) -> Result<Reply> {
         let status = r.status().as_u16();
         let body = r
             .into_body()

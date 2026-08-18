@@ -496,7 +496,7 @@ pub fn short_host(dest: &str) -> String {
 /// openssl, and so the CLI can save it to the profile without reading it back
 /// over the wire.
 pub fn generate_token() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut bytes = [0u8; 24];
     rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
