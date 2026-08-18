@@ -2,5 +2,25 @@
 name = "nashgit"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Stacked-branch review and CI for a dgit server on a tailnet"
+repository = "https://github.com/nashvilleautomation/nashgit"
 
 [dependencies]
+topcoat = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+base64 = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+time = { version = "0.3.55", features = ["formatting", "parsing", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+sha2 = "0.10"

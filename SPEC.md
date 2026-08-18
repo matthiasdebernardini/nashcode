@@ -74,10 +74,21 @@ Two pieces:
   parent, blocked-on-red-CI, restack of a two-child stack, and restack-conflict abort
   leaving every branch untouched.
 - Comment round-trip test (post, render inline, outdated after branch moves), including a
-  post through the public JSON API anchored to a file that is not in any diff.
+  post through the public JSON API anchored to a file that is not in any diff, and a
+  `GET ?since=` cursor test proving ordering by `created_at` and no repeats.
 - Webhook test against a local listener (push + ci_finished payloads).
 - Plans: a fixture repo with `plans/*.md` lists and renders them, and the raw URL returns
   the file bytes unchanged.
+- Board: a fixture repo with `tasks/` cards in three statuses renders three columns; the
+  move endpoint rewrites the front-matter status only (body byte-identical) in exactly one
+  commit; a card with malformed front matter lands in "needs attention" instead of
+  crashing the board.
+- Links: a back-link scan on a fixture repo wires plan↔card↔branch in both directions, a
+  dangling ref renders as missing without an error, and the merge tests cover a merge
+  flipping its card to `done`.
+- Brain: `/brain` aggregates a two-repo fixture into the documented shape; `/brain/ask` is
+  tested against a stub HTTP server standing in for the Anthropic API (success, refusal,
+  429 passthrough) with no real API calls, and the route 404s without `ANTHROPIC_API_KEY`.
 - Degradation: with `DGIT_URL` pointed at a dead host, every page still renders (200) from
   the existing mirror and shows the stale banner.
 - No hostname, bucket, account id, or tailnet name appears in the source tree.
@@ -117,6 +128,54 @@ plan document.
 - `/:repo/raw/{branch}/{*path}` serves any file from the mirror verbatim
   (`text/plain; charset=utf-8`), so external tools can fetch a plan by a stable URL.
 
+## Board
+
+A kanban board, GitHub Projects-style. **The cards live in the repo; the board is only a
+view.** No board state goes in SQLite — git is the store, so an agent moves a card the same
+way it moves anything else: edit the file, push.
+
+- Convention: every markdown file under `tasks/` is a card, with YAML front matter:
+  - `status` (required, string). `todo`, `doing`, `done` are the canonical columns in that
+    order; any other status becomes an extra column after `done`, alphabetically.
+  - `title` (optional; defaults to the first heading, then to the filename).
+  - `assignee` (optional).
+  - Body is the card detail.
+- `/:repo/board` renders one column per status, cards ordered by mtime in the mirror,
+  newest at the top. A file whose front matter will not parse lands in a **needs
+  attention** column — a bad card never breaks the board.
+- Clicking a card opens it rendered like a plan, with its file-anchored comment thread.
+- Drag and drop moves a card between columns with native HTML drag-and-drop and no
+  library. `POST /:repo/board/move {file, status}` rewrites **only** the status line of the
+  front matter, commits to the default branch as the Tailscale user
+  (`Name <login>`), pushes to dgit, then refetches the mirror. The push must succeed
+  before the endpoint reports success, so the mirror and dgit never diverge; on failure the
+  UI shows a toast and the card snaps back.
+- `board` joins the reserved branch-name words.
+
+## Links
+
+Everything links to everything, GitHub-style. The mechanism is file-native: links are
+declared in front matter or inferred from paths. **Nothing about a link is stored in
+SQLite.**
+
+- **Declared refs**, in the front matter of any plan or card: `branch: <name>`,
+  `plan: plans/x.md`, `tasks: [tasks/a.md, ...]`. A ref whose target does not exist renders
+  as plain text with a subtle "missing" marker and never breaks the page.
+- **Path autolinking**: in rendered markdown, a token that matches a file that exists in
+  the repo (under `plans/` or `tasks/`) becomes a link to that file's rendered page, and a
+  backticked token matching an existing branch name becomes a link to that branch's PR
+  view.
+- **Computed back-links**, derived at render time by scanning front matter across the
+  mirror tip. One scan per tip commit, cached, invalidated when the tip moves.
+  - The branch page is the hub: it shows the card and the plan that declare
+    `branch: <this>`, alongside the CI status it already carries.
+  - A card shows its branch's CI dot and stack position, and its plan link.
+  - A plan shows the cards and branches that reference it, each with status and CI.
+  - Board cards carry their branch's CI dot inline.
+- **One piece of automation**: when the merge button merges branch B, any card declaring
+  `branch: B` whose status is not `done` is rewritten to `done` in the same push, as a
+  separate commit authored by the merging user. The merge audit line says so.
+
 ## Comments
 
 - PR-level comments and line-anchored comments on diff pages, stored in the viewer's
@@ -139,8 +198,69 @@ plan document.
 
   `file` and `line` are optional (omit both for a PR-level comment). `author` is optional
   and falls back to the `Tailscale-User-Login` header, then to `local`. Responds
-  `201` with the stored comment as JSON. `GET /:repo/comments?branch=&file=` reads them
-  back. Document both in the README.
+  `201` with the stored comment as JSON.
+
+  The read side closes the loop for coding agents:
+
+  ```
+  GET /:repo/comments?branch=&file=&since=
+  ```
+
+  `since` is RFC3339. Every row carries a stable integer `id`, and results come back
+  ordered by `created_at` (then `id`), so an agent can poll with a `since` cursor and never
+  miss or repeat a comment. Response shape is the POST body plus `id`, `author`,
+  `created_at`, and `commit`. Document both in the README.
+
+## Brain
+
+The API exposes the whole tailnet's work state as one queryable surface, plus an optional
+subjective layer on top of it.
+
+- `GET /brain` — a deterministic JSON aggregate across every configured repo, built from
+  the mirrors and SQLite with no model in the loop. Per repo: branches (stack parent, ahead
+  count, latest CI status), plans (path, title, front-matter refs, first paragraph), cards
+  grouped by status with their declared refs, recent activity (merges, restacks, comments,
+  CI runs — each with an author and an RFC3339 timestamp), and open comment counts per
+  file. `?repo=` filters to one repo; `?since=` bounds the activity arrays. This is what a
+  chief-of-staff agent slurps to know the state of everything. Cached per set of tips, with
+  the same invalidation as the back-link scan.
+- `POST /brain/ask {question, repo?}` — the subjective layer, for "what should I pick up
+  next", "which stack is closest to mergeable", "summarize the week". Mounted only when
+  `ANTHROPIC_API_KEY` is set; without it the route answers 404 and a doctor-style line at
+  startup says why. It builds the `/brain` JSON, adds the full text of any plan or card
+  under the repo filter, sends exactly one request to the Claude API, and returns
+  `{answer, model}`.
+
+  The Claude API contract (Rust has no official Anthropic SDK, so this is reqwest against
+  the documented HTTP shape):
+
+  - `POST https://api.anthropic.com/v1/messages`, headers `x-api-key`,
+    `anthropic-version: 2023-06-01`, `content-type: application/json`.
+  - Body carries `model`, `max_tokens: 16000`, a terse `system` role, and one user message
+    holding the state JSON and the question. Model comes from `NASHGIT_BRAIN_MODEL`,
+    defaulting to `claude-opus-5`. No `thinking`, no `temperature`, no `budget_tokens`.
+  - `content` comes back as an array of typed blocks: concatenate the `text` ones and
+    ignore the rest. `stop_reason: "refusal"` becomes a 502 carrying the refusal
+    explanation; `stop_reason: "max_tokens"` appends a truncation note.
+  - Five-minute timeout. An upstream failure surfaces as a 502 with the API's own error
+    message — never a 500.
+  - The key is read from `ANTHROPIC_API_KEY` only. It is never logged and never appears in
+    any config or profile surface. `NASHGIT_ANTHROPIC_URL` overrides the base URL so tests
+    can point at a stub.
+
+## Agents
+
+Coding agents use nashgit as their planning system, so the loop must be documented for a
+machine reader. An `AGENTS.md` at the repo root spells it out end to end: push a markdown
+plan to `plans/` on a branch, humans annotate it in the viewer (or plannotator posts to the
+comment API), the agent polls `GET /:repo/comments?file=plans/x.md&since=<last-check>`,
+revises, force-pushes, and a human merges. Exact `curl` examples with placeholder host and
+token, terse and precise, no marketing.
+
+It also documents the `tasks/` card convention — agents create and move cards by editing
+files and pushing, exactly like plans; the board's move endpoint exists for humans
+dragging — and a Brain section: `GET /brain` for state, `POST /brain/ask` for judgment
+calls, with curl examples.
 
 ## Merge and restack
 
