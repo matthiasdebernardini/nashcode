@@ -16,9 +16,9 @@ use crate::ops::OpError;
 use crate::web::pages::split_action;
 use crate::web::{actor, app, repo_ctx, see_other};
 
-path_param!(repo_name);
+path_param!(repo);
 path_param!(comment_id: i64, error = bad_request);
-path_param!(*tail);
+path_param!(*rest);
 
 fn json_error(status: StatusCode, message: &str) -> Result<Response> {
     let body = serde_json::json!({ "error": message }).to_string();
@@ -66,9 +66,9 @@ struct CommentsQuery {
 
 /// `GET /{repo}/comments?branch=&file=&since=` — the poller's read side. Rows come
 /// back ordered by `(created_at, id)`; `since` is RFC3339 and strictly exclusive.
-#[route(GET "/{repo_name}/comments")]
+#[route(GET "/{repo}/comments")]
 async fn comments_get(cx: &Cx) -> Result<Response> {
-    let name = path_param::<RepoName>(cx).to_owned();
+    let name = path_param::<Repo>(cx).to_owned();
     if !app(cx).config.knows_repo(&name) {
         return Err(topcoat::router::error::not_found().into());
     }
@@ -129,9 +129,9 @@ where
 /// `POST /{repo}/comments` — the public write side. `file`/`line` optional (omit both
 /// for a PR-level comment); `author` falls back to `Tailscale-User-Login`, then
 /// `local`. Responds 201 with the stored comment.
-#[route(POST "/{repo_name}/comments")]
+#[route(POST "/{repo}/comments")]
 async fn comments_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result<Response> {
-    let name = path_param::<RepoName>(cx).to_owned();
+    let name = path_param::<Repo>(cx).to_owned();
     let ctx = repo_ctx(cx, &name).await?;
     let form = is_form(cx);
 
@@ -196,9 +196,9 @@ async fn comments_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result
 }
 
 /// Delete your own comment. The UI posts here; there is no JSON delete surface.
-#[route(POST "/{repo_name}/comments/{comment_id}/delete")]
+#[route(POST "/{repo}/comments/{comment_id}/delete")]
 async fn comment_delete(cx: &Cx) -> Result<Response> {
-    let name = path_param::<RepoName>(cx).to_owned();
+    let name = path_param::<Repo>(cx).to_owned();
     if !app(cx).config.knows_repo(&name) {
         return Err(topcoat::router::error::not_found().into());
     }
@@ -218,14 +218,14 @@ async fn comment_delete(cx: &Cx) -> Result<Response> {
 
 /// `GET /{repo}/raw/{branch}/{*path}` — the file bytes, verbatim. The branch part is
 /// matched greedily against real branch names so branches containing `/` work.
-#[route(GET "/{repo_name}/raw/{*tail}")]
+#[route(GET "/{repo}/raw/{*rest}")]
 async fn raw_file(cx: &Cx) -> Result<Response> {
-    let name = path_param::<RepoName>(cx).to_owned();
+    let name = path_param::<Repo>(cx).to_owned();
     let ctx = repo_ctx(cx, &name).await?;
     if !ctx.status.available {
         return json_error(StatusCode::NOT_FOUND, "no mirror for this repo yet");
     }
-    let segments: Vec<String> = path_param::<Tail>(cx).map(str::to_owned).collect();
+    let segments: Vec<String> = path_param::<Rest>(cx).map(str::to_owned).collect();
     if segments.len() < 2 {
         return Err(bad_request("expected /{repo}/raw/{branch}/{path}").into());
     }
@@ -269,9 +269,9 @@ struct MoveIn {
 /// `POST /{repo}/board/move {file, status}` — rewrite only the front-matter status,
 /// commit to the default branch as the Tailscale user, push, refetch. The push must
 /// succeed before this reports success.
-#[route(POST "/{repo_name}/board/move")]
+#[route(POST "/{repo}/board/move")]
 async fn board_move(cx: &Cx, Json(input): Json<MoveIn>) -> Result<Response> {
-    let name = path_param::<RepoName>(cx).to_owned();
+    let name = path_param::<Repo>(cx).to_owned();
     let ctx = repo_ctx(cx, &name).await?;
     if !ctx.status.available {
         return json_error(StatusCode::BAD_GATEWAY, "no mirror for this repo yet");
@@ -332,13 +332,13 @@ fn truthy(field: &Option<String>) -> bool {
 ///
 /// Form posts (the UI's buttons) redirect back with `?error=` on failure; API calls
 /// get JSON and a status code (404 / 409 / 502).
-#[route(POST "/{repo_name}/{*tail}")]
+#[route(POST "/{repo}/{*rest}")]
 async fn branch_action(cx: &Cx, body: topcoat::router::request::Bytes) -> Result<Response> {
-    let name = path_param::<RepoName>(cx).to_owned();
+    let name = path_param::<Repo>(cx).to_owned();
     if !app(cx).config.knows_repo(&name) {
         return Err(topcoat::router::error::not_found().into());
     }
-    let rest: String = path_param::<Tail>(cx).collect::<Vec<_>>().join("/");
+    let rest: String = path_param::<Rest>(cx).collect::<Vec<_>>().join("/");
     let (branch, action) = split_action(&rest);
     let branch = branch.to_owned();
     let who = actor(cx);
