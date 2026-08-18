@@ -99,6 +99,41 @@ puts the fetch on a background task. Choices worth knowing about:
 - **A missing mirror still retries on every request,** with no debounce, exactly as
   before. It blocks, but it is the only way that request can have content, and one clone
   ends it.
+## The Agent tab
+
+Traces and Prompts merged into one tab. The spec left these open; here is what was
+chosen and why.
+
+- **`/:repo/agent` returns the prompt search as JSON, not the session list.** The spec
+  puts the search on this page and says "the same URL returns JSON". The session list is
+  still `GET /:repo/traces` with `Accept: application/json`, unchanged, so nothing an
+  agent already polls had to move. `/agent?q=` and `/prompts?q=` return byte-identical
+  bodies from one shared query.
+- **Searching filters the session list too.** With `?q=` or `?session=` set, the page
+  shows the sessions that hold a match and lists the matching prompts under them.
+  Without either, it is the session list alone.
+- **A session's title is its first prompt.** That comes from the same `prompts` query
+  the search uses, so a session whose payloads carry no `prompt` field falls back to its
+  id. Backfills through `nashcode-viewer trace push` lift the prompt out of
+  `message.content`, so they get titles; a transcript posted straight to the API does
+  not.
+- **User text starting with `<` is harness markup, not a prompt.** Command output and
+  system reminders arrive as ordinary user lines. They render as a one-line note instead
+  of as something a person wrote, which is the same judgment `trace push` already makes
+  when it decides what counts as a prompt.
+- **Synthesized diffs carry positions, not locations.** A file edit renders from
+  `toolUseResult.structuredPatch` when the harness computed one — that is the real diff
+  against the file on disk. Without it, the diff is rebuilt from the call's own
+  `old_string`/`new_string` (or `content` for `Write`), and the hunk headers count from
+  line 1 because the arguments do not say where in the file the match landed. The change
+  is exact; the line numbers are not.
+- **Tool results are clipped at 4000 characters** on the page. A `Read` of a large file
+  is a whole file in one `<details>`, and the raw transcript is one link away.
+- **`escape_json_for_script` is duplicated** from `web/pages.rs`. It is one `replace`
+  call, and the alternative was reaching into a module another work stream owns.
+- **The branch page's "trace" link still points at `/:repo/traces/:session`**, so it
+  costs one redirect. `web/pages.rs` belongs to another work stream right now; point it
+  at `/:repo/agent/:session` when that lands.
 
 ## Known caveats
 

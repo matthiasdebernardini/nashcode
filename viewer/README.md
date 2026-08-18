@@ -21,9 +21,8 @@ against `git clone --mirror` copies on local disk.
 - `/:repo/plans` — markdown under `plans/`, rendered and commentable
 - `/:repo/board` — markdown under `tasks/` as a drag-and-drop kanban board
 - `/:repo/ci` — recent CI runs and their logs
-- `/:repo/traces` — agent sessions: the transcript that produced each commit
-- `/:repo/traces` — agent sessions, each linked to the commits it produced
-- `/:repo/prompts` — every prompt you have written, searchable
+- `/:repo/agent` — agent sessions, each linked to the commits it produced, over a search
+  across every prompt you have written
 - `/brain` — the whole tailnet's work state as JSON
 
 ## Requirements
@@ -218,28 +217,38 @@ session. No commit trailers, nothing for the agent to remember.
 Transcripts live in SQLite and under `NASHCODE_TRACES`, not in git. They are large and
 append-heavy; committing them would bloat every clone. The link to git is the commit SHA.
 
-`/:repo/traces` lists sessions. A session page renders the transcript with its commits
-inline, and a commit's row on the branch page links back to the conversation that wrote
-it. `GET /:repo/commits/:sha/trace` answers the same question as JSON.
+`/:repo/agent` lists sessions, newest first, each titled by its first prompt and counted
+by its events and commits. `/:repo/agent/:session` reads one run as the conversation it
+was: prompts and replies as markdown, thinking folded away, each tool call with the one
+argument worth reading, results folded except the errors, and every file edit rendered as
+a diff by the same `@pierre/diffs` pipeline the branch page uses. The diff comes from the
+transcript, not from git, so unpushed and since-rewritten changes still display. A
+commit's row on the branch page links back to the conversation that wrote it, and
+`GET /:repo/commits/:sha/trace` answers the same question as JSON.
+
+The renderer reads two shapes natively: live hook events (`prompt`, `tool_name`,
+`tool_input`) and raw Claude Code transcript lines (`type` plus `message.content` block
+arrays). Anything else falls back to a one-line summary, never a blank row.
 
 One warning: a transcript contains whatever the agent saw, secrets included. nashcode does
 not redact. The tailnet is the perimeter here as everywhere else.
 
-### Prompts
+### Searching your prompts
 
-Your prompts are the most re-readable part of a trace, so they get their own page.
-`/:repo/prompts` lists every prompt written in that repo, newest first, each linked to the
-session it came from and marked when that session produced a commit. `?q=` searches by
-substring, `?session=` narrows to one run.
-
-The same URL answers JSON, so your prompt library is greppable:
+The search box on `/:repo/agent` runs over every prompt written in that repo. `?q=`
+filters by substring and `?session=` narrows to one run. The same URL answers JSON, so
+your prompt library is greppable:
 
 ```sh
-curl -s -H 'accept: application/json' "http://nashcode.example/alpha/prompts?q=retry"
+curl -s -H 'accept: application/json' "http://nashcode.example/alpha/agent?q=retry"
 ```
 
 A prompt is any recorded event whose payload carries a `prompt` field, so this works for
 any harness that reports one.
+
+`/:repo/traces`, `/:repo/traces/:session`, and `/:repo/prompts` moved here: a browser gets
+a 301 to the `/agent` equivalent. Their JSON keeps answering at the old paths, because
+agents push to and poll them.
 
 ### Wiring an agent
 

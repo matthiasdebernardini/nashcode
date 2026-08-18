@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{get, get_json, post_json, request, simple_bed, stacked_fixture};
+use common::{get, get_json, post_json, redirect, request, simple_bed, stacked_fixture};
 use topcoat::router::Method;
 
 /// The events a real agent run produces around one commit.
@@ -94,29 +94,162 @@ async fn the_same_batch_twice_stores_one_copy() {
 }
 
 #[tokio::test]
-async fn the_session_page_renders_the_transcript_and_its_commits() {
+async fn the_session_page_renders_the_conversation_and_its_commits() {
     let bed = simple_bed(|root| stacked_fixture(root, "demo"));
     bed.mirrors.refresh("demo").await;
     let before = bed.remote_tip("demo", "main");
     let after = bed.remote_tip("demo", "part-1");
     post_json(&bed.router, "/demo/traces/events", session_events(&before, &after)).await;
 
-    let (status, body) = get(&bed.router, "/demo/traces/sess-1").await;
+    let (status, body) = get(&bed.router, "/demo/agent/sess-1").await;
     assert_eq!(status, 200);
     // The prompt and the tool calls read as themselves, not as raw hook names.
     assert!(body.contains("add a retry note"), "the prompt renders");
-    assert!(body.contains("Edit: plans/api.md"), "the edit renders with its file");
-    assert!(body.contains("Bash: git commit -am plan"), "the command renders");
+    assert!(body.contains("plans/api.md"), "the edit names its file");
+    assert!(body.contains("git commit -am plan"), "the command renders");
     // And the commit it produced is shown inline.
     assert!(body.contains("committed"), "the commit is marked where it happened");
     assert!(body.contains(&after[..8]), "the sha is shown");
 
-    // The index lists the session with its counts.
-    let (status, body) = get(&bed.router, "/demo/traces").await;
+    // The index lists the session under its first prompt, with its counts.
+    let (status, body) = get(&bed.router, "/demo/agent").await;
     assert_eq!(status, 200);
     assert!(body.contains("sess-1"));
+    assert!(body.contains("add a retry note"), "the first prompt titles the session");
     assert!(body.contains("4 events"));
     assert!(body.contains("1 commits"));
+}
+
+/// Two tabs became one. The old URLs keep working for anyone who bookmarked them.
+#[tokio::test]
+async fn the_old_pages_redirect_into_the_agent_tab() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+    let before = bed.remote_tip("demo", "main");
+    let after = bed.remote_tip("demo", "part-1");
+    post_json(&bed.router, "/demo/traces/events", session_events(&before, &after)).await;
+
+    for (from, to) in [
+        ("/demo/traces", "/demo/agent"),
+        ("/demo/traces/sess-1", "/demo/agent/sess-1"),
+        ("/demo/prompts", "/demo/agent"),
+        ("/demo/prompts?q=retry", "/demo/agent?q=retry"),
+    ] {
+        let (status, location) = redirect(&bed.router, from).await;
+        assert_eq!(status, 301, "{from} moved permanently");
+        assert_eq!(location.as_deref(), Some(to), "{from} points at the Agent tab");
+    }
+
+    // A repo nobody configured is still a 404, not a redirect into nothing.
+    let (status, _) = redirect(&bed.router, "/ghost/traces").await;
+    assert_eq!(status, 404);
+}
+
+/// The pages moved; the API did not. Agents push to and poll these paths.
+#[tokio::test]
+async fn the_old_json_apis_keep_their_paths() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+    let before = bed.remote_tip("demo", "main");
+    let after = bed.remote_tip("demo", "part-1");
+    post_json(&bed.router, "/demo/traces/events", session_events(&before, &after)).await;
+
+    let (status, sessions) = get_json(&bed.router, "/demo/traces").await;
+    assert_eq!(status, 200);
+    let (status, session) = get_json(&bed.router, "/demo/traces/sess-1").await;
+    assert_eq!(status, 200);
+    let (status, prompts) = get_json(&bed.router, "/demo/prompts?q=retry").await;
+    assert_eq!(status, 200);
+
+    // And `/agent` answers the prompt search with byte-identical JSON.
+    let (status, same) = get_json(&bed.router, "/demo/agent?q=retry").await;
+    assert_eq!(status, 200);
+    assert_eq!(same, prompts, "one search, one answer, two URLs");
+
+    let sessions: serde_json::Value = serde_json::from_str(&sessions).expect("json");
+    assert_eq!(sessions[0]["session"], "sess-1");
+    let session: serde_json::Value = serde_json::from_str(&session).expect("json");
+    assert_eq!(session["events"].as_array().expect("events").len(), 4);
+}
+
+/// A backfilled Claude Code transcript is a different shape from a live hook event, and
+/// it has to read as the same conversation.
+#[tokio::test]
+async fn a_raw_transcript_session_reads_as_a_conversation() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+
+    let (status, body) = post_json(
+        &bed.router,
+        "/demo/traces/events",
+        serde_json::json!({
+            "session": "sess-raw",
+            "agent": "claude-code",
+            "events": [
+                {"seq": 1, "kind": "user", "payload": {
+                    "type": "user",
+                    "prompt": "rename the project",
+                    "message": {"role": "user", "content": "rename the project"}
+                }},
+                {"seq": 2, "kind": "assistant", "payload": {
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": "weigh the rename options"},
+                        {"type": "text", "text": "Renaming it now."},
+                        {"type": "tool_use", "id": "toolu_1", "name": "Edit",
+                         "input": {"file_path": "/repo/src/web.rs",
+                                   "old_string": "old", "new_string": "new"}}
+                    ]}
+                }},
+                {"seq": 3, "kind": "user", "payload": {
+                    "type": "user",
+                    "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "done"}
+                    ]},
+                    "toolUseResult": {
+                        "filePath": "/repo/src/web.rs",
+                        "structuredPatch": [{
+                            "oldStart": 12, "oldLines": 1, "newStart": 12, "newLines": 1,
+                            "lines": ["-old", "+new"]
+                        }]
+                    }
+                }},
+                {"seq": 4, "kind": "user", "payload": {
+                    "type": "user",
+                    "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_2",
+                         "content": "String to replace not found", "is_error": true}
+                    ]}
+                }}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = get(&bed.router, "/demo/agent/sess-raw").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("rename the project"), "the person's words render");
+    assert!(body.contains("Renaming it now."), "so do the agent's");
+    assert!(body.contains("weigh the rename options"), "thinking is present");
+    assert!(body.contains("Thinking</summary>"), "and folded away");
+    assert!(body.contains("/repo/src/web.rs"), "the edit names its file");
+
+    // The file change renders as a Pierre diff, mounted the way the branch page does.
+    assert!(body.contains("nashcode-diff-mount"), "the diff has a mount");
+    assert!(body.contains("nashcode-diff-data"), "and a payload for the client");
+    assert!(body.contains("@@ -12,1 +12,1 @@"), "built from the transcript's own patch");
+
+    // A failed call is open and styled as an error; a successful one stays folded.
+    assert!(body.contains("String to replace not found"));
+    assert!(
+        body.contains(r#"<details class="mt-1 flash flash-error" open="open">"#),
+        "an error result renders open and styled as an error"
+    );
+    assert!(
+        body.contains(r#"<details class="mt-1"><summary class="color-fg-muted text-small"><i class="ph ph-arrow-elbow-down-right"#),
+        "a result that worked stays folded"
+    );
 }
 
 #[tokio::test]
@@ -195,7 +328,9 @@ async fn bad_input_is_refused_without_a_500() {
     assert_eq!(status, 404);
 
     // A session that was never recorded.
-    let (status, _) = get(&bed.router, "/demo/traces/never-happened").await;
+    let (status, _) = get(&bed.router, "/demo/agent/never-happened").await;
+    assert_eq!(status, 404);
+    let (status, _) = get_json(&bed.router, "/demo/traces/never-happened").await;
     assert_eq!(status, 404);
 }
 
@@ -294,7 +429,7 @@ async fn the_hook_records_an_event_against_a_live_server() {
     .expect("join");
     assert!(status.success());
 
-    let (status, body) = get(&bed.router, "/demo/traces/sess-live").await;
+    let (status, body) = get(&bed.router, "/demo/agent/sess-live").await;
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("PostToolUse"), "the event is recorded: {body}");
 
@@ -328,19 +463,18 @@ async fn prompts_are_listed_searchable_and_linked_to_their_session() {
     )
     .await;
 
-    let (status, body) = get(&bed.router, "/demo/prompts").await;
+    let (status, body) = get(&bed.router, "/demo/agent").await;
     assert_eq!(status, 200);
-    assert!(body.contains("add a retry note"), "the first prompt is listed");
-    assert!(body.contains("rewrite the board column ordering"), "so is the second");
-    assert!(body.contains("/demo/traces/sess-1"), "each prompt links into its trace");
-    // The session that produced a commit is marked as such.
-    assert!(body.contains("led to a commit"));
+    assert!(body.contains("add a retry note"), "the first prompt titles its session");
+    assert!(body.contains("rewrite the board column ordering"), "so does the second");
+    assert!(body.contains("/demo/agent/sess-1"), "each session links to its conversation");
 
     // Substring search narrows the list.
-    let (status, body) = get(&bed.router, "/demo/prompts?q=retry").await;
+    let (status, body) = get(&bed.router, "/demo/agent?q=retry").await;
     assert_eq!(status, 200);
     assert!(body.contains("add a retry note"));
     assert!(!body.contains("rewrite the board column ordering"), "search excludes the rest");
+    assert!(!body.contains("sess-2"), "and the session it belongs to");
 
     // And the same URL is an API.
     let (status, body) = get_json(&bed.router, "/demo/prompts?q=retry").await;
