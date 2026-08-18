@@ -270,10 +270,13 @@ pub async fn trace_show(session: &str, repo: Option<String>) -> i32 {
         Ok(response) if response.status().is_success() => {
             let body: serde_json::Value = response.json().await.unwrap_or_default();
             for event in body["events"].as_array().into_iter().flatten() {
-                let payload = event["payload"].as_str().unwrap_or("");
+                let payload: serde_json::Value = event["payload"]
+                    .as_str()
+                    .and_then(|raw| serde_json::from_str(raw).ok())
+                    .unwrap_or_else(|| event["payload"].clone());
                 let summary = crate::traces::summarize(
                     event["kind"].as_str().unwrap_or("event"),
-                    payload,
+                    &payload,
                 );
                 println!(
                     "#{:<4} {:<20} {}",

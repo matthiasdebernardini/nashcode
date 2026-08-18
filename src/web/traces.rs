@@ -10,7 +10,7 @@ use topcoat::router::{
 use topcoat::view::view;
 
 use crate::db::{TraceEvent, TraceSession};
-use crate::traces::{self, BatchIn};
+use crate::traces::{self, TraceBatch};
 use crate::web::components::shell;
 use crate::web::{app, repo_ctx};
 
@@ -37,6 +37,16 @@ fn wants_json(cx: &Cx) -> bool {
         .is_some_and(|accept| accept.starts_with("application/json"))
 }
 
+/// Session ids arrive from other programs; keep the URL surface boring.
+fn valid_session(session: &str) -> bool {
+    !session.is_empty()
+        && session.len() <= 128
+        && session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && !session.starts_with('.')
+}
+
 fn known_repo(cx: &Cx, name: &str) -> Result<()> {
     if app(cx).config.knows_repo(name) {
         Ok(())
@@ -49,10 +59,10 @@ fn known_repo(cx: &Cx, name: &str) -> Result<()> {
 
 /// `POST /{repo}/traces/events` — a batch of events. Idempotent on `(session, seq)`.
 #[route(POST "/{repo}/traces/events")]
-async fn post_events(cx: &Cx, Json(batch): Json<BatchIn>) -> Result<Response> {
+async fn post_events(cx: &Cx, Json(batch): Json<TraceBatch>) -> Result<Response> {
     let name = path_param::<Repo>(cx).to_owned();
     known_repo(cx, &name)?;
-    if !traces::valid_session(&batch.session) {
+    if !valid_session(&batch.session) {
         return Err(bad_request("session id must be [A-Za-z0-9._-], not starting with a dot").into());
     }
     if batch.events.is_empty() {
@@ -63,7 +73,7 @@ async fn post_events(cx: &Cx, Json(batch): Json<BatchIn>) -> Result<Response> {
     }
 
     let mirror = app(cx).mirrors.repo(&name);
-    let outcome = traces::record_batch(&app(cx).db, &mirror, &name, &batch).await?;
+    let outcome = traces::ingest(&app(cx).db, &name, &batch, Some(&mirror)).await?;
     Ok(json_response(StatusCode::OK, serde_json::to_string(&outcome)?))
 }
 
@@ -73,13 +83,18 @@ async fn post_transcript(cx: &Cx, body: topcoat::router::request::Bytes) -> Resu
     let name = path_param::<Repo>(cx).to_owned();
     known_repo(cx, &name)?;
     let session = path_param::<Session>(cx).to_owned();
-    if !traces::valid_session(&session) {
+    if !valid_session(&session) {
         return Err(bad_request("bad session id").into());
     }
     if body.is_empty() {
         return Err(bad_request("empty transcript").into());
     }
-    traces::store_transcript(&app(cx).config, &name, &session, &body)
+    let path = traces::transcript_path(&app(cx).config.traces, &name, &session);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| bad_request(format!("cannot store transcript: {error}")))?;
+    }
+    std::fs::write(&path, &body)
         .map_err(|error| bad_request(format!("cannot store transcript: {error}")))?;
     Ok(json_response(
         StatusCode::OK,
@@ -95,10 +110,10 @@ async fn get_transcript(cx: &Cx) -> Result<Response> {
     let name = path_param::<Repo>(cx).to_owned();
     known_repo(cx, &name)?;
     let session = path_param::<Session>(cx).to_owned();
-    if !traces::valid_session(&session) {
+    if !valid_session(&session) {
         return Err(bad_request("bad session id").into());
     }
-    let path = traces::transcript_path(&app(cx).config, &name, &session);
+    let path = traces::transcript_path(&app(cx).config.traces, &name, &session);
     let Ok(bytes) = std::fs::read(&path) else {
         return Err(topcoat::router::error::not_found().into());
     };
@@ -179,7 +194,7 @@ async fn trace_session_page(cx: &Cx) -> Result<Response> {
     let name = path_param::<Repo>(cx).to_owned();
     let ctx = repo_ctx(cx, &name).await?;
     let session = path_param::<Session>(cx).to_owned();
-    if !traces::valid_session(&session) {
+    if !valid_session(&session) {
         return Err(bad_request("bad session id").into());
     }
     let events = app(cx).db.trace_events(&name, &session)?;
@@ -205,7 +220,9 @@ async fn trace_session_page(cx: &Cx) -> Result<Response> {
     let mut rows: Vec<(TraceEvent, String, Vec<String>)> = Vec::new();
     let mut previous_head: Option<String> = None;
     for event in events {
-        let summary = traces::summarize(&event.kind, &event.payload);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&event.payload).unwrap_or_default();
+        let summary = traces::summarize(&event.kind, &parsed);
         let mut produced = Vec::new();
         if let Some(head) = &event.head {
             if previous_head.as_deref().is_some_and(|prev| prev != head)
@@ -219,7 +236,7 @@ async fn trace_session_page(cx: &Cx) -> Result<Response> {
     }
 
     let transcript_exists =
-        traces::transcript_path(&app(cx).config, &name, &session).exists();
+        traces::transcript_path(&app(cx).config.traces, &name, &session).exists();
     let page = view! { cx =>
         shell(title: format!("{name} · trace {session}"), repo: name.clone(), active: "traces", status: Some(ctx.status.clone()),
             <div class="d-flex flex-items-center gap-2 mb-2">
