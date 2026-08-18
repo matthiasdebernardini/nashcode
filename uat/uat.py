@@ -318,7 +318,7 @@ def push_and_wait(bare, branch, expect_sha, page):
 def t1_pages(bare):
     print("T1 pages")
     pages = ["/", "/demo", "/demo/stacks", "/demo/plans", "/demo/board", "/demo/ci",
-             "/demo/feat/retry-core", "/demo/traces", "/demo/prompts"]
+             "/demo/feat/retry-core", "/demo/agent"]
     for page in pages:
         status, _ = get(page)
         check("T1", f"GET {page} is 200", status == 200, f"got {status}")
@@ -699,7 +699,7 @@ def t12_traces(root, bare):
     status, linked = jget(f"/demo/commits/{sha2}/trace")
     check("T12", "commit maps back to its session",
           status == 200 and session in json.dumps(linked), f"{status} {linked}")
-    status, body = get(f"/demo/traces/{session}")
+    status, body = get(f"/demo/agent/{session}")
     check("T12", "session page renders the prompt",
           status == 200 and b"count how many fetches" in body)
 
@@ -730,13 +730,13 @@ def t12_traces(root, bare):
 
 def t17_prompts(root):
     print("T17 prompts page")
-    status, body = get("/demo/prompts")
+    status, body = get("/demo/agent")
     check("T17", "prompts page renders", status == 200, f"got {status}")
     check("T17", "hook-recorded prompt listed", b"count how many fetches" in body)
 
-    status, body = get("/demo/prompts?q=fetches")
+    status, body = get("/demo/agent?q=fetches")
     check("T17", "?q= keeps matching prompts", b"count how many fetches" in body)
-    status, body = get("/demo/prompts?q=zzz-no-such-prompt")
+    status, body = get("/demo/agent?q=zzz-no-such-prompt")
     check("T17", "?q= filters out non-matches", b"count how many fetches" not in body)
 
     _, rows = jget("/demo/prompts")

@@ -1162,7 +1162,7 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
                         <code class="commit-sha">(commit.short.clone())</code>
                         <span>(commit.subject.clone())</span>
                         if let Some(session) = &trace_session {
-                            <a class="Link--secondary text-small" href=(format!("/{n}/traces/{session}"))>
+                            <a class="Link--secondary text-small" href=(format!("/{n}/agent/{session}"))>
                                 <i class="ph ph-robot"></i>" trace"
                             </a>
                         }
