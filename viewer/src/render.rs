@@ -7,6 +7,10 @@
 //!   PR view.
 //!
 //! Both passes only ever *add* links; they never change the text.
+//!
+//! The wiki adds a third pass, and it is the one exception: a page rendered through
+//! [`markdown_in_docs`] resolves the author's *relative* links against the document's
+//! own directory, so `../guide.md` next to it on GitHub reaches the same file here.
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
@@ -26,9 +30,43 @@ pub fn branch_url(repo: &str, branch: &str) -> String {
     format!("/{repo}/{branch}")
 }
 
+/// Where a markdown file reads in the wiki. Every markdown file in the repo has one.
+pub fn docs_url(repo: &str, path: &str) -> String {
+    format!("/{repo}/docs/{path}")
+}
+
+/// Is this path a markdown file, by its extension?
+pub fn is_markdown_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".md") || lower.ends_with(".markdown")
+}
+
 /// Render markdown to HTML, autolinking against the repo's document index and branch
 /// list when they are provided.
 pub fn markdown(source: &str, repo: &str, index: Option<&DocIndex>, branches: &[String]) -> String {
+    markdown_with(source, repo, index, branches, None)
+}
+
+/// Render one wiki page. `dir` is the document's own repo-relative directory (empty at
+/// the root), and relative links resolve against it: markdown targets go to `/docs/`,
+/// everything else to `/blob/`.
+pub fn markdown_in_docs(
+    source: &str,
+    repo: &str,
+    index: Option<&DocIndex>,
+    branches: &[String],
+    dir: &str,
+) -> String {
+    markdown_with(source, repo, index, branches, Some(dir))
+}
+
+fn markdown_with(
+    source: &str,
+    repo: &str,
+    index: Option<&DocIndex>,
+    branches: &[String],
+    docs_dir: Option<&str>,
+) -> String {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let parser = Parser::new_ext(source, options);
 
@@ -48,7 +86,15 @@ pub fn markdown(source: &str, repo: &str, index: Option<&DocIndex>, branches: &[
             // replaced, never passed through.
             Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
                 verbatim_depth += 1;
-                let dest_url = if allowed_url(&dest_url) { dest_url } else { "#".into() };
+                let dest_url = if !allowed_url(&dest_url) {
+                    "#".into()
+                } else if let Some(dir) = docs_dir
+                    && let Some(rewritten) = resolve_doc_link(&dest_url, repo, dir)
+                {
+                    rewritten.into()
+                } else {
+                    dest_url
+                };
                 events.push(Event::Start(Tag::Link { link_type, dest_url, title, id }));
             }
             Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
@@ -110,6 +156,54 @@ fn allowed_url(url: &str) -> bool {
         }
         _ => true,
     }
+}
+
+/// Does this destination carry a scheme (`https:`, `mailto:`)? A colon only introduces
+/// one when it comes before any `/`, `?`, or `#`.
+fn has_scheme(url: &str) -> bool {
+    match url.find(':') {
+        Some(colon) => colon < url.find(['/', '?', '#']).unwrap_or(usize::MAX),
+        None => false,
+    }
+}
+
+/// Rewrite one relative link inside a wiki page to the viewer's own URL for it.
+///
+/// `dir` is the rendering document's directory. Markdown targets land on `/docs/`,
+/// everything else on `/blob/`, and a `#fragment` or `?query` rides along untouched.
+/// Absolute URLs, site-root paths, and bare fragments are left exactly as written; so
+/// is anything that would climb above the repo root, because there is nothing there.
+fn resolve_doc_link(dest: &str, repo: &str, dir: &str) -> Option<String> {
+    if dest.is_empty() || dest.starts_with('#') || dest.starts_with('/') || has_scheme(dest) {
+        return None;
+    }
+    let cut = dest.find(['#', '?']).unwrap_or(dest.len());
+    let (path, suffix) = dest.split_at(cut);
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut segments: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            other => segments.push(other),
+        }
+    }
+    let resolved = segments.join("/");
+    if resolved.is_empty() {
+        return None;
+    }
+
+    let base = if is_markdown_path(&resolved) {
+        docs_url(repo, &resolved)
+    } else {
+        format!("/{repo}/blob/{resolved}")
+    };
+    Some(format!("{base}{suffix}"))
 }
 
 /// Split a text node on whitespace and link every token that names an existing
@@ -302,6 +396,46 @@ mod tests {
         assert!(html.contains("href=\"/demo/x\""), "{html}");
         assert!(html.contains("href=\"mailto:x@example.invalid\""), "{html}");
         assert!(html.contains("src=\"https://example.invalid/i.png\""), "{html}");
+    }
+
+    #[test]
+    fn wiki_relative_links_resolve_against_the_pages_own_directory() {
+        let html = markdown_in_docs("[a](sibling.md) [b](../top.md)", "demo", None, &[], "docs/deep");
+        assert!(html.contains("href=\"/demo/docs/docs/deep/sibling.md\""), "{html}");
+        assert!(html.contains("href=\"/demo/docs/docs/top.md\""), "{html}");
+    }
+
+    #[test]
+    fn a_wiki_link_to_a_non_markdown_file_goes_to_the_blob_view() {
+        let html = markdown_in_docs("[src](../src/lib.rs)", "demo", None, &[], "docs");
+        assert!(html.contains("href=\"/demo/blob/src/lib.rs\""), "{html}");
+    }
+
+    #[test]
+    fn a_wiki_link_keeps_its_fragment_and_leaves_absolute_links_alone() {
+        let html = markdown_in_docs(
+            "[a](guide.md#setup) [b](/demo/stacks) [c](https://example.invalid/x) [d](#here)",
+            "demo",
+            None,
+            &[],
+            "docs",
+        );
+        assert!(html.contains("href=\"/demo/docs/docs/guide.md#setup\""), "{html}");
+        assert!(html.contains("href=\"/demo/stacks\""), "{html}");
+        assert!(html.contains("href=\"https://example.invalid/x\""), "{html}");
+        assert!(html.contains("href=\"#here\""), "{html}");
+    }
+
+    #[test]
+    fn a_wiki_link_climbing_above_the_repo_root_is_left_as_written() {
+        let html = markdown_in_docs("[x](../../etc/passwd)", "demo", None, &[], "docs");
+        assert!(html.contains("href=\"../../etc/passwd\""), "{html}");
+    }
+
+    #[test]
+    fn plans_pages_still_leave_relative_links_alone() {
+        let html = markdown("[a](sibling.md)", "demo", None, &[]);
+        assert!(html.contains("href=\"sibling.md\""), "{html}");
     }
 
     #[test]
