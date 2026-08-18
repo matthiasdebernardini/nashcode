@@ -79,7 +79,7 @@ Two pieces:
   this is a reader, not a forge.
 - **Bind** `127.0.0.1:8090` (tailscale serve fronts it on :8443). Config via env only:
   `DGIT_URL`, `GIT_TOKEN`, `NASHGIT_REPOS`, `NASHGIT_MIRRORS`, `NASHGIT_BIND`,
-  `NASHGIT_DB`, `NASHGIT_WEBHOOKS`, `NASHGIT_CI_LOGS`.
+  `NASHGIT_DB`, `NASHGIT_WEBHOOKS`, `NASHGIT_CI_LOGS`, `NASHGIT_TRACES`, `NASHGIT_URL`.
 
 ## Acceptance criteria
 
@@ -105,6 +105,9 @@ Two pieces:
 - Links: a back-link scan on a fixture repo wires plan↔card↔branch in both directions, a
   dangling ref renders as missing without an error, and the merge tests cover a merge
   flipping its card to `done`.
+- Traces: recording a session's events attributes the commits made between them to that
+  session; the same batch posted twice stores one copy; `nashgit hook` exits 0 with the
+  server down and with garbage on stdin; a session page renders its events and its commits.
 - Brain: `/brain` aggregates a two-repo fixture into the documented shape; `/brain/ask` is
   tested against a stub HTTP server standing in for the Anthropic API (success, refusal,
   429 passthrough) with no real API calls, and the route 404s without `ANTHROPIC_API_KEY`.
@@ -229,6 +232,60 @@ SQLite.**
   ordered by `created_at` (then `id`), so an agent can poll with a `since` cursor and never
   miss or repeat a comment. Response shape is the POST body plus `id`, `author`,
   `created_at`, and `commit`. Document both in the README.
+
+## Traces
+
+The transcript and the code are the same artifact seen from two sides. A commit answers
+"what changed"; the trace that produced it answers "why, and what was tried first". nashgit
+stores both and lets you cross-reference them.
+
+- **A trace is a session.** One agent run: its prompts, its tool calls, and the commits it
+  produced. Sessions are identified by the agent harness's own session id.
+- **Storage is nashgit's, not git's.** Traces live in SQLite plus raw transcript files under
+  `$NASHGIT_TRACES` (default `$NASHGIT_MIRRORS/traces`). They are append-heavy and large;
+  committing them would bloat every clone and fight the plans/cards model, where git is the
+  store precisely because those files are small and human-edited. The *link* is git-native:
+  a commit SHA.
+- **Linking is automatic and needs nothing from the agent.** Every recorded event carries
+  the repo's `HEAD` at the moment it happened. When `HEAD` moves between two events of a
+  session, that commit is attributed to the session. No agent cooperation, no convention to
+  remember, no commit-message trailer.
+- **Pages:**
+  - `/:repo/traces` — sessions, newest first: agent, when, event count, commits produced.
+  - `/:repo/traces/:session` — the transcript rendered top to bottom (prompts, tool calls,
+    results) with the commits it produced linked inline.
+  - The branch page and every commit list gain a trace link where a session is known, so
+    you get from a diff to the conversation that wrote it in one click.
+- **API:**
+  - `POST /:repo/traces/events` — a batch of events. Idempotent on `(session, seq)`, so a
+    retry never double-writes.
+  - `POST /:repo/traces/:session/transcript` — the raw transcript, stored verbatim.
+  - `GET /:repo/traces`, `GET /:repo/traces/:session` — read back as JSON.
+  - `GET /:repo/commits/:sha/trace` — the session(s) that produced a commit.
+- **Privacy:** a transcript can contain anything the agent saw, secrets included. nashgit
+  does not redact. The tailnet is the perimeter here as everywhere else, and that is a
+  deliberate, documented choice rather than an oversight.
+
+## CLI
+
+The same binary is the server and the agent-side client, so there is one thing to install.
+
+- `nashgit serve` — run the viewer. The default with no arguments, so existing service
+  files keep working.
+- `nashgit hook` — read one agent-harness hook payload as JSON on stdin, record it, exit 0.
+  **It must never fail an agent's turn**: unreachable server, malformed payload, or no
+  configured repo all exit 0 quietly. Errors go to stderr only when `NASHGIT_DEBUG` is set.
+  This is what a Claude Code `PreToolUse`/`PostToolUse`/`UserPromptSubmit`/`Stop` hook runs.
+- `nashgit trace push` — upload a full transcript file for a session, for backfilling a run
+  that happened without the hook installed.
+- `nashgit trace list` / `nashgit trace show <session>` — read traces from the terminal.
+- `nashgit doctor` — print what is configured and what is missing, and exit non-zero when
+  the server is unreachable.
+
+The client half reads `NASHGIT_URL` (default `http://127.0.0.1:8090`) and infers the repo
+from the git remote of the working directory, falling back to `NASHGIT_REPO`.
+
+Both README and AGENTS.md document the hook wiring with a copy-pasteable settings snippet.
 
 ## Brain
 
