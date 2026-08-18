@@ -137,38 +137,32 @@ fn sanitize(session: &str) -> String {
 
 /// A one-line description of an event, for the session page and `trace show`.
 pub fn summarize(kind: &str, payload: &serde_json::Value) -> String {
-    let field = |name: &str| payload.get(name).and_then(|v| v.as_str()).unwrap_or("");
+    // Read the payload, not the event name. Harnesses name their hooks differently
+    // (`UserPromptSubmit`, `prompt`, `PreToolUse`, `tool`), but they all carry the same
+    // handful of fields, so matching on the fields works across all of them.
+    let text = payload.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+    if !text.is_empty() {
+        return clip(text);
+    }
 
-    let text = match kind {
-        "prompt" => field("prompt"),
-        "tool" | "result" => {
-            let tool = field("tool_name");
-            if !tool.is_empty() {
-                return match tool {
-                    "Bash" => {
-                        let command = payload
-                            .get("tool_input")
-                            .and_then(|i| i.get("command"))
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("");
-                        clip(&format!("Bash: {command}"))
-                    }
-                    other => {
-                        let path = payload
-                            .get("tool_input")
-                            .and_then(|i| i.get("file_path").or_else(|| i.get("path")))
-                            .and_then(|p| p.as_str())
-                            .unwrap_or("");
-                        clip(&format!("{other}{}", if path.is_empty() { String::new() } else { format!(": {path}") }))
-                    }
-                };
-            }
-            ""
-        }
-        _ => "",
-    };
+    if let Some(tool) = payload.get("tool_name").and_then(|v| v.as_str())
+        && !tool.is_empty()
+    {
+        let input = payload.get("tool_input");
+        let arg = |name: &str| input.and_then(|i| i.get(name)).and_then(|v| v.as_str());
+        let detail = match tool {
+            "Bash" => arg("command").unwrap_or(""),
+            _ => arg("file_path").or_else(|| arg("path")).or_else(|| arg("pattern")).unwrap_or(""),
+        };
+        return if detail.is_empty() {
+            clip(tool)
+        } else {
+            clip(&format!("{tool}: {detail}"))
+        };
+    }
 
-    if text.is_empty() { kind.to_owned() } else { clip(text) }
+    // Nothing recognizable: the event name is still worth showing.
+    clip(kind)
 }
 
 fn clip(text: &str) -> String {
