@@ -54,7 +54,26 @@ Two pieces:
   information architecture: a repo header with tab nav (Code / Stacks / Plans / CI),
   `Box`-style bordered lists, counter pills, branch labels, and GitHub-style file headers
   wrapping the `@pierre/diffs` components. Light and dark both work, switched by
-  `prefers-color-scheme` through Primer's color modes. Components are project-owned
+  `prefers-color-scheme` through Primer's color modes.
+  - **Icons: [Phosphor](https://phosphoricons.com)** everywhere an icon is needed —
+    branch, commit, comment, CI dots, board columns, tabs. Bundled at build time from
+    npm (`@phosphor-icons/web`), never a CDN: the app must work tailnet-only offline.
+    One weight (regular), used consistently.
+  - **Type: a three-tier hierarchy, all self-hosted in the asset bundle with license
+    files, no CDN.**
+    1. *Code surfaces* — diffs (`@pierre/diffs` content), file/blob views, CI logs,
+       commit hashes, anything read as code — **IBM Plex Mono** (OFL; npm
+       `@ibm/plex-mono`), wired into the `@pierre/diffs`/Shiki rendering as the code
+       font-family.
+    2. *Personality surfaces* — headings, tab nav, buttons, labels, counters, branch
+       pills — **[Departure Mono](https://departuremono.com)** (OFL; vendored woff2
+       with its license, since npm has no official package).
+    3. *Long-form markdown body* (plans, cards, comments) — Primer's system font
+       stack, where a pixel font would tire the eyes at paragraph length.
+  - This refines, not replaces, the Primer direction: Primer's tokens still own color,
+    spacing, and layout. Where Primer ships octicon-specific or font-stack rules that
+    fight this, override them in the small project-owned CSS layer — don't fork Primer.
+  Components are project-owned
   `#[component]` modules under `src/components/` (the topcoat-ui copy-in pattern), so they
   stay ours to restyle. No auth of its own (the tailnet is the perimeter). Keep it small —
   this is a reader, not a forge.

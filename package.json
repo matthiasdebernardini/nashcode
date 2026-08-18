@@ -9,6 +9,8 @@
     "build:css": "esbuild js/app.css --bundle --minify --loader:.woff=file --loader:.woff2=file --loader:.svg=dataurl --outfile=dist/nashgit.css"
   },
   "dependencies": {
+    "@ibm/plex-mono": "^2.5.0",
+    "@phosphor-icons/web": "^2.1.2",
     "@pierre/diffs": "^1.3.5",
     "@primer/css": "^22.3.0",
     "@primer/primitives": "^11.10.0"

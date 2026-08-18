@@ -22,6 +22,13 @@ pub struct Config {
     pub ci_logs: PathBuf,
     /// Event name -> webhook URLs.
     pub webhooks: BTreeMap<String, Vec<String>>,
+    /// `ANTHROPIC_API_KEY`. `/brain/ask` answers 404 without it.
+    pub anthropic_key: Option<String>,
+    /// Claude API base URL. `NASHGIT_ANTHROPIC_URL` overrides it so tests can point at
+    /// a stub.
+    pub anthropic_url: String,
+    /// `NASHGIT_BRAIN_MODEL`.
+    pub brain_model: String,
 }
 
 fn env_or(key: &str, fallback: &str) -> String {
@@ -74,6 +81,13 @@ impl Config {
             db_path,
             ci_logs,
             webhooks,
+            anthropic_key: std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|key| !key.trim().is_empty()),
+            anthropic_url: env_or("NASHGIT_ANTHROPIC_URL", "https://api.anthropic.com")
+                .trim_end_matches('/')
+                .to_owned(),
+            brain_model: env_or("NASHGIT_BRAIN_MODEL", "claude-opus-5"),
         }
     }
 

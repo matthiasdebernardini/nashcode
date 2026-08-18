@@ -250,6 +250,9 @@ mod tests {
             db_path: dir.path().join("db.sqlite"),
             ci_logs: dir.path().join("logs"),
             webhooks: Default::default(),
+            anthropic_key: None,
+            anthropic_url: "https://api.anthropic.com".to_owned(),
+            brain_model: "claude-opus-5".to_owned(),
         };
         let mirrors = Mirrors::new(Arc::new(config), Db::in_memory().unwrap());
 
