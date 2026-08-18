@@ -458,6 +458,44 @@ impl Db {
         })
     }
 
+    /// Every prompt recorded in a repo, newest first.
+    ///
+    /// A prompt is any event whose payload carries a `prompt` field, so this works for
+    /// any harness that reports one without needing to know its hook names.
+    pub fn prompts(
+        &self,
+        repo: &str,
+        query: Option<&str>,
+        session: Option<&str>,
+        limit: usize,
+    ) -> DbResult<Vec<Prompt>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT session, seq, json_extract(payload, '$.prompt'), head, agent, created_at
+                 FROM trace_events
+                 WHERE repo = ?1
+                   AND json_extract(payload, '$.prompt') IS NOT NULL
+                   AND (?2 IS NULL OR json_extract(payload, '$.prompt') LIKE '%' || ?2 || '%')
+                   AND (?3 IS NULL OR session = ?3)
+                 ORDER BY created_at DESC, seq DESC
+                 LIMIT ?4",
+            )?;
+            let rows = statement
+                .query_map(params![repo, query, session, limit as i64], |row| {
+                    Ok(Prompt {
+                        session: row.get(0)?,
+                        seq: row.get(1)?,
+                        text: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                        head: row.get(3)?,
+                        agent: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                })?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
     /// The session(s) that produced a commit.
     pub fn trace_sessions_for_commit(&self, repo: &str, sha: &str) -> DbResult<Vec<String>> {
         self.with(|conn| {
@@ -577,6 +615,18 @@ pub struct TraceEvent {
     pub seq: i64,
     pub kind: String,
     pub payload: String,
+    pub head: Option<String>,
+    pub agent: Option<String>,
+    pub created_at: String,
+}
+
+/// One prompt a person wrote, with enough context to jump back into its trace.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Prompt {
+    pub session: String,
+    pub seq: i64,
+    pub text: String,
+    /// The repo HEAD when it was written, so the page can show what followed.
     pub head: Option<String>,
     pub agent: Option<String>,
     pub created_at: String,

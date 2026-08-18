@@ -301,3 +301,59 @@ async fn the_hook_records_an_event_against_a_live_server() {
     let _ = stop_tx.send(());
     let _ = server.await;
 }
+
+/// Prompts are the most re-readable part of a trace, so they get their own page.
+#[tokio::test]
+async fn prompts_are_listed_searchable_and_linked_to_their_session() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+    let before = bed.remote_tip("demo", "main");
+    let after = bed.remote_tip("demo", "part-1");
+    post_json(&bed.router, "/demo/traces/events", session_events(&before, &after)).await;
+
+    // A second session, so search has something to exclude.
+    post_json(
+        &bed.router,
+        "/demo/traces/events",
+        serde_json::json!({
+            "session": "sess-2",
+            "agent": "claude-code",
+            "events": [{
+                "seq": 1,
+                "kind": "UserPromptSubmit",
+                "head": before,
+                "payload": {"prompt": "rewrite the board column ordering"}
+            }]
+        }),
+    )
+    .await;
+
+    let (status, body) = get(&bed.router, "/demo/prompts").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("add a retry note"), "the first prompt is listed");
+    assert!(body.contains("rewrite the board column ordering"), "so is the second");
+    assert!(body.contains("/demo/traces/sess-1"), "each prompt links into its trace");
+    // The session that produced a commit is marked as such.
+    assert!(body.contains("led to a commit"));
+
+    // Substring search narrows the list.
+    let (status, body) = get(&bed.router, "/demo/prompts?q=retry").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("add a retry note"));
+    assert!(!body.contains("rewrite the board column ordering"), "search excludes the rest");
+
+    // And the same URL is an API.
+    let (status, body) = get_json(&bed.router, "/demo/prompts?q=retry").await;
+    assert_eq!(status, 200);
+    let prompts: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let prompts = prompts.as_array().expect("array");
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0]["session"], "sess-1");
+    assert_eq!(prompts[0]["text"], "add a retry note");
+
+    // Narrowing by session works too.
+    let (_, body) = get_json(&bed.router, "/demo/prompts?session=sess-2").await;
+    let prompts: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(prompts.as_array().expect("array").len(), 1);
+    assert_eq!(prompts[0]["text"], "rewrite the board column ordering");
+}

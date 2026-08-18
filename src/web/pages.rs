@@ -840,6 +840,14 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
                             </button>
                         </form>
                     }
+                    if !is_default && children.is_empty() {
+                        <form method="post" action=(format!("/{name}/{branch}/delete"))>
+                            <button type="submit" class="btn btn-danger"
+                                    onclick=(format!("return confirm('Delete {branch} on the git server?')"))>
+                                <i class="ph ph-trash"></i>" Delete branch"
+                            </button>
+                        </form>
+                    }
                 </div>
                 if !children.is_empty() {
                     <div class="Box-row text-small color-fg-muted d-flex gap-2 flex-items-center">

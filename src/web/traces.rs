@@ -284,3 +284,93 @@ async fn trace_session_page(cx: &Cx) -> Result<Response> {
     }?;
     page.into_response(cx)
 }
+
+// ---- prompts ---------------------------------------------------------------------
+
+#[topcoat::router::query_params(error = bad_request)]
+struct PromptQuery {
+    /// Substring filter over the prompt text.
+    q: Option<String>,
+    /// Narrow to one session.
+    session: Option<String>,
+}
+
+/// `GET /{repo}/prompts` — every prompt written in this repo, newest first.
+///
+/// The prompts are already inside the traces; this page exists because what you asked
+/// for is the most re-readable part of a session and should not need digging out of an
+/// event list.
+#[route(GET "/{repo}/prompts")]
+async fn prompts_index(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    // Owned copies: the parsed query borrows the request context.
+    let query = topcoat::router::query_params::<PromptQuery>(cx)?;
+    let needle = query.q.clone().map(|q| q.trim().to_owned()).filter(|q| !q.is_empty());
+    let session = query.session.clone().filter(|s| !s.is_empty());
+    let prompts = app(cx).db.prompts(&name, needle.as_deref(), session.as_deref(), 300)?;
+
+    if wants_json(cx) {
+        return Ok(json_response(StatusCode::OK, serde_json::to_string(&prompts)?));
+    }
+
+    // Which prompts were followed by a commit, so the page can say what came of them.
+    let traced: std::collections::BTreeSet<String> = app(cx)
+        .db
+        .trace_sessions(&name, 500)?
+        .into_iter()
+        .filter(|s| s.commits > 0)
+        .map(|s| s.session)
+        .collect();
+
+    let search_value = needle.unwrap_or_default();
+    let count = prompts.len();
+    let page = view! { cx =>
+        shell(title: format!("{name} · prompts"), repo: name.clone(), active: "prompts", status: Some(ctx.status.clone()),
+            <div class="d-flex flex-items-center gap-2 mb-2">
+                <h3 class="mb-0"><i class="ph ph-chat-teardrop-text"></i>" Prompts"</h3>
+                <span class="Counter">(count)</span>
+                <form class="ml-auto" method="get" action=(format!("/{name}/prompts"))>
+                    <input
+                        class="form-control input-sm"
+                        type="search"
+                        name="q"
+                        placeholder="search prompts"
+                        value=(search_value.clone())
+                    >
+                </form>
+            </div>
+            <div class="Box">
+                if prompts.is_empty() {
+                    <div class="Box-body color-fg-muted">
+                        if search_value.is_empty() {
+                            "No prompts recorded yet. Wire the "<code>"nashgit hook"</code>" into your agent."
+                        } else {
+                            "No prompt matches that search."
+                        }
+                    </div>
+                }
+                let n = &name;
+                for prompt in prompts {
+                    <div key=(format!("{}-{}", prompt.session, prompt.seq)) class="Box-row">
+                        <div class="nashgit-prompt-text">(prompt.text.clone())</div>
+                        <div class="d-flex flex-items-center gap-2 mt-1 text-small color-fg-muted">
+                            <i class="ph ph-robot"></i>
+                            <a class="Link--secondary" href=(format!("/{n}/traces/{}", prompt.session))>
+                                (prompt.session.clone())
+                            </a>
+                            if let Some(agent) = &prompt.agent {
+                                <span class="Label">(agent.clone())</span>
+                            }
+                            if traced.contains(&prompt.session) {
+                                <span class="Label Label--success">"led to a commit"</span>
+                            }
+                            <span class="ml-auto">(prompt.created_at.clone())</span>
+                        </div>
+                    </div>
+                }
+            </div>
+        )
+    }?;
+    page.into_response(cx)
+}

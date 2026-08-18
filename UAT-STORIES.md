@@ -194,8 +194,7 @@ Personas:
   to dgit's cgit UI (log/blame/diff). nashgit shows branch-level diffs, the audit log,
   and traces. If commit-by-commit archaeology should live in nashgit, that is a new
   feature, not a test.
-- **Traces are spec'd and the CLI is mid-implementation, uncommitted** (`src/cli.rs` in
-  the working tree from another session). Stories 12–21 test whatever that tree does
-  today.
+- **Traces and the CLI are implemented and committed** (`src/traces.rs`, `src/cli.rs`,
+  `src/web/traces.rs`), with integration tests covering stories 12–21.
 - **nashgit is not deployed.** `nashauto-git.exe.xyz` runs dgit only. UAT needs a local
   run or a deploy first.

@@ -105,6 +105,8 @@ Two pieces:
 - Links: a back-link scan on a fixture repo wires plan↔card↔branch in both directions, a
   dangling ref renders as missing without an error, and the merge tests cover a merge
   flipping its card to `done`.
+- Prompts: a prompt recorded in a session shows up on the prompts page with its session
+  and the commit that followed it, and `?q=` finds it by substring.
 - Traces: recording a session's events attributes the commits made between them to that
   session; the same batch posted twice stores one copy; `nashgit hook` exits 0 with the
   server down and with garbage on stdin; a session page renders its events and its commits.
@@ -262,6 +264,15 @@ stores both and lets you cross-reference them.
   - `POST /:repo/traces/:session/transcript` — the raw transcript, stored verbatim.
   - `GET /:repo/traces`, `GET /:repo/traces/:session` — read back as JSON.
   - `GET /:repo/commits/:sha/trace` — the session(s) that produced a commit.
+- **Prompts are first-class.** What you asked for is the most re-readable part of a
+  trace, and it should not be buried in a session's event list.
+  - `/:repo/prompts` — every prompt you have written in that repo, newest first, each
+    with the session it belongs to, the commits that followed it, and a link into the
+    trace at that point. `?q=` filters by substring. `?session=` narrows to one run.
+  - The same URL returns JSON for `Accept: application/json`, so a prompt library is
+    greppable from a script.
+  - A prompt is any recorded event whose payload carries a `prompt` field, so this works
+    for any harness that reports one without extra configuration.
 - **Privacy:** a transcript can contain anything the agent saw, secrets included. nashgit
   does not redact. The tailnet is the perimeter here as everywhere else, and that is a
   deliberate, documented choice rather than an oversight.

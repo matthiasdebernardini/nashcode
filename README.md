@@ -287,7 +287,8 @@ Keep `GIT_TOKEN` and `ANTHROPIC_API_KEY` in `/etc/nashgit.env`, mode 600.
 
 The mirrors directory is a cache. It costs a re-clone to lose, not data. Your repos live on
 the dgit server, which is what you back up. SQLite holds the only thing that exists nowhere
-else: comments, CI history, and the audit trail. Back up `NASHGIT_DB`.
+else: comments, CI history, traces, and the audit trail. Back up `NASHGIT_DB`, and
+`NASHGIT_TRACES` if the raw transcripts matter to you.
 
 ## Development
 

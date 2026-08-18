@@ -37,12 +37,22 @@ function mountDiffs() {
       const patches = parsePatchFiles(data.patch);
       const fileDiff = patches[0] && patches[0].files[0];
       if (!fileDiff) continue;
+      // Click a line number to anchor the comment composer to that line.
+      const composer =
+        mount.closest(".Box") && mount.closest(".Box").querySelector(".nashgit-composer");
       const instance = new FileDiff({
         theme: THEME,
         themeType: "system",
         diffStyle: "unified",
         hunkSeparators: "line-info",
         renderAnnotation,
+        onLineNumberClick(props) {
+          if (!composer || props.annotationSide !== "additions") return;
+          const line = composer.querySelector("input[name=line]");
+          const body = composer.querySelector("textarea[name=body]");
+          if (line) line.value = props.lineNumber;
+          if (body) body.focus();
+        },
       });
       // Drop the <pre> fallback once the real component takes over.
       mount.textContent = "";
