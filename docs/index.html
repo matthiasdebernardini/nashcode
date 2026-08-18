@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nashgit — your own forge, on your own tailnet</title>
+<meta name="description" content="A personal git forge: dgit on celld, S3-backed durable storage, stacked-diff review, plans and kanban for agents. Runs on your box, behind your tailnet.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  @font-face {
+    font-family: "Departure Mono";
+    src: url("assets/DepartureMono-Regular.woff2") format("woff2");
+    font-display: swap;
+  }
+  :root {
+    --bg: #0d1117;
+    --bg-raise: #161b22;
+    --border: #21262d;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent); color: var(--bg); }
+
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 24px; }
+
+  h1, h2, .brand, .btn, nav a {
+    font-family: "Departure Mono", "IBM Plex Mono", monospace;
+    font-weight: 400;
+  }
+
+  /* ---- nav ---- */
+  nav {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 0;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-size: 18px; color: var(--fg); text-decoration: none; }
+  .brand img { width: 22px; height: 22px; }
+  nav .links { display: flex; gap: 24px; }
+  nav .links a { color: var(--muted); text-decoration: none; font-size: 13px; }
+  nav .links a:hover { color: var(--accent); }
+
+  /* ---- hero ---- */
+  header { padding: 96px 0 72px; text-align: center; }
+  header img.mark { width: 72px; height: 72px; margin-bottom: 32px; }
+  h1 {
+    font-size: clamp(28px, 5vw, 44px);
+    letter-spacing: -0.01em;
+    line-height: 1.2;
+  }
+  h1 .accent { color: var(--accent); }
+  header p.sub {
+    margin: 20px auto 0;
+    max-width: 560px;
+    color: var(--muted);
+  }
+  .cta { margin-top: 40px; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block;
+    padding: 10px 22px;
+    font-size: 14px;
+    text-decoration: none;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    background: var(--bg-raise);
+    transition: border-color .15s, color .15s;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { border-color: var(--accent); color: var(--accent); }
+
+  /* ---- terminal ---- */
+  .term {
+    margin: 72px auto 0;
+    max-width: 640px;
+    text-align: left;
+    background: var(--bg-raise);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .term-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted); font-size: 12px;
+  }
+  .term-bar button {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    font: inherit; font-size: 11px; padding: 2px 10px; cursor: pointer;
+  }
+  .term-bar button:hover { color: var(--accent); border-color: var(--accent); }
+  .term pre {
+    padding: 18px 20px;
+    font-size: 13.5px;
+    overflow-x: auto;
+  }
+  .term .p { color: var(--muted); user-select: none; }
+  .term .c { color: var(--fg); }
+  .term .out { color: var(--green); }
+
+  /* ---- features ---- */
+  section.features { padding: 88px 0; border-top: 1px solid var(--border); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+  }
+  .cell { background: var(--bg); padding: 28px 24px; }
+  .cell h2 { font-size: 15px; color: var(--accent); margin-bottom: 10px; }
+  .cell p { color: var(--muted); font-size: 13.5px; }
+
+  /* ---- stack figure ---- */
+  .stackfig {
+    margin: 0 auto;
+    padding: 88px 0;
+    text-align: center;
+    border-top: 1px solid var(--border);
+  }
+  .stackfig pre {
+    display: inline-block; text-align: left;
+    color: var(--muted); font-size: 13.5px; line-height: 1.7;
+  }
+  .stackfig .n { color: var(--accent); }
+  .stackfig .ok { color: var(--green); }
+
+  /* ---- footer ---- */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 40px 0 64px;
+    color: var(--muted); font-size: 13px;
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+  }
+  footer a { color: var(--muted); }
+  footer a:hover { color: var(--accent); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    header img.mark { animation: settle .6s ease-out; }
+    @keyframes settle { from { transform: translateY(-6px); opacity: 0; } to { transform: none; opacity: 1; } }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="#"><img src="assets/logo.svg" alt=""> nashgit</a>
+    <div class="links">
+      <a href="#features">features</a>
+      <a href="https://github.com/matthiasdebernardini/nashgit">github</a>
+    </div>
+  </nav>
+
+  <header>
+    <img class="mark" src="assets/logo.svg" alt="nashgit logo">
+    <h1>your own forge,<br>on your own <span class="accent">tailnet</span></h1>
+    <p class="sub">Every repository is a durable object with its own SQLite database,
+    replicated to a bucket you own. Stacked-diff review, plans, and a kanban board
+    your agents can drive. No accounts — your tailnet is the perimeter.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/matthiasdebernardini/nashgit">get the source</a>
+      <a class="btn" href="#quickstart">quickstart</a>
+    </div>
+
+    <div class="term" id="quickstart">
+      <div class="term-bar"><span>~ zsh</span><button id="copy" type="button">copy</button></div>
+      <pre><span class="p">$</span> <span class="c">nashgit setup</span>
+<span class="out">✓ dgit deployed on celld · bucket wired · tailnet serving</span>
+<span class="p">$</span> <span class="c">nashgit init my-notes</span>
+<span class="out">✓ repository created · origin wired · pushed</span>
+<span class="p">$</span> <span class="c">nashgit invite ada</span>
+<span class="out">✓ token minted · send her the snippet</span></pre>
+    </div>
+  </header>
+
+  <section class="features" id="features">
+    <div class="grid">
+      <div class="cell"><h2>durable by construction</h2><p>dgit on celld: each repo is one cell, one SQLite file, replicated to S3-compatible storage. Kill the box; the repos come back bit-identical.</p></div>
+      <div class="cell"><h2>stacked review</h2><p>Branch stacks inferred from the graph, rendered with Pierre diffs. Merge and restack from the browser — force-pushes are leased and atomic.</p></div>
+      <div class="cell"><h2>plans &amp; board</h2><p>Markdown in <code>plans/</code> and <code>tasks/</code> is the database. Agents push plans, you annotate, cards flip to done on merge.</p></div>
+      <div class="cell"><h2>agents welcome</h2><p>Every surface is JSON. Comments, CI, board moves, and a <code>/brain</code> endpoint that hands an agent the state of everything.</p></div>
+      <div class="cell"><h2>ci that is just a script</h2><p><code>.nashgit/ci</code> at your repo root. Green dot or red dot, logs in the viewer. Deploys are the script's business.</p></div>
+      <div class="cell"><h2>not a github replacement</h2><p>The private layer for work in flight. Public repos, releases, and outside collaborators stay where they are.</p></div>
+    </div>
+  </section>
+
+  <div class="stackfig">
+    <pre><span class="n">◉</span> main
+<span class="p">└─</span> <span class="n">◉</span> part-1  <span class="ok">✓ ci</span>
+   <span class="p">└─</span> <span class="n">◉</span> part-2  <span class="ok">✓ ci</span>
+      <span class="p">└─</span> <span class="n">◉</span> part-3  <span class="ok">merged → card done</span></pre>
+  </div>
+
+  <footer>
+    <span>apache-2.0 · built on <a href="https://github.com/littledivy/dgit">dgit</a> + <a href="https://celld.dev">celld</a></span>
+    <span><a href="https://github.com/matthiasdebernardini/nashgit">source</a></span>
+  </footer>
+</div>
+
+<script>
+  // Two ElevenLabs-generated UI sounds: a tap on interactions, a chime on copy.
+  const tap = new Audio("assets/tap.mp3"), ok = new Audio("assets/success.mp3");
+  tap.volume = 0.35; ok.volume = 0.4;
+  const play = a => { a.currentTime = 0; a.play().catch(() => {}); };
+  document.querySelectorAll("a.btn, nav a").forEach(el =>
+    el.addEventListener("click", () => play(tap)));
+  document.getElementById("copy").addEventListener("click", async ev => {
+    const cmds = ["nashgit setup", "nashgit init my-notes", "nashgit invite ada"].join("\n");
+    try { await navigator.clipboard.writeText(cmds); } catch {}
+    play(ok);
+    ev.target.textContent = "copied";
+    setTimeout(() => ev.target.textContent = "copy", 1600);
+  });
+</script>
+</body>
+</html>
