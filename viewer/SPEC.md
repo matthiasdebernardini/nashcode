@@ -14,9 +14,13 @@ Two pieces:
 ## Viewer requirements
 
 - **Mirrors, not packfile parsing.** The viewer keeps `git clone --mirror` copies of each
-  repo under `$NASHCODE_MIRRORS` (default `~/mirrors`), fetched on page load with a short
-  (~10s) debounce. All git questions are answered by shelling out to `git` against the
-  mirror. Auth to dgit: basic auth `x:$GIT_TOKEN`.
+  repo under `$NASHCODE_MIRRORS` (default `~/mirrors`). A page renders immediately from
+  the mirror on disk. The fetch that brings that mirror up to date runs in the background,
+  still behind a short (~10s) debounce, and the next page load sees its result. Only one
+  fetch per repo runs at a time. A repo with no mirror on disk yet is the one exception:
+  its first request blocks on the clone, because there is nothing to render. All git
+  questions are answered by shelling out to `git` against the mirror. Auth to dgit: basic
+  auth `x:$GIT_TOKEN`.
 - **Repo discovery:** `$NASHCODE_REPOS` env var, comma-separated repo names, matching dgit
   repo names at `$DGIT_URL/<name>.git`. (dgit has no list API we rely on.)
 - **Diff rendering: `@pierre/diffs`** (npm, vanilla-JS build, Shiki-based). The Rust app
