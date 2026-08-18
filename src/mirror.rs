@@ -140,7 +140,11 @@ impl Mirrors {
 
         let remote = self.config.remote_url(repo);
         let outcome = if exists {
-            self.repo(repo)
+            let handle = self.repo(repo);
+            // `DGIT_URL` is the source of truth, not whatever URL the mirror was
+            // cloned with — keep origin pointed at the configured server.
+            let _ = handle.try_run(&["remote", "set-url", "origin", &remote]).await;
+            handle
                 .run_remote(&remote, &["remote", "update", "--prune"])
                 .await
                 .map_err(|error| error.to_string())
