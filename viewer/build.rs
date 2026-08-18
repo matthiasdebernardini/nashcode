@@ -22,12 +22,12 @@ fn main() {
     let root = Path::new(&manifest);
 
     // A Rust-only compile without node: empty bundles, clearly marked.
-    println!("cargo:rerun-if-env-changed=NASHGIT_SKIP_ASSET_BUILD");
-    if std::env::var("NASHGIT_SKIP_ASSET_BUILD").is_ok_and(|v| !v.trim().is_empty()) {
-        let stub = "/* NASHGIT_SKIP_ASSET_BUILD was set: assets not built */\n";
-        std::fs::write(format!("{out_dir}/nashgit.js"), stub).expect("write stub js");
-        std::fs::write(format!("{out_dir}/nashgit.css"), stub).expect("write stub css");
-        println!("cargo:rustc-env=NASHGIT_ASSET_HASH=skipped");
+    println!("cargo:rerun-if-env-changed=NASHCODE_SKIP_ASSET_BUILD");
+    if std::env::var("NASHCODE_SKIP_ASSET_BUILD").is_ok_and(|v| !v.trim().is_empty()) {
+        let stub = "/* NASHCODE_SKIP_ASSET_BUILD was set: assets not built */\n";
+        std::fs::write(format!("{out_dir}/nashcode.js"), stub).expect("write stub js");
+        std::fs::write(format!("{out_dir}/nashcode.css"), stub).expect("write stub css");
+        println!("cargo:rustc-env=NASHCODE_ASSET_HASH=skipped");
         return;
     }
 
@@ -51,7 +51,7 @@ fn main() {
             .arg("--format=esm")
             .arg("--minify")
             .arg("--target=es2022")
-            .arg(format!("--outfile={out_dir}/nashgit.js")),
+            .arg(format!("--outfile={out_dir}/nashcode.js")),
         "esbuild js",
     );
 
@@ -67,17 +67,17 @@ fn main() {
             .arg("--loader:.woff=empty")
             .arg("--loader:.ttf=empty")
             .arg("--loader:.woff2=dataurl")
-            .arg(format!("--outfile={out_dir}/nashgit.css")),
+            .arg(format!("--outfile={out_dir}/nashcode.css")),
         "esbuild css",
     );
 
     // A short content hash busts browser caches when either bundle changes.
     let mut hasher = Sha256::new();
-    hasher.update(std::fs::read(format!("{out_dir}/nashgit.js")).expect("bundle exists"));
-    hasher.update(std::fs::read(format!("{out_dir}/nashgit.css")).expect("bundle exists"));
+    hasher.update(std::fs::read(format!("{out_dir}/nashcode.js")).expect("bundle exists"));
+    hasher.update(std::fs::read(format!("{out_dir}/nashcode.css")).expect("bundle exists"));
     let digest = hasher.finalize();
     let hash: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    println!("cargo:rustc-env=NASHGIT_ASSET_HASH={hash}");
+    println!("cargo:rustc-env=NASHCODE_ASSET_HASH={hash}");
 }
 
 fn run(command: &mut Command, what: &str) {

@@ -26,10 +26,10 @@ pub struct Config {
     pub webhooks: BTreeMap<String, Vec<String>>,
     /// `ANTHROPIC_API_KEY`. `/brain/ask` answers 404 without it.
     pub anthropic_key: Option<String>,
-    /// Claude API base URL. `NASHGIT_ANTHROPIC_URL` overrides it so tests can point at
+    /// Claude API base URL. `NASHCODE_ANTHROPIC_URL` overrides it so tests can point at
     /// a stub.
     pub anthropic_url: String,
-    /// `NASHGIT_BRAIN_MODEL`.
+    /// `NASHCODE_BRAIN_MODEL`.
     pub brain_model: String,
 }
 
@@ -48,11 +48,11 @@ impl Config {
     /// Read the configuration from the environment, applying the documented defaults.
     pub fn from_env() -> Self {
         let mirrors = PathBuf::from(env_or(
-            "NASHGIT_MIRRORS",
+            "NASHCODE_MIRRORS",
             &home().join("mirrors").to_string_lossy(),
         ));
 
-        let repos = env_or("NASHGIT_REPOS", "")
+        let repos = env_or("NASHCODE_REPOS", "")
             .split(',')
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -60,21 +60,21 @@ impl Config {
             .collect();
 
         let db_path = PathBuf::from(env_or(
-            "NASHGIT_DB",
-            &mirrors.join("nashgit.db").to_string_lossy(),
+            "NASHCODE_DB",
+            &mirrors.join("nashcode.db").to_string_lossy(),
         ));
 
         let ci_logs = PathBuf::from(env_or(
-            "NASHGIT_CI_LOGS",
+            "NASHCODE_CI_LOGS",
             &mirrors.join("ci-logs").to_string_lossy(),
         ));
 
         let traces = PathBuf::from(env_or(
-            "NASHGIT_TRACES",
+            "NASHCODE_TRACES",
             &mirrors.join("traces").to_string_lossy(),
         ));
 
-        let webhooks = match std::env::var("NASHGIT_WEBHOOKS") {
+        let webhooks = match std::env::var("NASHCODE_WEBHOOKS") {
             Ok(path) if !path.trim().is_empty() => load_webhooks(Path::new(path.trim())),
             _ => BTreeMap::new(),
         };
@@ -84,7 +84,7 @@ impl Config {
             git_token: env_or("GIT_TOKEN", ""),
             repos,
             mirrors,
-            bind: env_or("NASHGIT_BIND", "127.0.0.1:8090"),
+            bind: env_or("NASHCODE_BIND", "127.0.0.1:8090"),
             db_path,
             ci_logs,
             traces,
@@ -92,10 +92,10 @@ impl Config {
             anthropic_key: std::env::var("ANTHROPIC_API_KEY")
                 .ok()
                 .filter(|key| !key.trim().is_empty()),
-            anthropic_url: env_or("NASHGIT_ANTHROPIC_URL", "https://api.anthropic.com")
+            anthropic_url: env_or("NASHCODE_ANTHROPIC_URL", "https://api.anthropic.com")
                 .trim_end_matches('/')
                 .to_owned(),
-            brain_model: env_or("NASHGIT_BRAIN_MODEL", "claude-opus-5"),
+            brain_model: env_or("NASHCODE_BRAIN_MODEL", "claude-opus-5"),
         }
     }
 
@@ -123,7 +123,7 @@ fn load_webhooks(path: &Path) -> BTreeMap<String, Vec<String>> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(error) => {
-            tracing::warn!(?path, %error, "cannot read NASHGIT_WEBHOOKS, continuing without");
+            tracing::warn!(?path, %error, "cannot read NASHCODE_WEBHOOKS, continuing without");
             return BTreeMap::new();
         }
     };
@@ -132,7 +132,7 @@ fn load_webhooks(path: &Path) -> BTreeMap<String, Vec<String>> {
     let parsed: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(value) => value,
         Err(error) => {
-            tracing::warn!(?path, %error, "NASHGIT_WEBHOOKS is not valid JSON, continuing without");
+            tracing::warn!(?path, %error, "NASHCODE_WEBHOOKS is not valid JSON, continuing without");
             return BTreeMap::new();
         }
     };
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn the_default_bind_is_loopback_only() {
         // No public listener: unless the operator overrides it, we bind 127.0.0.1.
-        if std::env::var("NASHGIT_BIND").is_err() {
+        if std::env::var("NASHCODE_BIND").is_err() {
             assert_eq!(Config::from_env().bind, "127.0.0.1:8090");
         }
     }

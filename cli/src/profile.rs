@@ -5,9 +5,9 @@
 //! and the parent directory with 0700.
 //!
 //! Location, in order of precedence:
-//!   1. `$NASHGIT_CONFIG`            (a full path to the file; used by tests)
-//!   2. `$XDG_CONFIG_HOME/nashgit/config.toml`
-//!   3. `~/.config/nashgit/config.toml`
+//!   1. `$NASHCODE_CONFIG`            (a full path to the file; used by tests)
+//!   2. `$XDG_CONFIG_HOME/nashcode/config.toml`
+//!   3. `~/.config/nashcode/config.toml`
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ pub struct Profile {
     /// dgit `GIT_TOKEN`: the Basic-auth password for pushes and admin calls.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
-    /// Base URL of the nashgit viewer, when one is deployed alongside dgit.
+    /// Base URL of the nashcode viewer, when one is deployed alongside dgit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer_url: Option<String>,
     /// Loopback port celld listens on, from `setup --listen-port`. Absent in
@@ -93,13 +93,13 @@ impl Store {
         let name = match override_name {
             Some(n) => n.to_string(),
             None => self.active.clone().ok_or_else(|| {
-                anyhow!("no active profile. Run `nashgit setup`, or `nashgit use <profile>`")
+                anyhow!("no active profile. Run `nashcode setup`, or `nashcode use <profile>`")
             })?,
         };
         let p = self
             .profiles
             .get(&name)
-            .ok_or_else(|| anyhow!("no profile named `{name}`. See `nashgit profiles`"))?;
+            .ok_or_else(|| anyhow!("no profile named `{name}`. See `nashcode profiles`"))?;
         Ok((name, p))
     }
 
@@ -112,7 +112,7 @@ impl Store {
 
     pub fn set_active(&mut self, name: &str) -> Result<()> {
         if !self.profiles.contains_key(name) {
-            bail!("no profile named `{name}`. See `nashgit profiles`");
+            bail!("no profile named `{name}`. See `nashcode profiles`");
         }
         self.active = Some(name.to_string());
         Ok(())
@@ -185,17 +185,17 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 
 /// Where the profile store lives on this machine.
 pub fn config_path() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("NASHGIT_CONFIG") {
+    if let Some(p) = std::env::var_os("NASHCODE_CONFIG") {
         return Ok(PathBuf::from(p));
     }
     // Not dirs::config_dir(): on macOS that is ~/Library/Application Support,
     // while every doc and dev-CLI convention here says ~/.config.
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        return Ok(PathBuf::from(xdg).join("nashgit").join("config.toml"));
+        return Ok(PathBuf::from(xdg).join("nashcode").join("config.toml"));
     }
     let home = dirs::home_dir()
-        .ok_or_else(|| anyhow!("cannot locate a home directory; set $NASHGIT_CONFIG"))?;
-    Ok(home.join(".config").join("nashgit").join("config.toml"))
+        .ok_or_else(|| anyhow!("cannot locate a home directory; set $NASHCODE_CONFIG"))?;
+    Ok(home.join(".config").join("nashcode").join("config.toml"))
 }
 
 /// Pull the host (with port, without scheme, userinfo, or path) out of a URL.

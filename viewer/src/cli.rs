@@ -1,9 +1,9 @@
 //! The agent-side client. The same binary is the server and the client, so there is
 //! one thing to install.
 //!
-//! `nashgit-viewer hook` has one hard rule: **it must never fail an agent's turn.** An
+//! `nashcode-viewer hook` has one hard rule: **it must never fail an agent's turn.** An
 //! unreachable server, a malformed payload, or no configured repo all exit 0 quietly.
-//! Errors go to stderr only when `NASHGIT_DEBUG` is set.
+//! Errors go to stderr only when `NASHCODE_DEBUG` is set.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use std::time::Duration;
 
 /// Where the viewer lives, from the client's point of view.
 pub fn base_url() -> String {
-    std::env::var("NASHGIT_URL")
+    std::env::var("NASHCODE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "http://127.0.0.1:8090".to_owned())
@@ -21,14 +21,14 @@ pub fn base_url() -> String {
 }
 
 fn debug(message: &str) {
-    if std::env::var("NASHGIT_DEBUG").is_ok() {
-        eprintln!("nashgit: {message}");
+    if std::env::var("NASHCODE_DEBUG").is_ok() {
+        eprintln!("nashcode: {message}");
     }
 }
 
-/// The repo name: `NASHGIT_REPO`, else the basename of the git remote at `dir`.
+/// The repo name: `NASHCODE_REPO`, else the basename of the git remote at `dir`.
 pub fn infer_repo(dir: &Path) -> Option<String> {
-    if let Ok(repo) = std::env::var("NASHGIT_REPO")
+    if let Ok(repo) = std::env::var("NASHCODE_REPO")
         && !repo.trim().is_empty()
     {
         return Some(repo.trim().to_owned());
@@ -69,7 +69,7 @@ fn client(timeout: Duration) -> reqwest::Client {
         .expect("reqwest client builds")
 }
 
-/// `nashgit-viewer hook` — read one agent-harness hook payload from stdin, record it, exit 0.
+/// `nashcode-viewer hook` — read one agent-harness hook payload from stdin, record it, exit 0.
 pub async fn hook() -> i32 {
     // Nothing below may propagate a failure.
     let mut raw = String::new();
@@ -99,7 +99,7 @@ pub async fn hook() -> i32 {
         .unwrap_or_else(|| PathBuf::from("."));
 
     let Some(repo) = infer_repo(&cwd) else {
-        debug("no repo: set NASHGIT_REPO or run inside a clone with an origin remote");
+        debug("no repo: set NASHCODE_REPO or run inside a clone with an origin remote");
         return 0;
     };
     let head = head_of(&cwd);
@@ -143,7 +143,7 @@ fn transcript_prompt(value: &serde_json::Value) -> Option<String> {
     Some(trimmed.to_owned())
 }
 
-/// `nashgit-viewer trace push <file>` — backfill a whole transcript for a session.
+/// `nashcode-viewer trace push <file>` — backfill a whole transcript for a session.
 pub async fn trace_push(file: &str, session: Option<String>, repo: Option<String>) -> i32 {
     let Ok(raw) = std::fs::read_to_string(file) else {
         eprintln!("cannot read {file}");
@@ -151,7 +151,7 @@ pub async fn trace_push(file: &str, session: Option<String>, repo: Option<String
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(repo) = repo.or_else(|| infer_repo(&cwd)) else {
-        eprintln!("no repo: pass --repo, set NASHGIT_REPO, or run inside a clone");
+        eprintln!("no repo: pass --repo, set NASHCODE_REPO, or run inside a clone");
         return 1;
     };
 
@@ -239,11 +239,11 @@ pub async fn trace_push(file: &str, session: Option<String>, repo: Option<String
     0
 }
 
-/// `nashgit-viewer trace list` — sessions for the repo, newest first.
+/// `nashcode-viewer trace list` — sessions for the repo, newest first.
 pub async fn trace_list(repo: Option<String>) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(repo) = repo.or_else(|| infer_repo(&cwd)) else {
-        eprintln!("no repo: pass --repo, set NASHGIT_REPO, or run inside a clone");
+        eprintln!("no repo: pass --repo, set NASHCODE_REPO, or run inside a clone");
         return 1;
     };
     let url = format!("{}/{repo}/traces", base_url());
@@ -281,11 +281,11 @@ pub async fn trace_list(repo: Option<String>) -> i32 {
     }
 }
 
-/// `nashgit-viewer trace show <session>` — one session's events.
+/// `nashcode-viewer trace show <session>` — one session's events.
 pub async fn trace_show(session: &str, repo: Option<String>) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(repo) = repo.or_else(|| infer_repo(&cwd)) else {
-        eprintln!("no repo: pass --repo, set NASHGIT_REPO, or run inside a clone");
+        eprintln!("no repo: pass --repo, set NASHCODE_REPO, or run inside a clone");
         return 1;
     };
     let url = format!("{}/{repo}/traces/{session}", base_url());
@@ -335,14 +335,14 @@ pub async fn trace_show(session: &str, repo: Option<String>) -> i32 {
     }
 }
 
-/// `nashgit doctor` — what is configured, what is missing, is the server up.
+/// `nashcode doctor` — what is configured, what is missing, is the server up.
 pub async fn doctor() -> i32 {
     let base = base_url();
-    println!("NASHGIT_URL      {base}");
+    println!("NASHCODE_URL      {base}");
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match infer_repo(&cwd) {
         Some(repo) => println!("repo             {repo}"),
-        None => println!("repo             (none: set NASHGIT_REPO or run inside a clone)"),
+        None => println!("repo             (none: set NASHCODE_REPO or run inside a clone)"),
     }
     match head_of(&cwd) {
         Some(head) => println!("HEAD             {head}"),
@@ -374,17 +374,17 @@ pub fn flag_value(args: &[String], name: &str) -> Option<String> {
 }
 
 pub const USAGE: &str = "\
-nashgit-viewer — stacked-branch viewer and agent-trace client
+nashcode-viewer — stacked-branch viewer and agent-trace client
 
 USAGE:
-  nashgit-viewer [serve]                   run the server (the default)
-  nashgit-viewer hook                      record one hook payload from stdin; always exits 0
-  nashgit-viewer trace push <file> [--session s] [--repo r]
+  nashcode-viewer [serve]                   run the server (the default)
+  nashcode-viewer hook                      record one hook payload from stdin; always exits 0
+  nashcode-viewer trace push <file> [--session s] [--repo r]
                                            backfill a transcript (JSONL) for a session
-  nashgit-viewer trace list [--repo r]     sessions, newest first
-  nashgit-viewer trace show <session> [--repo r]
+  nashcode-viewer trace list [--repo r]     sessions, newest first
+  nashcode-viewer trace show <session> [--repo r]
                                            one session's events
-  nashgit-viewer doctor                    config summary + server reachability
+  nashcode-viewer doctor                    config summary + server reachability
 
-The client half reads NASHGIT_URL (default http://127.0.0.1:8090) and infers the
-repo from the git remote of the working directory, falling back to NASHGIT_REPO.";
+The client half reads NASHCODE_URL (default http://127.0.0.1:8090) and infers the
+repo from the git remote of the working directory, falling back to NASHCODE_REPO.";

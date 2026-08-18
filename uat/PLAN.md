@@ -1,17 +1,17 @@
-# nashgit UAT — the plan
+# nashcode UAT — the plan
 
 The single UAT document. It supersedes `UAT-STORIES.md` and `UAT-TESTS.md`; delete both
 when this lands. Companion code: [`uat.py`](uat.py), the automated harness.
 
 ## Decisions (locked with Matthias, 2026-08-18)
 
-1. **All local.** No exe.dev deploy. nashgit is not hosted anywhere today; the exe.dev
+1. **All local.** No exe.dev deploy. nashcode is not hosted anywhere today; the exe.dev
    box runs only dgit.
-2. **One repo.** The live instance serves exactly one repo: nashgit itself. No extra
+2. **One repo.** The live instance serves exactly one repo: nashcode itself. No extra
    fixture repos in the live setup. The harness keeps one throwaway fixture repo (named
    `demo`) for write-path tests, because merges and restacks must not touch the real
    repo.
-3. **"How the code evolved" = traces + audit log + self-hosting.** nashgit pointed at its
+3. **"How the code evolved" = traces + audit log + self-hosting.** nashcode pointed at its
    own repo, with the Claude session transcripts that built it backfilled, is the
    evolution demo. No per-commit diff view gets built; the ask is flattened into the one
    tool.
@@ -20,48 +20,48 @@ when this lands. Companion code: [`uat.py`](uat.py), the automated harness.
 ## Status
 
 - The workspace restructure landed: the repo is now `viewer/` (binary
-  `nashgit-viewer`: serve, hook, trace, doctor) plus `cli/` (binary `nashgit`, the
-  deploy CLI). Everything below uses `nashgit-viewer`.
+  `nashcode-viewer`: serve, hook, trace, doctor) plus `cli/` (binary `nashcode`, the
+  deploy CLI). Everything below uses `nashcode-viewer`.
 - Automated suite: green, including the T17/T18 additions and the beta-fixture
   flattening. Run: `cargo build && python3 uat/uat.py`.
 
-## Part 1 — self-host nashgit on nashgit (the evolution demo)
+## Part 1 — self-host nashcode on nashcode (the evolution demo)
 
 The repo's `origin` is GitHub now, so the local bare hub gets its own remote name:
 
 ```sh
-git clone --bare ~/Projects/nashgit ~/git-local/nashgit.git
-git -C ~/Projects/nashgit remote add hub ~/git-local/nashgit.git
+git clone --bare ~/Projects/nashcode ~/git-local/nashcode.git
+git -C ~/Projects/nashcode remote add hub ~/git-local/nashcode.git
 
-DGIT_URL=~/git-local NASHGIT_REPOS=nashgit \
-NASHGIT_MIRRORS=~/git-local/mirrors NASHGIT_TRACES=~/git-local/traces \
-  ~/Projects/nashgit/target/debug/nashgit-viewer serve
+DGIT_URL=~/git-local NASHCODE_REPOS=nashcode \
+NASHCODE_MIRRORS=~/git-local/mirrors NASHCODE_TRACES=~/git-local/traces \
+  ~/Projects/nashcode/target/debug/nashcode-viewer serve
 ```
 
-Backfill the sessions that built nashgit (transcripts live in
-`~/.claude/projects/-Users-md-Projects-nashgit/`):
+Backfill the sessions that built nashcode (transcripts live in
+`~/.claude/projects/-Users-md-Projects-nashcode/`):
 
 ```sh
-for t in ~/.claude/projects/-Users-md-Projects-nashgit/*.jsonl; do
-  NASHGIT_REPO=nashgit ./target/debug/nashgit-viewer trace push "$t"
+for t in ~/.claude/projects/-Users-md-Projects-nashcode/*.jsonl; do
+  NASHCODE_REPO=nashcode ./target/debug/nashcode-viewer trace push "$t"
 done
 ```
 
 UAT finding, fixed in `viewer/src/cli.rs`: backfilled transcripts stored the user's
 words under `message.content`, where the prompts page cannot see them. `trace push`
 now lifts them into the event's `prompt` field (skipping harness markup), so
-`/nashgit/prompts` lists the real asks that built this tool.
+`/nashcode/prompts` lists the real asks that built this tool.
 
 Wire the hook so future sessions attribute their commits automatically
-(project `.claude/settings.json`, per the viewer README): `nashgit-viewer hook` on
+(project `.claude/settings.json`, per the viewer README): `nashcode-viewer hook` on
 `UserPromptSubmit`, `PostToolUse`, and `Stop`.
 
 Accept when:
 
-- `http://127.0.0.1:8090/nashgit` shows the real branch list;
-  `/nashgit/traces` lists the backfilled sessions; a session page renders the actual
+- `http://127.0.0.1:8090/nashcode` shows the real branch list;
+  `/nashcode/traces` lists the backfilled sessions; a session page renders the actual
   prompts and tool calls of the conversations that wrote this code.
-- `/nashgit/prompts` lists and searches the prompts across sessions.
+- `/nashcode/prompts` lists and searches the prompts across sessions.
 - The stacks page shows the audit log once the first real merge happens.
 - Known caveat, stated not hidden: **backfilled** sessions carry no per-event HEAD, so
   their commit attribution may be empty. Attribution is proven live by the hook
@@ -72,7 +72,7 @@ Accept when:
 `uat.py` boots the binary against a throwaway fixture world and asserts the criteria
 below. Fixture shape: one repo with a stacked chain (`feat/retry-core` →
 `feat/retry-jitter`), a red-CI branch, a second stack for restacks, plans, cards
-(including one malformed and one with a dangling ref), and a `.nashgit/ci` script.
+(including one malformed and one with a dangling ref), and a `.nashcode/ci` script.
 
 | Group | Covers | Accept when |
 |---|---|---|
@@ -123,11 +123,11 @@ One shot fell short: the red-merge `confirm()` dialog is a native OS window, whi
 window-scoped capture cannot see. Clip 4 shows the red "Merge into main despite CI"
 gate and the branch staying put; the dialog itself is not in frame.
 
-1. **Review** — open `/nashgit/<branch>`: Pierre-rendered syntax-highlighted diffs (not
+1. **Review** — open `/nashcode/<branch>`: Pierre-rendered syntax-highlighted diffs (not
    a plain `<pre>`), IBM Plex Mono in code, click a line, post an inline comment, see it
    in the annotation slot. Toggle dark mode; both legible.
-2. **Evolution** — `/nashgit/traces`: open a backfilled session, scroll the real
-   transcript, follow a commit link from a hook-attributed session; `/nashgit/prompts`
+2. **Evolution** — `/nashcode/traces`: open a backfilled session, scroll the real
+   transcript, follow a commit link from a hook-attributed session; `/nashcode/prompts`
    search.
 3. **Board** — drag a card between columns; show the resulting commit in the log; show
    the malformed card sitting in needs-attention.
@@ -148,7 +148,7 @@ The catalog went stale once already (prompts page, lease semantics). Standing ru
 ## Gap register (known, accepted, revisit deliberately)
 
 - **Identity perimeter is simulated.** The suite injects `Tailscale-User-Login` headers
-  directly; the real `tailscale serve` path is untested until nashgit deploys next to
+  directly; the real `tailscale serve` path is untested until nashcode deploys next to
   dgit. Revisit at deploy time.
 - **`/brain/ask` live path** untested here (no key in the server env); the stubbed
   contract (success/refusal/429/502) is covered by crate tests.
@@ -156,6 +156,6 @@ The catalog went stale once already (prompts page, lease semantics). Standing ru
   attribution is the proven path.
 - **Job-env allowlist, 30-min CI timeout, webhook retry timing**: crate tests own these;
   UAT does not repeat them.
-- **The deploy CLI (`cli/`, binary `nashgit`) is out of UAT scope.** This plan covers
+- **The deploy CLI (`cli/`, binary `nashcode`) is out of UAT scope.** This plan covers
   the viewer. The CLI's setup/invite/doctor surface is covered by its own 84 crate
   tests. The marketing site under `docs/` is content, not product; no row.

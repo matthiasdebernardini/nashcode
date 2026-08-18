@@ -15,7 +15,7 @@ where the implementation had to choose.
   the page it wraps, so the chrome is an ordinary `#[component]` every page calls.
   Routing itself is idiomatic: `#[page]`/`#[route]` + `Router::builder().discover()`.
 - **`topcoat::serve` with our own listener,** because the bind address comes from
-  `NASHGIT_BIND`, not Topcoat's `HOST`/`PORT`.
+  `NASHCODE_BIND`, not Topcoat's `HOST`/`PORT`.
 
 ## Routing decisions
 
@@ -64,7 +64,7 @@ where the implementation had to choose.
 
 ## Workspace overlap (post-publish work)
 
-The viewer's agent-side subcommands (`nashgit-viewer hook`, `trace push/list/show`,
+The viewer's agent-side subcommands (`nashcode-viewer hook`, `trace push/list/show`,
 `doctor`) overlap conceptually with the `cli/` crate: both are client tools an agent
 machine installs, both infer the repo from the working directory, both talk HTTP to a
 server. They are deliberately NOT unified yet — the CLI talks to dgit, the viewer client

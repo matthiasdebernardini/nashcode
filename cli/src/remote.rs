@@ -1,4 +1,4 @@
-//! The shell scripts nashgit runs on the host.
+//! The shell scripts nashcode runs on the host.
 //!
 //! Every function here is pure: parameters in, script text out. That keeps the
 //! interesting logic testable without a host, and it lets `--dry-run` print
@@ -37,7 +37,7 @@ else
   as_root_env() { sudo -n -E "$@"; }
 fi
 have() { command -v "$1" >/dev/null 2>&1; }
-log() { printf 'nashgit: %s\n' "$*"; }
+log() { printf 'nashcode: %s\n' "$*"; }
 "#;
 
 /// What `setup` needs to know about the host before it touches anything.
@@ -46,18 +46,18 @@ log() { printf 'nashgit: %s\n' "$*"; }
 pub fn preflight_script() -> String {
     format!(
         r#"{PRELUDE}
-echo "NASHGIT_OS=$(uname -s)"
-echo "NASHGIT_ARCH=$(uname -m)"
-echo "NASHGIT_USER=$(id -un)"
-echo "NASHGIT_HOME=$HOME"
-if have systemctl; then echo "NASHGIT_SYSTEMD=yes"; else echo "NASHGIT_SYSTEMD=no"; fi
-if [ "$(id -u)" = 0 ]; then echo "NASHGIT_ROOT=root"
-elif sudo -n true 2>/dev/null; then echo "NASHGIT_ROOT=sudo"
-elif have sudo; then echo "NASHGIT_ROOT=sudo-password"
-else echo "NASHGIT_ROOT=none"; fi
-echo "NASHGIT_DISTRO=$( . /etc/os-release 2>/dev/null; echo "${{ID:-unknown}}" )"
+echo "NASHCODE_OS=$(uname -s)"
+echo "NASHCODE_ARCH=$(uname -m)"
+echo "NASHCODE_USER=$(id -un)"
+echo "NASHCODE_HOME=$HOME"
+if have systemctl; then echo "NASHCODE_SYSTEMD=yes"; else echo "NASHCODE_SYSTEMD=no"; fi
+if [ "$(id -u)" = 0 ]; then echo "NASHCODE_ROOT=root"
+elif sudo -n true 2>/dev/null; then echo "NASHCODE_ROOT=sudo"
+elif have sudo; then echo "NASHCODE_ROOT=sudo-password"
+else echo "NASHCODE_ROOT=none"; fi
+echo "NASHCODE_DISTRO=$( . /etc/os-release 2>/dev/null; echo "${{ID:-unknown}}" )"
 for b in git curl node npm esbuild tailscale celld; do
-  echo "NASHGIT_HAS_$(echo "$b" | tr 'a-z-' 'A-Z_')=$(command -v "$b" 2>/dev/null || echo '')"
+  echo "NASHCODE_HAS_$(echo "$b" | tr 'a-z-' 'A-Z_')=$(command -v "$b" 2>/dev/null || echo '')"
 done
 "#
     )
@@ -143,10 +143,10 @@ else
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
-echo "NASHGIT_CELLD=$(command -v celld 2>/dev/null || echo '')"
-echo "NASHGIT_ESBUILD=$(command -v esbuild 2>/dev/null || echo '')"
-echo "NASHGIT_NODE=$(command -v node 2>/dev/null || echo '')"
-echo "NASHGIT_TAILSCALE=$(command -v tailscale 2>/dev/null || echo '')"
+echo "NASHCODE_CELLD=$(command -v celld 2>/dev/null || echo '')"
+echo "NASHCODE_ESBUILD=$(command -v esbuild 2>/dev/null || echo '')"
+echo "NASHCODE_NODE=$(command -v node 2>/dev/null || echo '')"
+echo "NASHCODE_TAILSCALE=$(command -v tailscale 2>/dev/null || echo '')"
 "#
     )
 }
@@ -249,7 +249,7 @@ impl Deploy {
     pub fn unit_file(&self) -> String {
         format!(
             "[Unit]\n\
-             Description=celld (nashgit: dgit on celld)\n\
+             Description=celld (nashcode: dgit on celld)\n\
              Documentation=https://celld.dev/docs\n\
              After=network-online.target\n\
              Wants=network-online.target\n\
@@ -324,7 +324,7 @@ function strip(s) {
 const cfg = JSON.parse(strip(fs.readFileSync(file, 'utf8')).replace(/,(\s*[}\]])/g, '$1'));
 cfg.vars = Object.assign({}, cfg.vars, JSON.parse(fs.readFileSync(varsFile, 'utf8')));
 fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + '\n');
-console.log('nashgit: wrangler.celld.jsonc vars set (' + Object.keys(cfg.vars).join(', ') + ')');
+console.log('nashcode: wrangler.celld.jsonc vars set (' + Object.keys(cfg.vars).join(', ') + ')');
 "#;
 
 /// Clone dgit, install its one dependency, patch its config, deploy to celld.
@@ -352,15 +352,15 @@ log "npm install"
 npm install --no-audit --no-fund --silent
 
 log "patch wrangler.celld.jsonc"
-VARS_FILE="$(mktemp "$DGIT_DIR/.nashgit-vars.XXXXXX")"
-PATCH_FILE="$(mktemp "$DGIT_DIR/.nashgit-patch.XXXXXX")"
+VARS_FILE="$(mktemp "$DGIT_DIR/.nashcode-vars.XXXXXX")"
+PATCH_FILE="$(mktemp "$DGIT_DIR/.nashcode-patch.XXXXXX")"
 trap 'rm -f "$VARS_FILE" "$PATCH_FILE"' EXIT
-cat >"$PATCH_FILE" <<'NASHGIT_PATCH_EOF'
+cat >"$PATCH_FILE" <<'NASHCODE_PATCH_EOF'
 {patch}
-NASHGIT_PATCH_EOF
-cat >"$VARS_FILE" <<'NASHGIT_VARS_EOF'
+NASHCODE_PATCH_EOF
+cat >"$VARS_FILE" <<'NASHCODE_VARS_EOF'
 {vars}
-NASHGIT_VARS_EOF
+NASHCODE_VARS_EOF
 node "$PATCH_FILE" "$DGIT_DIR/wrangler.celld.jsonc" "$VARS_FILE"
 
 # A re-run starts from a fresh upstream file, which would drop the invited
@@ -426,18 +426,18 @@ as_root install -d -m 0750 /etc/celld
 TMP_ENV="$(mktemp)"
 chmod 600 "$TMP_ENV"
 trap 'rm -f "$TMP_ENV"' EXIT
-cat >"$TMP_ENV" <<'NASHGIT_ENV_EOF'
+cat >"$TMP_ENV" <<'NASHCODE_ENV_EOF'
 {env}
-NASHGIT_ENV_EOF
+NASHCODE_ENV_EOF
 as_root install -m 0600 -o root -g root "$TMP_ENV" /etc/celld/celld.env
 rm -f "$TMP_ENV"
 trap - EXIT
 
 log "write /etc/systemd/system/celld.service"
 TMP_UNIT="$(mktemp)"
-cat >"$TMP_UNIT" <<'NASHGIT_UNIT_EOF'
+cat >"$TMP_UNIT" <<'NASHCODE_UNIT_EOF'
 {unit}
-NASHGIT_UNIT_EOF
+NASHCODE_UNIT_EOF
 as_root install -m 0644 -o root -g root "$TMP_UNIT" /etc/systemd/system/celld.service
 rm -f "$TMP_UNIT"
 
@@ -458,7 +458,7 @@ if [ "$ok" != 1 ]; then
   exit 1
 fi
 log "celld is serving dgit on http://{listen}/"
-echo "NASHGIT_SERVICE=active"
+echo "NASHCODE_SERVICE=active"
 "#,
         env = d.env_file().trim_end(),
         unit = d.unit_file().trim_end(),
@@ -481,11 +481,11 @@ printf '%s' {key} >"$KEYFILE"
 as_root tailscale up --auth-key="file:$KEYFILE" --timeout=120s
 rm -f "$KEYFILE"
 trap - EXIT
-echo "NASHGIT_AUTH_URL="
+echo "NASHCODE_AUTH_URL="
 "#,
             key = sq(k)
         ),
-        None => r#"LOG="$(mktemp /tmp/nashgit-tsup.XXXXXX)"
+        None => r#"LOG="$(mktemp /tmp/nashcode-tsup.XXXXXX)"
 as_root nohup tailscale up --timeout=600s >"$LOG" 2>&1 </dev/null &
 url=""
 for i in $(seq 1 60); do
@@ -493,7 +493,7 @@ for i in $(seq 1 60); do
   [ -n "$url" ] && break
   sleep 1
 done
-echo "NASHGIT_AUTH_URL=$url"
+echo "NASHCODE_AUTH_URL=$url"
 "#
         .to_string(),
     };
@@ -502,13 +502,13 @@ echo "NASHGIT_AUTH_URL=$url"
 state="$(tailscale status --json 2>/dev/null | node -e {reader} 2>/dev/null || echo Unknown)"
 if [ "$state" = "Running" ]; then
   log "skip tailscale up (already Running)"
-  echo "NASHGIT_AUTH_URL="
-  echo "NASHGIT_TS_STATE=Running"
+  echo "NASHCODE_AUTH_URL="
+  echo "NASHCODE_TS_STATE=Running"
   exit 0
 fi
 log "tailscale up"
 {key_block}
-echo "NASHGIT_TS_STATE=$state"
+echo "NASHCODE_TS_STATE=$state"
 "#,
         reader = sq(BACKEND_STATE_JS),
         key_block = key_block,
@@ -524,8 +524,8 @@ pub fn tailscale_status_script() -> String {
     format!(
         r#"{PRELUDE}
 raw="$(tailscale status --json 2>/dev/null || echo '{{}}')"
-echo "NASHGIT_TS_STATE=$(printf '%s' "$raw" | node -e {state} 2>/dev/null || echo Unknown)"
-echo "NASHGIT_DNSNAME=$(printf '%s' "$raw" | node -e {dns} 2>/dev/null || echo '')"
+echo "NASHCODE_TS_STATE=$(printf '%s' "$raw" | node -e {state} 2>/dev/null || echo Unknown)"
+echo "NASHCODE_DNSNAME=$(printf '%s' "$raw" | node -e {dns} 2>/dev/null || echo '')"
 "#,
         state = sq(BACKEND_STATE_JS),
         dns = sq(DNS_NAME_JS),
@@ -570,30 +570,30 @@ as_root tailscale serve status || true
 pub fn verify_script(token: &str, listen: &str) -> String {
     format!(
         r#"{PRELUDE}
-export NASHGIT_TOKEN={token}
+export NASHCODE_TOKEN={token}
 BASE="http://{listen}"
-NAME="nashgit-verify-$$-$(date +%s)"
+NAME="nashcode-verify-$$-$(date +%s)"
 WORK="$(mktemp -d)"
 cleanup() {{
-  cat >"$WORK/curlrc" <<'NASHGIT_CURLRC_EOF'
-NASHGIT_CURLRC_EOF
+  cat >"$WORK/curlrc" <<'NASHCODE_CURLRC_EOF'
+NASHCODE_CURLRC_EOF
   rm -rf "$WORK"
 }}
 trap cleanup EXIT
 
 umask 077
-printf 'user = "x:%s"\n' "$NASHGIT_TOKEN" >"$WORK/curlrc"
+printf 'user = "x:%s"\n' "$NASHCODE_TOKEN" >"$WORK/curlrc"
 
 log "create a temporary repository by pushing to it"
 mkdir -p "$WORK/src"
 cd "$WORK/src"
 git init --quiet -b main .
-git config user.email "nashgit@localhost"
-git config user.name "nashgit setup"
-printf 'nashgit end-to-end check\n' >README.md
+git config user.email "nashcode@localhost"
+git config user.name "nashcode setup"
+printf 'nashcode end-to-end check\n' >README.md
 git add README.md
-git -c commit.gpgsign=false commit --quiet -m "nashgit verify"
-git -c credential.helper='!f() {{ echo username=x; echo "password=$NASHGIT_TOKEN"; }}; f' \
+git -c commit.gpgsign=false commit --quiet -m "nashcode verify"
+git -c credential.helper='!f() {{ echo username=x; echo "password=$NASHCODE_TOKEN"; }}; f' \
     push --quiet "$BASE/$NAME.git" main
 
 log "clone it back with no credentials"
@@ -605,8 +605,8 @@ log "delete the temporary repository"
 curl -fsS -K "$WORK/curlrc" -X DELETE "$BASE/$NAME" >/dev/null
 
 log "verified: authenticated push, anonymous clone, delete"
-echo "NASHGIT_VERIFY=ok"
-echo "NASHGIT_VERIFY_REPO=$NAME"
+echo "NASHCODE_VERIFY=ok"
+echo "NASHCODE_VERIFY_REPO=$NAME"
 "#,
         token = sq(token),
         listen = listen,
@@ -651,12 +651,12 @@ fn regen_git_tokens(p: &Profile) -> String {
         r#"DGIT_DIR={dgit_dir}
 TOKENS="$(sed -n 's/^[^=]* = "\(.*\)"$/\1/p' "$INVITES" | paste -sd, -)"
 cd "$DGIT_DIR"
-VARS_FILE="$(mktemp "$DGIT_DIR/.nashgit-vars.XXXXXX")"
+VARS_FILE="$(mktemp "$DGIT_DIR/.nashcode-vars.XXXXXX")"
 trap 'rm -f "$VARS_FILE"' EXIT
 printf '{{"GIT_TOKENS": "%s"}}' "$TOKENS" >"$VARS_FILE"
-node - "$DGIT_DIR/wrangler.celld.jsonc" "$VARS_FILE" <<'NASHGIT_PATCH_EOF'
+node - "$DGIT_DIR/wrangler.celld.jsonc" "$VARS_FILE" <<'NASHCODE_PATCH_EOF'
 {patch}
-NASHGIT_PATCH_EOF
+NASHCODE_PATCH_EOF
 chmod 600 "$DGIT_DIR/wrangler.celld.jsonc"
 rm -f "$VARS_FILE"
 trap - EXIT
@@ -675,7 +675,7 @@ log "celld restarted"
     )
 }
 
-/// Probe the loopback listener with `$NASHGIT_PROBE_TOKEN` until it answers.
+/// Probe the loopback listener with `$NASHCODE_PROBE_TOKEN` until it answers.
 ///
 /// The probe is dgit's usual read-only one: a PUT with a body that is not
 /// JSON. 400 means the token was accepted (and nothing changed), 401 means it
@@ -691,10 +691,10 @@ fn probe_block(listen: &str, break_on: &str) -> String {
         r#"CURLRC="$(mktemp)"
 chmod 600 "$CURLRC"
 trap 'rm -f "$CURLRC"' EXIT
-printf 'user = "x:%s"\n' "$NASHGIT_PROBE_TOKEN" >"$CURLRC"
+printf 'user = "x:%s"\n' "$NASHCODE_PROBE_TOKEN" >"$CURLRC"
 code=000
 for i in $(seq 1 20); do
-  code="$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 -K "$CURLRC" -X PUT --data '~' "http://{listen}/nashgit-invite-probe/config" || true)"
+  code="$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 -K "$CURLRC" -X PUT --data '~' "http://{listen}/nashcode-invite-probe/config" || true)"
   case "$code" in {break_on}) break ;; esac
   sleep 1
 done
@@ -711,19 +711,19 @@ pub fn invite_script(name: &str, token: &str, p: &Profile, listen: &str) -> Stri
 umask 077
 INVITES="$HOME/git-invites.toml"
 NAME={name}
-export NASHGIT_PROBE_TOKEN={token}
+export NASHCODE_PROBE_TOKEN={token}
 touch "$INVITES"
 chmod 600 "$INVITES"
 TMP="$(mktemp)"
 grep -v "^$NAME = " "$INVITES" >"$TMP" || true
-printf '%s = "%s"\n' "$NAME" "$NASHGIT_PROBE_TOKEN" >>"$TMP"
+printf '%s = "%s"\n' "$NAME" "$NASHCODE_PROBE_TOKEN" >>"$TMP"
 install -m 0600 "$TMP" "$INVITES"
 rm -f "$TMP"
 log "recorded $NAME in $INVITES"
 {regen}
-{probe}echo "NASHGIT_INVITE_PROBE=$code"
+{probe}echo "NASHCODE_INVITE_PROBE=$code"
 if [ "$code" != 400 ]; then log "the new token was not accepted (HTTP $code)"; exit 1; fi
-echo "NASHGIT_INVITE=ok"
+echo "NASHCODE_INVITE=ok"
 "#,
         name = sq(name),
         token = sq(token),
@@ -741,20 +741,20 @@ umask 077
 INVITES="$HOME/git-invites.toml"
 NAME={name}
 grep -q "^$NAME = " "$INVITES" 2>/dev/null || {{ log "no invite named $NAME"; exit 1; }}
-export NASHGIT_PROBE_TOKEN="$(sed -n "s/^$NAME = \"\(.*\)\"$/\1/p" "$INVITES")"
+export NASHCODE_PROBE_TOKEN="$(sed -n "s/^$NAME = \"\(.*\)\"$/\1/p" "$INVITES")"
 TMP="$(mktemp)"
 grep -v "^$NAME = " "$INVITES" >"$TMP" || true
 install -m 0600 "$TMP" "$INVITES"
 rm -f "$TMP"
 log "removed $NAME from $INVITES"
 {regen}
-{probe}echo "NASHGIT_REVOKE_PROBE=$code"
+{probe}echo "NASHCODE_REVOKE_PROBE=$code"
 case "$code" in
   401|403) ;;
   400) log "the revoked token is still accepted"; exit 1 ;;
   *) log "could not confirm the revocation (HTTP $code)"; exit 1 ;;
 esac
-echo "NASHGIT_REVOKE=ok"
+echo "NASHCODE_REVOKE=ok"
 "#,
         name = sq(name),
         regen = regen_git_tokens(p),
@@ -762,20 +762,20 @@ echo "NASHGIT_REVOKE=ok"
     )
 }
 
-/// The invited names, one `NASHGIT_INVITE_NAME=` line each. Never the tokens.
+/// The invited names, one `NASHCODE_INVITE_NAME=` line each. Never the tokens.
 pub fn invites_list_script() -> String {
     format!(
         r#"{PRELUDE}
 INVITES="$HOME/git-invites.toml"
 if [ -f "$INVITES" ]; then
-  sed -n 's/^\([^ =]*\) = .*/NASHGIT_INVITE_NAME=\1/p' "$INVITES"
+  sed -n 's/^\([^ =]*\) = .*/NASHCODE_INVITE_NAME=\1/p' "$INVITES"
 fi
-echo "NASHGIT_LIST=ok"
+echo "NASHCODE_LIST=ok"
 "#
     )
 }
 
-/// The host-side half of `nashgit doctor`, as one round trip.
+/// The host-side half of `nashcode doctor`, as one round trip.
 pub fn doctor_script(p: &Profile, listen: &str) -> String {
     let diagnose = match (&p.bucket, &p.region) {
         (Some(bucket), region) => {
@@ -788,28 +788,28 @@ pub fn doctor_script(p: &Profile, listen: &str) -> String {
             }
             format!(
                 r#"if ! as_root true 2>/dev/null; then
-  echo "NASHGIT_BUCKET=skip"
+  echo "NASHCODE_BUCKET=skip"
 elif ! as_root test -e /etc/celld/celld.env 2>/dev/null; then
-  echo "NASHGIT_BUCKET=missing"
+  echo "NASHCODE_BUCKET=missing"
 elif as_root sh -c 'set -a; . /etc/celld/celld.env; set +a; exec "$0" diagnose "$@"' "$(command -v celld || echo celld)" {flags} >/dev/null 2>&1; then
-  echo "NASHGIT_BUCKET=ok"
+  echo "NASHCODE_BUCKET=ok"
 else
-  echo "NASHGIT_BUCKET=fail"
+  echo "NASHCODE_BUCKET=fail"
 fi
 "#
             )
         }
-        _ => "echo \"NASHGIT_BUCKET=skip\"\n".to_string(),
+        _ => "echo \"NASHCODE_BUCKET=skip\"\n".to_string(),
     };
     format!(
         r#"{PRELUDE}
-echo "NASHGIT_SERVICE=$(systemctl is-active celld 2>/dev/null || echo inactive)"
-echo "NASHGIT_LOOPBACK=$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 "http://{listen}/" 2>/dev/null || echo 000)"
-echo "NASHGIT_TS_STATE=$(tailscale status --json 2>/dev/null | node -e {state} 2>/dev/null || echo Unknown)"
+echo "NASHCODE_SERVICE=$(systemctl is-active celld 2>/dev/null || echo inactive)"
+echo "NASHCODE_LOOPBACK=$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 "http://{listen}/" 2>/dev/null || echo 000)"
+echo "NASHCODE_TS_STATE=$(tailscale status --json 2>/dev/null | node -e {state} 2>/dev/null || echo Unknown)"
 SERVE_STATUS="$(tailscale serve status 2>/dev/null || true)"
 case "$SERVE_STATUS" in
-  *"127.0.0.1:{port}"*) echo "NASHGIT_SERVE=ok" ;;
-  *) echo "NASHGIT_SERVE=fail" ;;
+  *"127.0.0.1:{port}"*) echo "NASHCODE_SERVE=ok" ;;
+  *) echo "NASHCODE_SERVE=fail" ;;
 esac
 {diagnose}"#,
         listen = listen,
@@ -921,7 +921,7 @@ mod tests {
         let s = invite_script("alice", "tok3n", &p, "127.0.0.1:8080");
         // The token lands in the script body (stdin) as a variable, and curl
         // reads it from a 0600 config file, never argv.
-        assert!(s.contains("export NASHGIT_PROBE_TOKEN='tok3n'"));
+        assert!(s.contains("export NASHCODE_PROBE_TOKEN='tok3n'"));
         assert!(s.contains("-K \"$CURLRC\""));
         assert!(!s.contains("-u x:"));
         assert!(s.contains("install -m 0600"));
@@ -929,7 +929,7 @@ mod tests {
         // Revoke reads the token from the mapping; the CLI never sends it.
         let r = revoke_script("alice", &p, "127.0.0.1:8080");
         assert!(!r.contains("tok3n"));
-        assert!(r.contains("NASHGIT_REVOKE_PROBE"));
+        assert!(r.contains("NASHCODE_REVOKE_PROBE"));
 
         // The probe only trusts the hoped-for answer early: right after the
         // restart the old Worker can still answer, so the wrong code is
@@ -943,8 +943,8 @@ mod tests {
 
         // The list script touches only the name column.
         let l = invites_list_script();
-        assert!(l.contains("NASHGIT_INVITE_NAME=\\1"));
-        assert!(!l.contains("NASHGIT_PROBE_TOKEN"));
+        assert!(l.contains("NASHCODE_INVITE_NAME=\\1"));
+        assert!(!l.contains("NASHCODE_PROBE_TOKEN"));
     }
 
     #[test]

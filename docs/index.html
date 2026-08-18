@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>nashgit — your own forge, on your own tailnet</title>
+<title>nashcode — your own forge, on your own tailnet</title>
 <meta name="description" content="A personal git forge: dgit on celld, S3-backed durable storage, stacked-diff review, plans and kanban for agents. Runs on your box, behind your tailnet.">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -157,31 +157,31 @@
 <body>
 <div class="wrap">
   <nav>
-    <a class="brand" href="#"><img src="assets/logo.svg" alt=""> nashgit</a>
+    <a class="brand" href="#"><img src="assets/logo.svg" alt=""> nashcode</a>
     <div class="links">
       <a href="#features">features</a>
-      <a href="https://github.com/matthiasdebernardini/nashgit">github</a>
+      <a href="https://github.com/matthiasdebernardini/nashcode">github</a>
     </div>
   </nav>
 
   <header>
-    <img class="mark" src="assets/logo.svg" alt="nashgit logo">
+    <img class="mark" src="assets/logo.svg" alt="nashcode logo">
     <h1>your own forge,<br>on your own <span class="accent">tailnet</span></h1>
     <p class="sub">Every repository is a durable object with its own SQLite database,
     replicated to a bucket you own. Stacked-diff review, plans, and a kanban board
     your agents can drive. No accounts — your tailnet is the perimeter.</p>
     <div class="cta">
-      <a class="btn primary" href="https://github.com/matthiasdebernardini/nashgit">get the source</a>
+      <a class="btn primary" href="https://github.com/matthiasdebernardini/nashcode">get the source</a>
       <a class="btn" href="#quickstart">quickstart</a>
     </div>
 
     <div class="term" id="quickstart">
       <div class="term-bar"><span>~ zsh</span><button id="copy" type="button">copy</button></div>
-      <pre><span class="p">$</span> <span class="c">nashgit setup</span>
+      <pre><span class="p">$</span> <span class="c">nashcode setup</span>
 <span class="out">✓ dgit deployed on celld · bucket wired · tailnet serving</span>
-<span class="p">$</span> <span class="c">nashgit init my-notes</span>
+<span class="p">$</span> <span class="c">nashcode init my-notes</span>
 <span class="out">✓ repository created · origin wired · pushed</span>
-<span class="p">$</span> <span class="c">nashgit invite ada</span>
+<span class="p">$</span> <span class="c">nashcode invite ada</span>
 <span class="out">✓ token minted · send her the snippet</span></pre>
     </div>
   </header>
@@ -192,7 +192,7 @@
       <div class="cell"><h2>stacked review</h2><p>Branch stacks inferred from the graph, rendered with Pierre diffs. Merge and restack from the browser — force-pushes are leased and atomic.</p></div>
       <div class="cell"><h2>plans &amp; board</h2><p>Markdown in <code>plans/</code> and <code>tasks/</code> is the database. Agents push plans, you annotate, cards flip to done on merge.</p></div>
       <div class="cell"><h2>agents welcome</h2><p>Every surface is JSON. Comments, CI, board moves, and a <code>/brain</code> endpoint that hands an agent the state of everything.</p></div>
-      <div class="cell"><h2>ci that is just a script</h2><p><code>.nashgit/ci</code> at your repo root. Green dot or red dot, logs in the viewer. Deploys are the script's business.</p></div>
+      <div class="cell"><h2>ci that is just a script</h2><p><code>.nashcode/ci</code> at your repo root. Green dot or red dot, logs in the viewer. Deploys are the script's business.</p></div>
       <div class="cell"><h2>not a github replacement</h2><p>The private layer for work in flight. Public repos, releases, and outside collaborators stay where they are.</p></div>
     </div>
   </section>
@@ -206,7 +206,7 @@
 
   <footer>
     <span>apache-2.0 · built on <a href="https://github.com/littledivy/dgit">dgit</a> + <a href="https://celld.dev">celld</a></span>
-    <span><a href="https://github.com/matthiasdebernardini/nashgit">source</a></span>
+    <span><a href="https://github.com/matthiasdebernardini/nashcode">source</a></span>
   </footer>
 </div>
 
@@ -218,7 +218,7 @@
   document.querySelectorAll("a.btn, nav a").forEach(el =>
     el.addEventListener("click", () => play(tap)));
   document.getElementById("copy").addEventListener("click", async ev => {
-    const cmds = ["nashgit setup", "nashgit init my-notes", "nashgit invite ada"].join("\n");
+    const cmds = ["nashcode setup", "nashcode init my-notes", "nashcode invite ada"].join("\n");
     try { await navigator.clipboard.writeText(cmds); } catch {}
     play(ok);
     ev.target.textContent = "copied";

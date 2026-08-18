@@ -99,24 +99,24 @@ pub fn see_other(to: &str) -> topcoat::Result<Response> {
 
 // ---- embedded assets -------------------------------------------------------------
 
-pub const ASSET_HASH: &str = env!("NASHGIT_ASSET_HASH");
-const APP_JS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nashgit.js"));
-const APP_CSS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nashgit.css"));
+pub const ASSET_HASH: &str = env!("NASHCODE_ASSET_HASH");
+const APP_JS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nashcode.js"));
+const APP_CSS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nashcode.css"));
 
 pub fn js_url() -> String {
-    format!("/assets/nashgit.js?v={ASSET_HASH}")
+    format!("/assets/nashcode.js?v={ASSET_HASH}")
 }
 
 pub fn css_url() -> String {
-    format!("/assets/nashgit.css?v={ASSET_HASH}")
+    format!("/assets/nashcode.css?v={ASSET_HASH}")
 }
 
-#[topcoat::router::route(GET "/assets/nashgit.js")]
+#[topcoat::router::route(GET "/assets/nashcode.js")]
 async fn asset_js() -> topcoat::Result<Response> {
     Ok(asset_response("text/javascript; charset=utf-8", APP_JS))
 }
 
-#[topcoat::router::route(GET "/assets/nashgit.css")]
+#[topcoat::router::route(GET "/assets/nashcode.css")]
 async fn asset_css() -> topcoat::Result<Response> {
     Ok(asset_response("text/css; charset=utf-8", APP_CSS))
 }

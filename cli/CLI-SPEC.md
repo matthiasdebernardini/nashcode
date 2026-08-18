@@ -1,8 +1,8 @@
-# nashgit CLI
+# nashcode CLI
 
-A single Rust binary (`nashgit`) that turns the manual setup we did by hand into a
+A single Rust binary (`nashcode`) that turns the manual setup we did by hand into a
 repeatable wizard, and then manages day-to-day use. Built standalone in this directory as
-crate `nashgit-cli` (binary name `nashgit`); it will be merged into the nashgit workspace
+crate `nashcode-cli` (binary name `nashcode`); it will be merged into the nashcode workspace
 repo later — no path deps outside this directory.
 
 Audience: a developer with a Unix box they can SSH to, a Tailscale tailnet, and an
@@ -10,7 +10,7 @@ S3-compatible bucket. The CLI does everything else.
 
 ## Commands
 
-### `nashgit setup`
+### `nashcode setup`
 Interactive wizard (also fully scriptable via flags for every prompt):
 
 1. **Host** — prompt for an SSH destination (`user@host`); verify reachability, sudo,
@@ -34,46 +34,46 @@ Interactive wizard (also fully scriptable via flags for every prompt):
 7. **Profile** — write everything non-secret to the local profile store (below); the
    GIT_TOKEN goes into the profile file chmod 600.
 
-### `nashgit use <profile>` / `nashgit profiles`
-Profile store at `~/.config/nashgit/config.toml`: named servers (`url`, `ssh`, `token`),
+### `nashcode use <profile>` / `nashcode profiles`
+Profile store at `~/.config/nashcode/config.toml`: named servers (`url`, `ssh`, `token`),
 one marked active. `use` selects the active one; all other commands honor
 `--profile <name>` to override. This is the "select it" surface — multiple deployments
 (personal, team, client) coexist.
 
 ### Repo commands (against the active profile, dgit's HTTP API)
-- `nashgit init [name]` — jj-first creation: version the current directory.
+- `nashcode init [name]` — jj-first creation: version the current directory.
   Create the repository on the server (PUT `/name/config`), initialise a working
   copy if the folder has none (`jj git init --colocate` when jj is on PATH,
   `git init -b main` otherwise; `--git`/`--jj` override), wire `origin` with the
   token via the credential helper, commit anything uncommitted, push. Default
   name = directory name. Re-running is safe. `--no-push` stops before the push.
-- `nashgit new <name> [--private] [--desc ...] [--section ...]` — dgit creates on first
+- `nashcode new <name> [--private] [--desc ...] [--section ...]` — dgit creates on first
   push, so this pushes an empty commit is WRONG — instead: PUT `/name/config` with the
   token to create/describe, then if run inside a git worktree, add `origin` with the
   token embedded for pushes (`https://x:TOKEN@host/name.git`) stored via git credential
   helper, not in the remote URL — use `git credential approve`.
-- `nashgit ls` — scrape the index page (dgit has no JSON list endpoint; parse the HTML
+- `nashcode ls` — scrape the index page (dgit has no JSON list endpoint; parse the HTML
   anchor list, tolerate markup drift with a loose regex).
-- `nashgit clone <name> [dir]`, `nashgit rm <name>` (DELETE, with a y/N confirm),
-  `nashgit gc <name>` (POST /gc), `nashgit desc <name> ...` (PUT /config).
-- `nashgit remote [name]` — wire `origin` in the cwd repo (default name = dir name).
-- `nashgit token` — print the push token for the active profile (for CI use).
+- `nashcode clone <name> [dir]`, `nashcode rm <name>` (DELETE, with a y/N confirm),
+  `nashcode gc <name>` (POST /gc), `nashcode desc <name> ...` (PUT /config).
+- `nashcode remote [name]` — wire `origin` in the cwd repo (default name = dir name).
+- `nashcode token` — print the push token for the active profile (for CI use).
 
-### `nashgit invite` — per-person push access
+### `nashcode invite` — per-person push access
 dgit reads extra comma-separated push tokens from its GIT_TOKENS var, alongside
 GIT_TOKEN. dgit only sees the flat list, so the CLI owns a name → token mapping
 on the host (`~/git-invites.toml`, 0600) and regenerates GIT_TOKENS from it on
 every change, applied the same way `setup` deploys: patch wrangler.celld.jsonc
 vars, `celld deploy`, restart the service.
 
-- `nashgit invite <name>` — generate a fresh token, update the mapping over SSH
+- `nashcode invite <name>` — generate a fresh token, update the mapping over SSH
   (profile's ssh dest), regenerate + redeploy, verify with an auth probe using
   the new token. Print a ready-to-send snippet: remote URL, the token, and the
   one-liner to store it via `git credential approve` — plus a reminder that
   network access is Tailscale's job (add to tailnet or share the node); the CLI
   does not touch Tailscale ACLs.
-- `nashgit invite --list` — names only, never tokens.
-- `nashgit invite --revoke <name>` — remove from the mapping, regenerate,
+- `nashcode invite --list` — names only, never tokens.
+- `nashcode invite --revoke <name>` — remove from the mapping, regenerate,
   redeploy, verify the revoked token now fails the auth probe.
 - Idempotent: re-inviting an existing name rotates that person's token.
 - Secrets discipline unchanged: token to the host via stdin, never argv; only
@@ -89,14 +89,14 @@ vars, `celld deploy`, restart the service.
 - git-credential storage still applies: jj asks git's credential helpers, so
   `git credential approve` covers both.
 - `--jj` on `new` and `clone` colocates jj on top of the git working copy;
-  `NASHGIT_JJ=1` makes that the default. An explicit `--jj` with no jj on PATH
+  `NASHCODE_JJ=1` makes that the default. An explicit `--jj` with no jj on PATH
   is an error; the env-var default degrades to a warning.
 - README carries a "Using with jj" section.
 - Tests: detection via directory-layout fixtures (plain git / colocated /
-  jj-only); jj is shelled out behind a shim seam (`NASHGIT_JJ_BIN`,
-  `NASHGIT_JJ_AVAILABLE`) so no test needs jj installed.
+  jj-only); jj is shelled out behind a shim seam (`NASHCODE_JJ_BIN`,
+  `NASHCODE_JJ_AVAILABLE`) so no test needs jj installed.
 
-### `nashgit doctor`
+### `nashcode doctor`
 Checks, each one line, ✓/✗: profile exists, server reachable, TLS cert valid, token
 accepted (auth probe), tailscale identity headers present, celld service active (via
 SSH if configured), bucket reachable from host, viewer up (if configured).
@@ -108,7 +108,7 @@ SSH if configured), bucket reachable from host, viewer up (if configured).
 - SSH = shell out to the system `ssh`/`scp` (respects user's config/agent); never an SSH
   library. All remote scripts are idempotent and `set -e`.
 - Secrets never in argv of remote commands where avoidable (pipe via stdin), never
-  printed unless explicitly requested (`nashgit token`).
+  printed unless explicitly requested (`nashcode token`).
 - Every command supports `--json` for agent use; human output stays terse.
 - `--help` for every command is written for someone who has never seen celld: one
   paragraph of what/why at the top level explaining the architecture (dgit worker on
@@ -121,15 +121,15 @@ SSH if configured), bucket reachable from host, viewer up (if configured).
 
 ## Plans + plannotator
 
-Plans are markdown files under `plans/` in a repo (a nashgit convention; the viewer
+Plans are markdown files under `plans/` in a repo (a nashcode convention; the viewer
 renders them). CLI support:
 
-- `nashgit plan new <title>` — create `plans/<slug>.md` from a minimal template in the
+- `nashcode plan new <title>` — create `plans/<slug>.md` from a minimal template in the
   cwd repo.
-- `nashgit annotate <plans/file.md>` — shell out to a locally installed `plannotator`
+- `nashcode annotate <plans/file.md>` — shell out to a locally installed `plannotator`
   binary against the file if present (`which plannotator`), else print install pointer.
   When the active profile has a viewer URL configured, print the plan's viewer URL too.
-- `nashgit comments <file> [--branch ...] [--since RFC3339] [--repo ...]` — GET
+- `nashcode comments <file> [--branch ...] [--since RFC3339] [--repo ...]` — GET
   the viewer's `/:repo/comments` JSON endpoint (`viewer_url` from the active
   profile; a clear error when it is unset). `--repo` defaults to the name
   `origin` points at. `--json` passes the viewer's answer through untouched.

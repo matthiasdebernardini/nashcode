@@ -6,7 +6,7 @@
 //! way — jj uses git's credential machinery — so the `git credential approve`
 //! path runs for both.
 //!
-//! `$NASHGIT_GIT_BIN` and `$NASHGIT_JJ_BIN` replace the executables. Detection
+//! `$NASHCODE_GIT_BIN` and `$NASHCODE_JJ_BIN` replace the executables. Detection
 //! itself reads only the directory layout, so it needs neither binary.
 
 use anyhow::{Context, Result, bail};
@@ -98,11 +98,11 @@ pub fn require_cwd() -> Result<Workspace> {
 }
 
 fn git_bin() -> String {
-    std::env::var("NASHGIT_GIT_BIN").unwrap_or_else(|_| "git".to_string())
+    std::env::var("NASHCODE_GIT_BIN").unwrap_or_else(|_| "git".to_string())
 }
 
 fn jj_bin() -> String {
-    std::env::var("NASHGIT_JJ_BIN").unwrap_or_else(|_| "jj".to_string())
+    std::env::var("NASHCODE_JJ_BIN").unwrap_or_else(|_| "jj".to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -192,7 +192,7 @@ impl Workspace {
     }
 
     /// The name `origin` currently points at, e.g. `myrepo` from
-    /// `https://host/myrepo.git`. Used as the default for `nashgit comments`.
+    /// `https://host/myrepo.git`. Used as the default for `nashcode comments`.
     pub fn origin_repo_name(&self) -> Result<Option<String>> {
         let url = if self.kind.is_jj() {
             let r = jj(&self.root, &["git", "remote", "list"])?;
@@ -258,7 +258,7 @@ pub fn credential_helper(url: &str) -> Result<Option<String>> {
 /// Goes through the same seam as every other jj call, so a test can make the
 /// answer "no" without uninstalling anything.
 pub fn jj_available() -> bool {
-    if let Ok(v) = std::env::var("NASHGIT_JJ_AVAILABLE") {
+    if let Ok(v) = std::env::var("NASHCODE_JJ_AVAILABLE") {
         return v == "1";
     }
     Command::new(jj_bin())
@@ -271,23 +271,23 @@ pub fn jj_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Did the user ask for jj here? `--jj` or `$NASHGIT_JJ=1`, nothing else.
+/// Did the user ask for jj here? `--jj` or `$NASHCODE_JJ=1`, nothing else.
 ///
 /// This is the rule for `new` and `clone`, which act on repositories that
 /// already have (or will get) a git working copy: colocating jj on top is
 /// opt-in, so having jj installed does not change what `clone` produces.
 pub fn jj_requested(force_jj: bool) -> bool {
-    force_jj || std::env::var("NASHGIT_JJ").as_deref() == Ok("1")
+    force_jj || std::env::var("NASHCODE_JJ").as_deref() == Ok("1")
 }
 
 /// Should a brand-new working copy be jj? `--jj` and `--git` decide it
-/// outright; otherwise jj wins when it is installed, or when `$NASHGIT_JJ=1`.
+/// outright; otherwise jj wins when it is installed, or when `$NASHCODE_JJ=1`.
 /// This is the rule for `init`, which creates a working copy from nothing.
 pub fn prefer_jj(force_jj: bool, force_git: bool) -> bool {
     if force_git {
         return false;
     }
-    if force_jj || std::env::var("NASHGIT_JJ").as_deref() == Ok("1") {
+    if force_jj || std::env::var("NASHCODE_JJ").as_deref() == Ok("1") {
         return true;
     }
     jj_available()

@@ -206,15 +206,15 @@ mod hook {
     use std::process::{Command, Stdio};
 
     fn run_hook(stdin: &str, url: &str) -> std::process::Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nashgit-viewer"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nashcode-viewer"))
             .arg("hook")
-            .env("NASHGIT_URL", url)
-            .env("NASHGIT_REPO", "demo")
+            .env("NASHCODE_URL", url)
+            .env("NASHCODE_REPO", "demo")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("nashgit runs");
+            .expect("nashcode runs");
         child
             .stdin
             .as_mut()
@@ -260,7 +260,7 @@ async fn the_hook_records_an_event_against_a_live_server() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let router = nashgit::web::router(bed.app.clone());
+    let router = nashcode::web::router(bed.app.clone());
     let server = tokio::spawn(async move {
         let _ = topcoat::serve_until(listener, router, async {
             let _ = stop_rx.await;
@@ -278,10 +278,10 @@ async fn the_hook_records_an_event_against_a_live_server() {
     .to_string();
     let url = format!("http://{addr}");
     let status = tokio::task::spawn_blocking(move || {
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_nashgit-viewer"))
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_nashcode-viewer"))
             .arg("hook")
-            .env("NASHGIT_URL", url)
-            .env_remove("NASHGIT_REPO")
+            .env("NASHCODE_URL", url)
+            .env_remove("NASHCODE_REPO")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

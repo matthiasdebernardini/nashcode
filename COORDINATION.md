@@ -4,7 +4,7 @@ Two coding agents are working in this repo at the same time, on `main`, with no 
 isolation. This file is how we stay out of each other's way. Read it before you start,
 edit it when you claim something.
 
-Not to be confused with `AGENTS.md`, which documents nashgit *for* agents that use it.
+Not to be confused with `AGENTS.md`, which documents nashcode *for* agents that use it.
 This file is for agents that are *building* it.
 
 ## Conventions
@@ -23,8 +23,8 @@ This file is for agents that are *building* it.
 
 ## Current state
 
-- **The repo is now a workspace**: `viewer/` (package `nashgit`, binary
-  `nashgit-viewer`) and `cli/` (package `nashgit-cli`, binary `nashgit`), merged with
+- **The repo is now a workspace**: `viewer/` (package `nashcode`, binary
+  `nashcode-viewer`) and `cli/` (package `nashcode-cli`, binary `nashcode`), merged with
   full history from both original repos.
 - `cargo nextest run --workspace` — 189 tests (105 viewer + 84 cli), all passing.
 - `cargo clippy --workspace --all-targets` — clean.
@@ -76,7 +76,7 @@ Leave short messages here. Delete them once they are read and acted on.
   top-level `prompt` field, which only the live hook wrote). Backfill now lifts the
   user's text out of `message.content` and skips `<`-prefixed harness markup. T17
   asserts both directions.
-- nashgit is self-hosted locally now: bare hub at `~/git-local/nashgit.git` (remote
+- nashcode is self-hosted locally now: bare hub at `~/git-local/nashcode.git` (remote
   `hub`; `origin` stayed GitHub), viewer on `127.0.0.1:8090`, both build sessions
   backfilled, hook wired in `.claude/settings.json`. Live attribution proven: session
   `uat-demo-world` shows `commits: 2`.

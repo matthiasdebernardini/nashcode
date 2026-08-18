@@ -1,7 +1,7 @@
 //! Everything server-side goes through the system `ssh`.
 //!
 //! No SSH library: shelling out means the user's `~/.ssh/config`, their agent,
-//! their jump hosts, and their hardware keys all keep working, and nashgit
+//! their jump hosts, and their hardware keys all keep working, and nashcode
 //! never holds a private key.
 //!
 //! Remote work is sent as a *script on stdin* (`ssh dest bash -s`) rather than
@@ -9,7 +9,7 @@
 //! they never appear in the host's process list; and a multi-step script can be
 //! written plainly, with `set -eu`, instead of escaped into one line.
 //!
-//! `$NASHGIT_SSH_BIN` replaces the `ssh` executable. Tests point it at a shim.
+//! `$NASHCODE_SSH_BIN` replaces the `ssh` executable. Tests point it at a shim.
 
 use anyhow::{Context, Result, bail};
 use std::io::Write;
@@ -61,7 +61,7 @@ impl Output {
 
 /// Path of the `ssh` binary, overridable for tests.
 pub fn ssh_bin() -> String {
-    std::env::var("NASHGIT_SSH_BIN").unwrap_or_else(|_| "ssh".to_string())
+    std::env::var("NASHCODE_SSH_BIN").unwrap_or_else(|_| "ssh".to_string())
 }
 
 impl Ssh {
@@ -176,9 +176,9 @@ mod tests {
 
     #[test]
     fn parse_kv_reads_probe_output() {
-        let kv = parse_kv("noise\nNASHGIT_ARCH=aarch64\nNASHGIT_SUDO=nopasswd\n");
-        assert_eq!(kv["NASHGIT_ARCH"], "aarch64");
-        assert_eq!(kv["NASHGIT_SUDO"], "nopasswd");
+        let kv = parse_kv("noise\nNASHCODE_ARCH=aarch64\nNASHCODE_SUDO=nopasswd\n");
+        assert_eq!(kv["NASHCODE_ARCH"], "aarch64");
+        assert_eq!(kv["NASHCODE_SUDO"], "nopasswd");
         assert_eq!(kv.len(), 2);
     }
 

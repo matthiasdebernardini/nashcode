@@ -3,9 +3,9 @@
 mod common;
 
 use common::{Work, git, simple_bed, stacked_fixture};
-use nashgit::db::status;
-use nashgit::ops::OpError;
-use nashgit::stack::StackGraph;
+use nashcode::db::status;
+use nashcode::ops::OpError;
+use nashcode::stack::StackGraph;
 
 #[tokio::test]
 async fn merge_fast_forwards_into_an_unmoved_parent() {

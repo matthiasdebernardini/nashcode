@@ -1,12 +1,12 @@
 {
-  "name": "nashgit-assets",
+  "name": "nashcode-assets",
   "version": "0.1.0",
   "private": true,
-  "description": "Browser asset bundle (JS + CSS) for the nashgit Rust server, built into Cargo's OUT_DIR by build.rs",
+  "description": "Browser asset bundle (JS + CSS) for the nashcode Rust server, built into Cargo's OUT_DIR by build.rs",
   "type": "module",
   "scripts": {
-    "build:js": "esbuild js/app.js --bundle --format=esm --minify --target=es2022 --outfile=dist/nashgit.js",
-    "build:css": "esbuild js/app.css --bundle --minify --loader:.woff=file --loader:.woff2=file --loader:.svg=dataurl --outfile=dist/nashgit.css"
+    "build:js": "esbuild js/app.js --bundle --format=esm --minify --target=es2022 --outfile=dist/nashcode.js",
+    "build:css": "esbuild js/app.css --bundle --minify --loader:.woff=file --loader:.woff2=file --loader:.svg=dataurl --outfile=dist/nashcode.css"
   },
   "dependencies": {
     "@ibm/plex-mono": "^2.5.0",

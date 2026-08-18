@@ -1,4 +1,4 @@
-//! nashgit: deploy and operate a self-hosted dgit git server on celld,
+//! nashcode: deploy and operate a self-hosted dgit git server on celld,
 //! behind your own tailnet.
 //!
 //! The library exists so integration tests can reach the pure parts (profile

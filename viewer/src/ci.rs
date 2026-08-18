@@ -1,7 +1,7 @@
-//! Polling CI: one global worker runs `.nashgit/ci` for each newly seen branch tip.
+//! Polling CI: one global worker runs `.nashcode/ci` for each newly seen branch tip.
 //! // ponytail: serial queue; parallelize per-repo if it ever backs up
 //!
-//! A job checks the commit out into a scratch clone, runs `.nashgit/ci` from the repo
+//! A job checks the commit out into a scratch clone, runs `.nashcode/ci` from the repo
 //! root when it is present and executable, captures the combined output to a log file,
 //! and records the result in SQLite. CD is not a separate system: the script deploys if
 //! it wants to.
@@ -19,7 +19,7 @@ use crate::git::{Repo, clone_local};
 use crate::hooks::{self, Webhooks};
 
 /// The script a repo opts into CI with, relative to its root.
-pub const CI_SCRIPT: &str = ".nashgit/ci";
+pub const CI_SCRIPT: &str = ".nashcode/ci";
 
 /// How long a job may run before it is killed.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -154,9 +154,9 @@ impl CiWorker {
             .env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()))
             .env("HOME", std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
             .env("GIT_TOKEN", &self.config.git_token)
-            .env("NASHGIT_REPO", &job.repo)
-            .env("NASHGIT_BRANCH", &job.branch)
-            .env("NASHGIT_COMMIT", &job.commit)
+            .env("NASHCODE_REPO", &job.repo)
+            .env("NASHCODE_BRANCH", &job.branch)
+            .env("NASHCODE_COMMIT", &job.commit)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -192,7 +192,7 @@ impl CiWorker {
             let _ = child.wait().await;
             let mut log = String::from_utf8_lossy(&collected).into_owned();
             log.push_str(&format!(
-                "\n\n[nashgit: killed after the {}s timeout; output above is partial]",
+                "\n\n[nashcode: killed after the {}s timeout; output above is partial]",
                 self.timeout.as_secs()
             ));
             return (status::TIMEOUT, log);

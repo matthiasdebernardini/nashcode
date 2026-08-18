@@ -1,4 +1,4 @@
-//! `nashgit setup` — the wizard that builds a deployment from nothing.
+//! `nashcode setup` — the wizard that builds a deployment from nothing.
 //!
 //! Seven steps, in the order a person would do them by hand. Each step is
 //! separately idempotent, so a run that dies at step 5 can be restarted from
@@ -104,12 +104,12 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
     let _ = install;
 
     let celld_bin = tools
-        .get("NASHGIT_HAS_CELLD")
+        .get("NASHCODE_HAS_CELLD")
         .cloned()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{}/.local/bin/celld", facts.home));
     let esbuild_bin = tools
-        .get("NASHGIT_HAS_ESBUILD")
+        .get("NASHCODE_HAS_ESBUILD")
         .cloned()
         .unwrap_or_default();
 
@@ -255,7 +255,7 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
                 out.line(format!("  web  {v}"));
             }
             out.line("");
-            out.line("Next: cd into a folder of files and run `nashgit init`.");
+            out.line("Next: cd into a folder of files and run `nashcode init`.");
         },
     );
     Ok(())
@@ -290,20 +290,20 @@ fn preflight(out: &Out, ssh: &Ssh, dry_run: bool) -> Result<Facts> {
     let kv = parse_kv(&res.stdout);
     let get = |k: &str| kv.get(k).map(String::as_str).unwrap_or("");
 
-    if get("NASHGIT_OS") != "Linux" {
+    if get("NASHCODE_OS") != "Linux" {
         bail!(
-            "the host reports `{}`; nashgit sets up Linux hosts with systemd only",
-            get("NASHGIT_OS")
+            "the host reports `{}`; nashcode sets up Linux hosts with systemd only",
+            get("NASHCODE_OS")
         );
     }
-    if get("NASHGIT_SYSTEMD") != "yes" {
-        bail!("the host has no systemctl; nashgit needs systemd to run celld as a service");
+    if get("NASHCODE_SYSTEMD") != "yes" {
+        bail!("the host has no systemctl; nashcode needs systemd to run celld as a service");
     }
-    match get("NASHGIT_ROOT") {
+    match get("NASHCODE_ROOT") {
         "root" | "sudo" => {}
         "sudo-password" => bail!(
             "sudo on {} asks for a password.\n\
-             nashgit runs unattended scripts over ssh, so it needs either a root login or \
+             nashcode runs unattended scripts over ssh, so it needs either a root login or \
              passwordless sudo. Add a sudoers rule for this user, or connect as root.",
             ssh.dest
         ),
@@ -312,14 +312,14 @@ fn preflight(out: &Out, ssh: &Ssh, dry_run: bool) -> Result<Facts> {
     out.step(format!(
         "{} — {} {}, {} access as {}",
         ssh.dest,
-        get("NASHGIT_DISTRO"),
-        get("NASHGIT_ARCH"),
-        get("NASHGIT_ROOT"),
-        get("NASHGIT_USER"),
+        get("NASHCODE_DISTRO"),
+        get("NASHCODE_ARCH"),
+        get("NASHCODE_ROOT"),
+        get("NASHCODE_USER"),
     ));
     Ok(Facts {
-        user: get("NASHGIT_USER").to_string(),
-        home: get("NASHGIT_HOME").to_string(),
+        user: get("NASHCODE_USER").to_string(),
+        home: get("NASHCODE_HOME").to_string(),
     })
 }
 
@@ -334,7 +334,7 @@ fn join_tailnet(out: &Out, ssh: &Ssh, dry_run: bool, authkey: Option<&str>) -> R
         .script(&remote::tailscale_up_script(authkey))?
         .require("tailscale up")?;
     let kv = parse_kv(&up.stdout);
-    if let Some(url) = kv.get("NASHGIT_AUTH_URL").filter(|u| !u.is_empty()) {
+    if let Some(url) = kv.get("NASHCODE_AUTH_URL").filter(|u| !u.is_empty()) {
         // stderr, so it survives --json and shows up even when piped.
         eprintln!("\n  Authorise this machine on your tailnet:\n  {url}\n");
     }
@@ -342,8 +342,8 @@ fn join_tailnet(out: &Out, ssh: &Ssh, dry_run: bool, authkey: Option<&str>) -> R
     for attempt in 0..60 {
         let res = ssh.script(&remote::tailscale_status_script())?;
         let kv = parse_kv(&res.stdout);
-        if kv.get("NASHGIT_TS_STATE").map(String::as_str) == Some("Running") {
-            let dns = kv.get("NASHGIT_DNSNAME").cloned().unwrap_or_default();
+        if kv.get("NASHCODE_TS_STATE").map(String::as_str) == Some("Running") {
+            let dns = kv.get("NASHCODE_DNSNAME").cloned().unwrap_or_default();
             out.step(format!("on the tailnet as {dns}"));
             return Ok(dns);
         }
@@ -403,7 +403,7 @@ fn ask(
         if let Some(d) = default {
             return Ok(d);
         }
-        bail!("{flag} is required when nashgit cannot prompt");
+        bail!("{flag} is required when nashcode cannot prompt");
     }
     let mut input = dialoguer::Input::<String>::new().with_prompt(label);
     if let Some(d) = default {
@@ -414,7 +414,7 @@ fn ask(
 
 fn choose_provider(out: &Out) -> Result<Provider> {
     if !out.interactive() {
-        bail!("--provider is required when nashgit cannot prompt");
+        bail!("--provider is required when nashcode cannot prompt");
     }
     let labels: Vec<&str> = Provider::all().iter().map(|p| p.label()).collect();
     let idx = dialoguer::Select::new()

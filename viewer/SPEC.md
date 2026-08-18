@@ -1,4 +1,4 @@
-# nashgit — personal git hosting on the tailnet
+# nashcode — personal git hosting on the tailnet
 
 Two pieces:
 
@@ -14,10 +14,10 @@ Two pieces:
 ## Viewer requirements
 
 - **Mirrors, not packfile parsing.** The viewer keeps `git clone --mirror` copies of each
-  repo under `$NASHGIT_MIRRORS` (default `~/mirrors`), fetched on page load with a short
+  repo under `$NASHCODE_MIRRORS` (default `~/mirrors`), fetched on page load with a short
   (~10s) debounce. All git questions are answered by shelling out to `git` against the
   mirror. Auth to dgit: basic auth `x:$GIT_TOKEN`.
-- **Repo discovery:** `$NASHGIT_REPOS` env var, comma-separated repo names, matching dgit
+- **Repo discovery:** `$NASHCODE_REPOS` env var, comma-separated repo names, matching dgit
   repo names at `$DGIT_URL/<name>.git`. (dgit has no list API we rely on.)
 - **Diff rendering: `@pierre/diffs`** (npm, vanilla-JS build, Shiki-based). The Rust app
   serves unified-diff text (`git diff parent...branch` per file); the browser renders it
@@ -78,8 +78,8 @@ Two pieces:
   stay ours to restyle. No auth of its own (the tailnet is the perimeter). Keep it small —
   this is a reader, not a forge.
 - **Bind** `127.0.0.1:8090` (tailscale serve fronts it on :8443). Config via env only:
-  `DGIT_URL`, `GIT_TOKEN`, `NASHGIT_REPOS`, `NASHGIT_MIRRORS`, `NASHGIT_BIND`,
-  `NASHGIT_DB`, `NASHGIT_WEBHOOKS`, `NASHGIT_CI_LOGS`, `NASHGIT_TRACES`, `NASHGIT_URL`.
+  `DGIT_URL`, `GIT_TOKEN`, `NASHCODE_REPOS`, `NASHCODE_MIRRORS`, `NASHCODE_BIND`,
+  `NASHCODE_DB`, `NASHCODE_WEBHOOKS`, `NASHCODE_CI_LOGS`, `NASHCODE_TRACES`, `NASHCODE_URL`.
 
 ## Acceptance criteria
 
@@ -108,7 +108,7 @@ Two pieces:
 - Prompts: a prompt recorded in a session shows up on the prompts page with its session
   and the commit that followed it, and `?q=` finds it by substring.
 - Traces: recording a session's events attributes the commits made between them to that
-  session; the same batch posted twice stores one copy; `nashgit hook` exits 0 with the
+  session; the same batch posted twice stores one copy; `nashcode hook` exits 0 with the
   server down and with garbage on stdin; a session page renders its events and its commits.
 - Brain: `/brain` aggregates a two-repo fixture into the documented shape; `/brain/ask` is
   tested against a stub HTTP server standing in for the Anthropic API (success, refusal,
@@ -125,12 +125,12 @@ Polling CI, built into the viewer (dgit emits no webhooks):
 
 - On mirror fetch, any branch tip not seen before is enqueued. One global worker runs
   jobs serially (`// ponytail: serial queue; parallelize per-repo if it ever backs up`).
-- A job: fresh `git worktree`/clone of that commit into a scratch dir, run `.nashgit/ci`
+- A job: fresh `git worktree`/clone of that commit into a scratch dir, run `.nashcode/ci`
   from the repo root if present and executable (else no job), 30-minute timeout, capture
   combined output to a log file, record `(repo, branch, commit, status, duration)` in
   SQLite. Nonzero exit = red.
 - CD is not a separate system: the script deploys if it wants to. Jobs get `GIT_TOKEN`,
-  branch/commit env vars (`NASHGIT_REPO`, `NASHGIT_BRANCH`, `NASHGIT_COMMIT`), nothing else.
+  branch/commit env vars (`NASHCODE_REPO`, `NASHCODE_BRANCH`, `NASHCODE_COMMIT`), nothing else.
 - UI: status dot per branch in stack views, `/:repo/:branch/ci` shows the log (plain
   `<pre>`, ANSI stripped). A `/:repo/:branch/ci/rerun` POST re-enqueues the tip.
 
@@ -238,13 +238,13 @@ SQLite.**
 ## Traces
 
 The transcript and the code are the same artifact seen from two sides. A commit answers
-"what changed"; the trace that produced it answers "why, and what was tried first". nashgit
+"what changed"; the trace that produced it answers "why, and what was tried first". nashcode
 stores both and lets you cross-reference them.
 
 - **A trace is a session.** One agent run: its prompts, its tool calls, and the commits it
   produced. Sessions are identified by the agent harness's own session id.
-- **Storage is nashgit's, not git's.** Traces live in SQLite plus raw transcript files under
-  `$NASHGIT_TRACES` (default `$NASHGIT_MIRRORS/traces`). They are append-heavy and large;
+- **Storage is nashcode's, not git's.** Traces live in SQLite plus raw transcript files under
+  `$NASHCODE_TRACES` (default `$NASHCODE_MIRRORS/traces`). They are append-heavy and large;
   committing them would bloat every clone and fight the plans/cards model, where git is the
   store precisely because those files are small and human-edited. The *link* is git-native:
   a commit SHA.
@@ -273,7 +273,7 @@ stores both and lets you cross-reference them.
     greppable from a script.
   - A prompt is any recorded event whose payload carries a `prompt` field, so this works
     for any harness that reports one without extra configuration.
-- **Privacy:** a transcript can contain anything the agent saw, secrets included. nashgit
+- **Privacy:** a transcript can contain anything the agent saw, secrets included. nashcode
   does not redact. The tailnet is the perimeter here as everywhere else, and that is a
   deliberate, documented choice rather than an oversight.
 
@@ -281,20 +281,20 @@ stores both and lets you cross-reference them.
 
 The same binary is the server and the agent-side client, so there is one thing to install.
 
-- `nashgit serve` — run the viewer. The default with no arguments, so existing service
+- `nashcode serve` — run the viewer. The default with no arguments, so existing service
   files keep working.
-- `nashgit hook` — read one agent-harness hook payload as JSON on stdin, record it, exit 0.
+- `nashcode hook` — read one agent-harness hook payload as JSON on stdin, record it, exit 0.
   **It must never fail an agent's turn**: unreachable server, malformed payload, or no
-  configured repo all exit 0 quietly. Errors go to stderr only when `NASHGIT_DEBUG` is set.
+  configured repo all exit 0 quietly. Errors go to stderr only when `NASHCODE_DEBUG` is set.
   This is what a Claude Code `PreToolUse`/`PostToolUse`/`UserPromptSubmit`/`Stop` hook runs.
-- `nashgit trace push` — upload a full transcript file for a session, for backfilling a run
+- `nashcode trace push` — upload a full transcript file for a session, for backfilling a run
   that happened without the hook installed.
-- `nashgit trace list` / `nashgit trace show <session>` — read traces from the terminal.
-- `nashgit doctor` — print what is configured and what is missing, and exit non-zero when
+- `nashcode trace list` / `nashcode trace show <session>` — read traces from the terminal.
+- `nashcode doctor` — print what is configured and what is missing, and exit non-zero when
   the server is unreachable.
 
-The client half reads `NASHGIT_URL` (default `http://127.0.0.1:8090`) and infers the repo
-from the git remote of the working directory, falling back to `NASHGIT_REPO`.
+The client half reads `NASHCODE_URL` (default `http://127.0.0.1:8090`) and infers the repo
+from the git remote of the working directory, falling back to `NASHCODE_REPO`.
 
 Both README and AGENTS.md document the hook wiring with a copy-pasteable settings snippet.
 
@@ -324,7 +324,7 @@ subjective layer on top of it.
   - `POST https://api.anthropic.com/v1/messages`, headers `x-api-key`,
     `anthropic-version: 2023-06-01`, `content-type: application/json`.
   - Body carries `model`, `max_tokens: 16000`, a terse `system` role, and one user message
-    holding the state JSON and the question. Model comes from `NASHGIT_BRAIN_MODEL`,
+    holding the state JSON and the question. Model comes from `NASHCODE_BRAIN_MODEL`,
     defaulting to `claude-opus-5`. No `thinking`, no `temperature`, no `budget_tokens`.
   - `content` comes back as an array of typed blocks: concatenate the `text` ones and
     ignore the rest. `stop_reason: "refusal"` becomes a 502 carrying the refusal
@@ -332,12 +332,12 @@ subjective layer on top of it.
   - Five-minute timeout. An upstream failure surfaces as a 502 with the API's own error
     message — never a 500.
   - The key is read from `ANTHROPIC_API_KEY` only. It is never logged and never appears in
-    any config or profile surface. `NASHGIT_ANTHROPIC_URL` overrides the base URL so tests
+    any config or profile surface. `NASHCODE_ANTHROPIC_URL` overrides the base URL so tests
     can point at a stub.
 
 ## Agents
 
-Coding agents use nashgit as their planning system, so the loop must be documented for a
+Coding agents use nashcode as their planning system, so the loop must be documented for a
 machine reader. An `AGENTS.md` at the repo root spells it out end to end: push a markdown
 plan to `plans/` on a branch, humans annotate it in the viewer (or plannotator posts to the
 comment API), the agent polls `GET /:repo/comments?file=plans/x.md&since=<last-check>`,
@@ -366,7 +366,7 @@ The write path to git (the viewer pushes to dgit with `GIT_TOKEN`):
 
 ## Webhooks
 
-Outgoing only (dgit emits none; the viewer's poller is the event source). `$NASHGIT_WEBHOOKS`
+Outgoing only (dgit emits none; the viewer's poller is the event source). `$NASHCODE_WEBHOOKS`
 maps events to URLs (JSON file path). Events: `push` (new tip seen), `ci_finished`
 (status, log tail), `merged`, `restacked`. Delivery: POST JSON, 10s timeout, one retry,
 failures logged not queued. `// ponytail: fire-and-forget; add a delivery table if a

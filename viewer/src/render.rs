@@ -1,4 +1,4 @@
-//! Markdown rendering with nashgit's autolinks.
+//! Markdown rendering with nashcode's autolinks.
 //!
 //! Rendered markdown gets two link passes on top of pulldown-cmark:
 //! - a bare token that names a file that exists under `plans/` or `tasks/` becomes a

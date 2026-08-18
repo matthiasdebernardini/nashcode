@@ -76,7 +76,7 @@ pub struct CiRun {
     pub created_at: String,
 }
 
-/// The status vocabulary. `Skipped` means the repo has no `.nashgit/ci` script.
+/// The status vocabulary. `Skipped` means the repo has no `.nashcode/ci` script.
 pub mod status {
     pub const QUEUED: &str = "queued";
     pub const RUNNING: &str = "running";

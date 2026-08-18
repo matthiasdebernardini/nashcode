@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""nashgit UAT harness. Implements the auto half of uat/UAT-TESTS.md.
+"""nashcode UAT harness. Implements the auto half of uat/UAT-TESTS.md.
 
 Run from the repo root after `cargo build`:
 
     python3 uat/uat.py
 
-Builds a throwaway fixture world in a temp dir, boots target/debug/nashgit on a free
+Builds a throwaway fixture world in a temp dir, boots target/debug/nashcode on a free
 port, runs every automatable acceptance check, prints a pass/fail table, exits 1 on
 any failure. Stdlib only. Nothing touches a real remote.
 """
@@ -24,7 +24,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.environ.get("NASHGIT_BIN", os.path.join(ROOT, "target", "debug", "nashgit-viewer"))
+BIN = os.environ.get("NASHCODE_BIN", os.path.join(ROOT, "target", "debug", "nashcode-viewer"))
 
 RESULTS = []  # (test_id, name, ok, detail)
 
@@ -195,12 +195,12 @@ def build_fixtures(root):
 
     demo = os.path.join(root, "work", "demo")
     g(root, "init", "-q", "-b", "main", demo)
-    write(f"{demo}/README.md", "# demo\n\nExercises nashgit review.\n")
+    write(f"{demo}/README.md", "# demo\n\nExercises nashcode review.\n")
     write(f"{demo}/src/retry.py", RETRY_V0)
     write(
-        f"{demo}/.nashgit/ci",
+        f"{demo}/.nashcode/ci",
         "#!/bin/sh\n"
-        'echo "checking $NASHGIT_REPO@$NASHGIT_BRANCH ($NASHGIT_COMMIT)"\n'
+        'echo "checking $NASHCODE_REPO@$NASHCODE_BRANCH ($NASHCODE_COMMIT)"\n'
         'python3 -m py_compile src/*.py && echo "all green"\n',
         mode=0o755,
     )
@@ -256,10 +256,10 @@ def build_fixtures(root):
     g(demo, "add", "-A")
     g(demo, "commit", "-qm", "Introduce a syntax error (CI must go red)")
 
-    # A tip with no .nashgit/ci: the runner must record `skipped`, never execute.
+    # A tip with no .nashcode/ci: the runner must record `skipped`, never execute.
     g(demo, "checkout", "-q", "main")
     g(demo, "checkout", "-qb", "chore/no-ci")
-    g(demo, "rm", "-q", ".nashgit/ci")
+    g(demo, "rm", "-q", ".nashcode/ci")
     g(demo, "commit", "-qm", "Drop the CI script (runs must be skipped)")
 
     g(demo, "checkout", "-q", "main")
@@ -295,10 +295,10 @@ def start_server(root, bare_dir, port, webhook_port, dgit_url=None, log_name="se
     env = {
         **os.environ,
         "DGIT_URL": dgit_url or bare_dir,
-        "NASHGIT_REPOS": "demo",
-        "NASHGIT_MIRRORS": os.path.join(root, "mirrors"),
-        "NASHGIT_BIND": f"127.0.0.1:{port}",
-        "NASHGIT_WEBHOOKS": os.path.join(root, "webhooks.json"),
+        "NASHCODE_REPOS": "demo",
+        "NASHCODE_MIRRORS": os.path.join(root, "mirrors"),
+        "NASHCODE_BIND": f"127.0.0.1:{port}",
+        "NASHCODE_WEBHOOKS": os.path.join(root, "webhooks.json"),
     }
     env.pop("ANTHROPIC_API_KEY", None)  # /brain/ask must 404 in this suite
     log = open(os.path.join(root, log_name), "ab")
@@ -384,7 +384,7 @@ def t4_ci(runs):
     print("T4 CI")
     check("T4", "red branch failed, green branch passed",
           runs.get("chore/bad-lint") == "failed" and runs.get("feat/retry-core") == "passed", str(runs))
-    check("T4", "tip without .nashgit/ci records skipped, never executes",
+    check("T4", "tip without .nashcode/ci records skipped, never executes",
           runs.get("chore/no-ci") == "skipped", str(runs))
     _, body = get("/demo/feat/retry-core/ci")
     check("T4", "green log shows script output", b"all green" in body)
@@ -670,7 +670,7 @@ def t12_traces(root, bare):
     clone = os.path.join(root, "work", "agent-clone")
     g(root, "clone", "-q", os.path.join(bare, "demo.git"), clone)
     g(clone, "checkout", "-q", "-b", "feat/agent-work", "origin/main")
-    env = {**GIT_ENV, "NASHGIT_URL": BASE, "NASHGIT_REPO": "demo"}
+    env = {**GIT_ENV, "NASHCODE_URL": BASE, "NASHCODE_REPO": "demo"}
 
     def hook(payload, env_override=None):
         return subprocess.run([BIN, "hook"], input=json.dumps(payload), text=True,
@@ -723,7 +723,7 @@ def t12_traces(root, bare):
 
     rc = subprocess.run([BIN, "hook"], input="not json at all", text=True, env=env).returncode
     check("T12", "hook exits 0 on garbage stdin", rc == 0, str(rc))
-    dead = {**env, "NASHGIT_URL": "http://127.0.0.1:9"}
+    dead = {**env, "NASHCODE_URL": "http://127.0.0.1:9"}
     rc = hook({"session_id": "x", "hook_event_name": "Stop", "cwd": clone}, env_override=dead)
     check("T12", "hook exits 0 with the server unreachable", rc == 0, str(rc))
 
@@ -755,7 +755,7 @@ def t17_prompts(root):
           '{"type":"user","sessionId":"uat-cc-backfill",'
           '"message":{"role":"user","content":"<local-command-stdout>noise</local-command-stdout>"}}\n')
     rc = subprocess.run([BIN, "trace", "push", transcript, "--repo", "demo"],
-                        env={**os.environ, "NASHGIT_URL": BASE}, capture_output=True, text=True)
+                        env={**os.environ, "NASHCODE_URL": BASE}, capture_output=True, text=True)
     check("T17", "claude-code-shaped transcript pushes", rc.returncode == 0, rc.stderr)
     _, rows = jget("/demo/prompts?q=exponential")
     check("T17", "backfilled user text is searchable as a prompt",
@@ -846,11 +846,11 @@ def t15_degradation(root, bare, port, webhook_port, proc):
         status, _ = get("/norepo")
         check("T15", "unknown repo still 404, never 500", status == 404, f"got {status}")
 
-        rc = subprocess.run([BIN, "doctor"], env={**os.environ, "NASHGIT_URL": BASE},
+        rc = subprocess.run([BIN, "doctor"], env={**os.environ, "NASHCODE_URL": BASE},
                             capture_output=True, text=True)
         check("T16", "doctor exits 0 against a reachable server",
               rc.returncode == 0 and "reachable" in rc.stdout, rc.stdout)
-        rc = subprocess.run([BIN, "doctor"], env={**os.environ, "NASHGIT_URL": "http://127.0.0.1:9"},
+        rc = subprocess.run([BIN, "doctor"], env={**os.environ, "NASHCODE_URL": "http://127.0.0.1:9"},
                             capture_output=True, text=True)
         check("T16", "doctor exits nonzero when the server is down", rc.returncode != 0)
     finally:
@@ -863,9 +863,9 @@ def t15_degradation(root, bare, port, webhook_port, proc):
 def main():
     global BASE
     if not os.path.exists(BIN):
-        sys.exit(f"binary not found at {BIN}; run `cargo build` first (or set NASHGIT_BIN)")
+        sys.exit(f"binary not found at {BIN}; run `cargo build` first (or set NASHCODE_BIN)")
 
-    root = tempfile.mkdtemp(prefix="nashgit-uat-")
+    root = tempfile.mkdtemp(prefix="nashcode-uat-")
     print(f"fixture world: {root}")
     bare = build_fixtures(root)
 

@@ -1,6 +1,6 @@
 //! Parse the repository list off dgit's index page.
 //!
-//! dgit has no JSON list endpoint — the index is HTML, so `nashgit ls` reads
+//! dgit has no JSON list endpoint — the index is HTML, so `nashcode ls` reads
 //! the HTML. The parse is deliberately loose so that a cosmetic change upstream
 //! (a class rename, an extra column, single quotes becoming double) does not
 //! break the command:

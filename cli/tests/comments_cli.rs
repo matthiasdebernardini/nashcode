@@ -1,4 +1,4 @@
-//! `nashgit comments` end to end: the real binary, a real HTTP round trip,
+//! `nashcode comments` end to end: the real binary, a real HTTP round trip,
 //! and a canned viewer answer — served from a listener on 127.0.0.1 that this
 //! test owns, so nothing here needs a network or a host.
 
@@ -56,10 +56,10 @@ fn write_config(dir: &std::path::Path, viewer: Option<u16>) -> std::path::PathBu
     path
 }
 
-fn nashgit(config: &std::path::Path, cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_nashgit"))
+fn nashcode(config: &std::path::Path, cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_nashcode"))
         .args(args)
-        .env("NASHGIT_CONFIG", config)
+        .env("NASHCODE_CONFIG", config)
         .current_dir(cwd)
         .output()
         .unwrap()
@@ -71,7 +71,7 @@ fn json_mode_passes_the_viewers_answer_through_untouched() {
     let (port, server) = one_shot_server(FIXTURE);
     let config = write_config(dir.path(), Some(port));
 
-    let out = nashgit(
+    let out = nashcode(
         &config,
         dir.path(),
         &[
@@ -105,7 +105,7 @@ fn human_mode_renders_author_line_and_indented_body() {
     let (port, server) = one_shot_server(FIXTURE);
     let config = write_config(dir.path(), Some(port));
 
-    let out = nashgit(
+    let out = nashcode(
         &config,
         dir.path(),
         &["comments", "plans/rewrite-the-parser.md", "--repo", "demo"],
@@ -123,7 +123,7 @@ fn a_profile_without_a_viewer_url_fails_with_a_clear_pointer() {
     let dir = tempfile::tempdir().unwrap();
     let config = write_config(dir.path(), None);
 
-    let out = nashgit(
+    let out = nashcode(
         &config,
         dir.path(),
         &["comments", "plans/x.md", "--repo", "demo"],
@@ -131,10 +131,10 @@ fn a_profile_without_a_viewer_url_fails_with_a_clear_pointer() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("no viewer URL"), "{err}");
-    assert!(err.contains("nashgit setup --viewer"), "{err}");
+    assert!(err.contains("nashcode setup --viewer"), "{err}");
 
     // And in --json mode, stdout still carries exactly one JSON value.
-    let out = nashgit(
+    let out = nashcode(
         &config,
         dir.path(),
         &["--json", "comments", "plans/x.md", "--repo", "demo"],
@@ -166,7 +166,7 @@ fn without_dash_dash_repo_the_origin_remote_names_the_repository() {
 
     let (port, server) = one_shot_server(FIXTURE);
     let config = write_config(dir.path(), Some(port));
-    let out = nashgit(&config, &repo, &["--json", "comments", "plans/x.md"]);
+    let out = nashcode(&config, &repo, &["--json", "comments", "plans/x.md"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
     let request_line = server.join().unwrap();

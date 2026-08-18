@@ -1,4 +1,4 @@
-//! `nashgit doctor` — one line per check, and never a false pass.
+//! `nashcode doctor` — one line per check, and never a false pass.
 //!
 //! A check that cannot run reports `skip` with the reason. Reporting a skipped
 //! check as a pass is how a health command becomes useless, so the three
@@ -186,7 +186,7 @@ fn server_checks(p: &Profile) -> Vec<Check> {
             .into_iter()
             .next()
             .map(|r| r.name)
-            .unwrap_or_else(|| "nashgit-doctor-probe".to_string());
+            .unwrap_or_else(|| "nashcode-doctor-probe".to_string());
         match client.probe_auth(&existing) {
             Ok(AuthProbe::Accepted) => out.push(Check::ok("token", "push token", "accepted")),
             Ok(other) => out.push(Check::fail("token", "push token", other.describe())),
@@ -233,12 +233,12 @@ fn host_checks(p: &Profile) -> Vec<Check> {
     let get = |k: &str| kv.get(k).map(String::as_str).unwrap_or("");
 
     let mut checks = Vec::new();
-    checks.push(match get("NASHGIT_SERVICE") {
+    checks.push(match get("NASHCODE_SERVICE") {
         "active" => Check::ok("celld", "celld service", "active"),
         "" => Check::fail("celld", "celld service", "no answer from the host"),
         other => Check::fail("celld", "celld service", format!("systemd says `{other}`")),
     });
-    checks.push(match get("NASHGIT_LOOPBACK") {
+    checks.push(match get("NASHCODE_LOOPBACK") {
         "200" => Check::ok("loopback", "celld loopback", format!("HTTP 200 on {listen}")),
         code => Check::fail(
             "loopback",
@@ -246,7 +246,7 @@ fn host_checks(p: &Profile) -> Vec<Check> {
             format!("HTTP {code} on {listen}"),
         ),
     });
-    checks.push(match (get("NASHGIT_SERVE"), get("NASHGIT_TS_STATE")) {
+    checks.push(match (get("NASHCODE_SERVE"), get("NASHCODE_TS_STATE")) {
         ("ok", "Running") => Check::ok(
             "tailscale-headers",
             "tailnet headers",
@@ -263,7 +263,7 @@ fn host_checks(p: &Profile) -> Vec<Check> {
             format!("no serve handler for {listen} (tailscaled is `{state}`)"),
         ),
     });
-    checks.push(match get("NASHGIT_BUCKET") {
+    checks.push(match get("NASHCODE_BUCKET") {
         "ok" => Check::ok("bucket", "bucket", "celld diagnose reached the store"),
         "skip" => Check::skip(
             "bucket",

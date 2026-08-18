@@ -6,18 +6,18 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use common::{Work, get, observed_bed, post_json, request, simple_bed, spawn_stub, stacked_fixture};
-use nashgit::ci::{CiWorker, Job};
-use nashgit::db::status;
-use nashgit::hooks::Webhooks;
+use nashcode::ci::{CiWorker, Job};
+use nashcode::db::status;
+use nashcode::hooks::Webhooks;
 
-/// Add an executable `.nashgit/ci` to the fixture's main branch.
+/// Add an executable `.nashcode/ci` to the fixture's main branch.
 fn with_ci_script(root: &std::path::Path, script: &str) -> Work {
     let work = stacked_fixture(root, "demo");
-    work.write(".nashgit/ci", script);
+    work.write(".nashcode/ci", script);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let path = work.dir.join(".nashgit/ci");
+        let path = work.dir.join(".nashcode/ci");
         let mut perms = std::fs::metadata(&path).expect("stat").permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).expect("chmod");
@@ -43,7 +43,7 @@ async fn run_tip(bed: &common::TestBed, hooks: Webhooks, timeout: Duration, bran
 #[tokio::test]
 async fn a_green_script_records_passed_with_its_log_and_env() {
     let bed = simple_bed(|root| {
-        with_ci_script(root, "#!/bin/sh\necho building $NASHGIT_REPO@$NASHGIT_BRANCH:$NASHGIT_COMMIT\nexit 0\n")
+        with_ci_script(root, "#!/bin/sh\necho building $NASHCODE_REPO@$NASHCODE_BRANCH:$NASHCODE_COMMIT\nexit 0\n")
     });
     run_tip(&bed, Webhooks::new(BTreeMap::new()), Duration::from_secs(60), "main").await;
 

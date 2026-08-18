@@ -1,4 +1,4 @@
-# nashgit for agents
+# nashcode for agents
 
 This file is for coding agents. It documents the loop: push a plan, get it reviewed,
 revise, ship.
@@ -10,14 +10,14 @@ HTTP API with a cursor you can poll.
 Set two things:
 
 ```sh
-NASHGIT=http://nashgit.example    # the viewer
+NASHCODE=http://nashcode.example    # the viewer
 REPO=alpha
 ```
 
 ## The loop
 
 1. Write a plan to `plans/<name>.md` on a branch. Push it.
-2. A human reads it at `$NASHGIT/$REPO/plans/<name>.md` and comments. Tools can post
+2. A human reads it at `$NASHCODE/$REPO/plans/<name>.md` and comments. Tools can post
    comments instead.
 3. Poll for comments with a `since` cursor.
 4. Revise the plan, push again.
@@ -49,7 +49,7 @@ plan, and the plan shows the branch with its CI status.
 ## 2. Read comments
 
 ```sh
-curl -s "$NASHGIT/$REPO/comments?file=plans/retries.md"
+curl -s "$NASHCODE/$REPO/comments?file=plans/retries.md"
 ```
 
 Every comment carries an `id`, an `author`, and a `created_at`. Results come back oldest
@@ -81,7 +81,7 @@ everything strictly newer, once.
 
 ```sh
 LAST=2026-08-18T10:04:11.512004Z
-curl -s "$NASHGIT/$REPO/comments?file=plans/retries.md&since=$LAST"
+curl -s "$NASHCODE/$REPO/comments?file=plans/retries.md&since=$LAST"
 ```
 
 `since` is RFC3339. Timestamps are fixed-width UTC, so they sort in the order they happened.
@@ -92,7 +92,7 @@ Filters combine: `?branch=`, `?file=`, `?since=`. Drop `file` to watch a whole b
 ## 4. Post a comment
 
 ```sh
-curl -X POST "$NASHGIT/$REPO/comments" \
+curl -X POST "$NASHCODE/$REPO/comments" \
   -H 'content-type: application/json' \
   -d '{
     "branch": "feat/retries",
@@ -155,13 +155,13 @@ breaking the board. Look there when a card goes missing.
 
 ## State
 
-`GET /brain` returns everything nashgit knows, as one JSON document: every repo's branches
+`GET /brain` returns everything nashcode knows, as one JSON document: every repo's branches
 with stack parent and CI status, plans, cards by column, recent merges, restacks, comments,
 and CI runs.
 
 ```sh
-curl -s "$NASHGIT/brain?repo=$REPO"
-curl -s "$NASHGIT/brain?since=2026-08-18T00:00:00Z"
+curl -s "$NASHCODE/brain?repo=$REPO"
+curl -s "$NASHCODE/brain?since=2026-08-18T00:00:00Z"
 ```
 
 Read this to answer "what is going on" without a dozen calls.
@@ -169,7 +169,7 @@ Read this to answer "what is going on" without a dozen calls.
 `POST /brain/ask` puts Claude in front of the same document for judgment calls.
 
 ```sh
-curl -X POST "$NASHGIT/brain/ask" \
+curl -X POST "$NASHCODE/brain/ask" \
   -H 'content-type: application/json' \
   -d '{"question":"what should I pick up next?","repo":"alpha"}'
 ```
@@ -180,28 +180,28 @@ and answers 404 without it. Use `/brain` for facts and `/brain/ask` for opinions
 ## Raw files
 
 ```sh
-curl -s "$NASHGIT/$REPO/raw/main/plans/retries.md"
+curl -s "$NASHCODE/$REPO/raw/main/plans/retries.md"
 ```
 
 Exact bytes, `text/plain`. The branch may contain slashes.
 
 ## Traces
 
-If the `nashgit-viewer hook` is wired into your harness (see the README), every commit you make
+If the `nashcode-viewer hook` is wired into your harness (see the README), every commit you make
 is linked to your session automatically — no trailer, no convention. Humans get from your
 diff to your transcript in one click; you can read sessions back too:
 
 ```sh
-curl -s -H 'accept: application/json' "$NASHGIT/$REPO/traces"
-curl -s -H 'accept: application/json' "$NASHGIT/$REPO/traces/<session>"
-curl -s "$NASHGIT/$REPO/commits/<sha>/trace"
+curl -s -H 'accept: application/json' "$NASHCODE/$REPO/traces"
+curl -s -H 'accept: application/json' "$NASHCODE/$REPO/traces/<session>"
+curl -s "$NASHCODE/$REPO/commits/<sha>/trace"
 ```
 
 To record events yourself, POST batches; `(session, seq)` is idempotent, so retries are
 safe:
 
 ```sh
-curl -X POST "$NASHGIT/$REPO/traces/events" \
+curl -X POST "$NASHCODE/$REPO/traces/events" \
   -H 'content-type: application/json' \
   -d '{"session":"my-session","agent":"my-agent","events":[
         {"seq":1,"kind":"prompt","payload":{"prompt":"..."},"head":"<git rev-parse HEAD>"}]}'
@@ -215,8 +215,8 @@ Every prompt recorded through the hook is listed at `/:repo/prompts`, searchable
 back to its session. Read them as JSON to see what a human has been asking for:
 
 ```sh
-curl -s -H 'accept: application/json' "$NASHGIT/$REPO/prompts?q=retry"
-curl -s -H 'accept: application/json' "$NASHGIT/$REPO/prompts?session=<session>"
+curl -s -H 'accept: application/json' "$NASHCODE/$REPO/prompts?q=retry"
+curl -s -H 'accept: application/json' "$NASHCODE/$REPO/prompts?session=<session>"
 ```
 
 Each entry carries `session`, `seq`, `text`, `head`, `agent`, and `created_at`.
@@ -226,6 +226,6 @@ Each entry carries `session`, `seq`, `text`, `head`, `agent`, and `created_at`.
 - Never force-push a branch a human is reviewing without saying so in a comment first.
 - One plan per branch. The `branch:` ref assumes it.
 - Do not edit another agent's card body. Change `status`, or add a comment.
-- CI runs on every new tip, from `.nashgit/ci` in the repo. Check it is green before asking
+- CI runs on every new tip, from `.nashcode/ci` in the repo. Check it is green before asking
   for a merge — a red branch will not merge without a human overriding it.
 - You cannot merge. A human does that.

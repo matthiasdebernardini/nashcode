@@ -74,7 +74,7 @@ async fn home(cx: &Cx) -> Result {
                 <div class="Box mb-3">
                     <div class="Box-header d-flex flex-items-center gap-2">
                         <i class="ph ph-git-branch"></i>
-                        <a class="Link--primary no-underline h4 nashgit-display" href=(format!("/{name_view}"))>
+                        <a class="Link--primary no-underline h4 nashcode-display" href=(format!("/{name_view}"))>
                             (name_view.clone())
                         </a>
                         if stale {
@@ -109,7 +109,7 @@ async fn home(cx: &Cx) -> Result {
             <h2 class="mb-3">"Repositories"</h2>
             if empty {
                 <div class="Box"><div class="Box-body color-fg-muted">
-                    "No repos configured. Set NASHGIT_REPOS."
+                    "No repos configured. Set NASHCODE_REPOS."
                 </div></div>
             }
             for (i, section) in sections.into_iter().enumerate() {
@@ -242,7 +242,7 @@ async fn repo_stacks(cx: &Cx) -> Result {
                 for entry in audit {
                     <div key=(entry.id) class="Box-row d-flex flex-items-center gap-2">
                         <i class=(if entry.action == "merge" { "ph ph-git-merge" } else { "ph ph-arrows-clockwise" })></i>
-                        <strong class="nashgit-display">(entry.actor.clone())</strong>
+                        <strong class="nashcode-display">(entry.actor.clone())</strong>
                         <span>(entry.detail.clone())</span>
                         <span class="color-fg-muted text-small ml-auto">
                             <code class="commit-sha">(entry.old_tip.chars().take(8).collect::<String>())</code>
@@ -610,25 +610,25 @@ async fn repo_board(cx: &Cx) -> Result {
     view! {
         shell(title: format!("{name} · board"), repo: name.clone(), active: "board", status: Some(ctx.status.clone()),
             <h3 class="mb-2"><i class="ph ph-kanban"></i>" Board"</h3>
-            <div class="nashgit-board" data-repo=(name.clone())>
+            <div class="nashcode-board" data-repo=(name.clone())>
                 let n = &name;
                 for (column_name, cards) in columns {
                     <div
                         key=(column_name.clone())
-                        class="nashgit-board-column"
+                        class="nashcode-board-column"
                         data-status=(column_name.clone())
                         data-nodrop=((column_name == docs::NEEDS_ATTENTION).then_some("true"))
                     >
-                        <div class="nashgit-board-column-header">
+                        <div class="nashcode-board-column-header">
                             <i class=(if column_name == docs::NEEDS_ATTENTION { "ph ph-warning" } else { "ph ph-kanban" })></i>
                             <strong>(column_name.clone())</strong>
                             <span class="Counter">(cards.len())</span>
                         </div>
-                        <div class="nashgit-board-column-body">
+                        <div class="nashcode-board-column-body">
                             for (card, ci) in cards {
                                 <a
                                     key=(card.path.clone())
-                                    class="nashgit-board-card"
+                                    class="nashcode-board-card"
                                     href=(format!("/{n}/{}", card.path))
                                     data-file=(card.path.clone())
                                 >
@@ -910,10 +910,10 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
                             <code class="commit-sha">(path.clone())</code>
                             <span class="Label">(file_status.clone())</span>
                         </div>
-                        <div class="nashgit-diff-mount" id=(mount.clone())>
-                            <pre class="p-3 text-small nashgit-code nashgit-diff-fallback">(diff_fallback(&json))</pre>
+                        <div class="nashcode-diff-mount" id=(mount.clone())>
+                            <pre class="p-3 text-small nashcode-code nashcode-diff-fallback">(diff_fallback(&json))</pre>
                         </div>
-                        <script type="application/json" class="nashgit-diff-data">(Raw(escape_json_for_script(&json)))</script>
+                        <script type="application/json" class="nashcode-diff-data">(Raw(escape_json_for_script(&json)))</script>
                         comment_composer(key: format!("composer-{mount}"), repo: n.clone(), branch: b.clone(), file: Some(path.clone()), with_line: true)
                     </div>
                 }
@@ -979,7 +979,7 @@ fn annotation_payload(repo: &str, comments: &[Comment]) -> Vec<serde_json::Value
         let Some(line) = comment.line else { continue };
         let body = render::markdown(&comment.body, repo, None, &[]);
         let block = format!(
-            "<div class=\"nashgit-annotation-comment\">\
+            "<div class=\"nashcode-annotation-comment\">\
              <strong>{}</strong> <span class=\"color-fg-muted\">{}</span>\
              <div class=\"markdown-body\">{}</div></div>",
             render::escape_text(&comment.author),
@@ -1039,7 +1039,7 @@ async fn ci_log_page(cx: &Cx, name: &str, branch: &str) -> Result {
                 match (&run, &log) {
                     (None, _) => <div class="Box-body color-fg-muted">"No CI run recorded for this branch yet."</div>,
                     (Some(_), None) => <div class="Box-body color-fg-muted">"This run produced no log."</div>,
-                    (Some(_), Some(log)) => <pre class="Box-body nashgit-ci-log text-small">(log.clone())</pre>,
+                    (Some(_), Some(log)) => <pre class="Box-body nashcode-ci-log text-small">(log.clone())</pre>,
                 }
             </div>
         )

@@ -3,7 +3,7 @@
 //! A plan is a markdown file under `plans/` at the root of a repository. That
 //! is the whole format. The viewer renders the directory and collects comments
 //! on the rendered page, so `plans/` is where an agent writes what it intends
-//! to do and `nashgit comments` is how it hears back.
+//! to do and `nashcode comments` is how it hears back.
 
 use super::Ctx;
 use crate::api::Client;
@@ -54,7 +54,7 @@ pub fn template(title: &str) -> String {
 pub fn new(ctx: &Ctx, args: &PlanNewArgs) -> Result<()> {
     let title = args.title.join(" ");
     if title.trim().is_empty() {
-        bail!("give the plan a title: nashgit plan new \"replace the parser\"");
+        bail!("give the plan a title: nashcode plan new \"replace the parser\"");
     }
     let ws = vcs::require_cwd()?;
     let dir = ws.root.join("plans");
@@ -267,7 +267,7 @@ pub fn comments(ctx: &Ctx, args: &CommentsArgs) -> Result<()> {
     let Some(viewer) = p.viewer_url.as_deref().filter(|v| !v.is_empty()) else {
         bail!(
             "profile `{name}` has no viewer URL, and comments live in the viewer, not in dgit.\n\
-             Deploy one with `nashgit setup --viewer`, or add `viewer_url` to the profile in {}.",
+             Deploy one with `nashcode setup --viewer`, or add `viewer_url` to the profile in {}.",
             crate::profile::config_path()?.display()
         );
     };

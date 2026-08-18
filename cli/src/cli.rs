@@ -22,24 +22,24 @@ the same repositories. Tailscale is the perimeter: celld listens only on
 127.0.0.1, and `tailscale serve` fronts it with HTTPS on your tailnet, so the
 server has no public port at all and only your devices can reach it.
 
-nashgit builds that from nothing. `nashgit setup` asks for an SSH destination
+nashcode builds that from nothing. `nashcode setup` asks for an SSH destination
 and a bucket, installs the pieces over SSH, deploys dgit, writes the systemd
 unit, joins the tailnet, and proves the result with a real push and clone.
 After that it is a small client: create repositories, list them, wire remotes,
 run garbage collection, and check the deployment's health.
 
 Everything server-side runs through the system `ssh`, so your SSH config,
-your agent, and your jump hosts keep working, and nashgit never holds a key.
+your agent, and your jump hosts keep working, and nashcode never holds a key.
 Every command takes --json for scripts and agents.
 
 Getting started:
-  nashgit setup                    build a deployment and save it as a profile
-  nashgit init                     version the current folder on that server
-  nashgit doctor                   check that everything still works";
+  nashcode setup                    build a deployment and save it as a profile
+  nashcode init                     version the current folder on that server
+  nashcode doctor                   check that everything still works";
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "nashgit",
+    name = "nashcode",
     version,
     about = ABOUT,
     long_about = LONG_ABOUT,
@@ -105,7 +105,7 @@ Print the push token for a profile.
 
 This is the one command that writes a secret to stdout. The token is dgit's
 GIT_TOKEN: HTTP Basic with any username and this as the password authorises a
-push, and it also authorises the admin calls behind `nashgit rm`, `gc`, and
+push, and it also authorises the admin calls behind `nashcode rm`, `gc`, and
 `desc`. Treat it like a deploy key.")]
     Token,
 
@@ -183,20 +183,20 @@ remote -v` and any file you commit stay free of secrets.")]
 Give someone their own push token, list the invited, or take a token back.
 
 dgit accepts extra push tokens from its GIT_TOKENS var, comma-separated,
-alongside the main GIT_TOKEN. dgit only sees that flat list, so nashgit keeps
+alongside the main GIT_TOKEN. dgit only sees that flat list, so nashcode keeps
 a name → token mapping on the host (~/git-invites.toml, mode 0600) and
 regenerates GIT_TOKENS from it on every change, then redeploys the Worker and
 restarts celld — the same mechanism `setup` uses. Each change ends with an
 auth probe: an invite proves the new token is accepted, a revoke proves the
 old one no longer is.
 
-`nashgit invite <name>` prints the token once, with the remote URL and the
+`nashcode invite <name>` prints the token once, with the remote URL and the
 one-liner that stores it via `git credential approve`. Re-inviting a name
 rotates that person's token. `--list` prints names only, never tokens.
 
 A token is push access, not network access. Reaching the server at all is
 Tailscale's job: add the person to your tailnet or share the node with them.
-nashgit does not touch Tailscale ACLs.")]
+nashcode does not touch Tailscale ACLs.")]
     Invite(InviteArgs),
 
     /// Check that the deployment still works, one line per check.
@@ -221,8 +221,8 @@ Work with plan files under plans/.
 
 A plan is a markdown file in `plans/` at the root of a repository. It is a
 convention, not a format: the viewer renders the directory, and humans comment
-on the rendered page. `nashgit annotate` opens one locally, and
-`nashgit comments` pulls the replies back down.")]
+on the rendered page. `nashcode annotate` opens one locally, and
+`nashcode comments` pulls the replies back down.")]
     Plan(PlanCommand),
 
     /// Open a plan in plannotator for local review.
@@ -249,7 +249,7 @@ brings those comments back as text or JSON.
 
 It reads GET /<repo>/comments from the viewer, which is a different service
 from dgit and has its own URL. The profile must therefore have a viewer URL;
-`nashgit setup --viewer` records one.")]
+`nashcode setup --viewer` records one.")]
     Comments(CommentsArgs),
 }
 
@@ -377,7 +377,7 @@ pub struct SetupArgs {
     pub site_owner: Option<String>,
 
     /// Use this push token instead of generating one. Careful: a flag lands
-    /// in your shell history; letting nashgit generate one does not.
+    /// in your shell history; letting nashcode generate one does not.
     #[arg(long, value_name = "TOKEN")]
     pub token: Option<String>,
 
@@ -386,7 +386,7 @@ pub struct SetupArgs {
     #[arg(long, value_name = "KEY")]
     pub tailscale_authkey: Option<String>,
 
-    /// Also publish the nashgit viewer on HTTPS :8443.
+    /// Also publish the nashcode viewer on HTTPS :8443.
     #[arg(long)]
     pub viewer: bool,
 
@@ -473,7 +473,7 @@ pub struct NewArgs {
     pub no_remote: bool,
 
     /// After wiring the remote, make the working copy a colocated jj repo.
-    /// On by default when $NASHGIT_JJ=1.
+    /// On by default when $NASHCODE_JJ=1.
     #[arg(long)]
     pub jj: bool,
 }
@@ -486,7 +486,7 @@ pub struct CloneArgs {
     /// Directory to clone into. Defaults to the repository name.
     pub dir: Option<String>,
 
-    /// Make the clone a colocated jj repo. On by default when $NASHGIT_JJ=1.
+    /// Make the clone a colocated jj repo. On by default when $NASHCODE_JJ=1.
     #[arg(long)]
     pub jj: bool,
 }

@@ -2,7 +2,7 @@
 //! layout. These fixtures are the three layouts that exist in the wild:
 //! plain git, colocated jj (`.jj` and `.git`), and jj-only.
 
-use nashgit_cli::vcs::{Kind, classify, detect};
+use nashcode_cli::vcs::{Kind, classify, detect};
 use std::fs;
 use std::path::Path;
 

@@ -1,9 +1,9 @@
-# nashgit
+# nashcode
 
 Stacked-branch review, CI, and a kanban board for a [dgit](https://github.com/littledivy/dgit)
 server on a private tailnet.
 
-dgit already serves git over smart HTTP and gives you a cgit-style browser. nashgit adds
+dgit already serves git over smart HTTP and gives you a cgit-style browser. nashcode adds
 what it lacks: real diffs, stacked-branch review, a CI runner, comments, and a board. It
 has no accounts and no login. The tailnet is the perimeter.
 
@@ -35,10 +35,10 @@ against `git clone --mirror` copies on local disk.
 ## Run it
 
 ```sh
-git clone <this repo> && cd nashgit
+git clone <this repo> && cd nashcode
 DGIT_URL=https://git.your-tailnet.example \
 GIT_TOKEN=your-dgit-token \
-NASHGIT_REPOS=alpha,beta \
+NASHCODE_REPOS=alpha,beta \
 cargo run
 ```
 
@@ -49,7 +49,7 @@ nothing to copy at deploy time.
 To try it without a dgit server, point `DGIT_URL` at a directory of bare repos:
 
 ```sh
-DGIT_URL=/srv/git NASHGIT_REPOS=demo cargo run
+DGIT_URL=/srv/git NASHCODE_REPOS=demo cargo run
 ```
 
 That reads `/srv/git/demo.git`.
@@ -62,35 +62,35 @@ Environment only. Nothing about your deployment lives in the source.
 |---|---|---|
 | `DGIT_URL` | *(none)* | Base URL of the dgit server. Repo `x` is `$DGIT_URL/x.git`. A filesystem path works too. |
 | `GIT_TOKEN` | empty | Push token, sent as basic auth `x:$GIT_TOKEN`. Reads are anonymous. Empty means pushes are anonymous. |
-| `NASHGIT_REPOS` | empty | Comma-separated repo names. dgit has no list API, so you name them. |
-| `NASHGIT_MIRRORS` | `~/mirrors` | Where the mirror clones live. |
-| `NASHGIT_BIND` | `127.0.0.1:8090` | Listen address. Keep it on loopback. |
-| `NASHGIT_DB` | `$NASHGIT_MIRRORS/nashgit.db` | SQLite file: comments, CI runs, audit trail. |
-| `NASHGIT_CI_LOGS` | `$NASHGIT_MIRRORS/ci-logs` | CI log files. |
-| `NASHGIT_WEBHOOKS` | *(none)* | Path to a JSON file mapping events to URLs. |
-| `NASHGIT_TRACES` | `$NASHGIT_MIRRORS/traces` | Raw agent transcripts. |
+| `NASHCODE_REPOS` | empty | Comma-separated repo names. dgit has no list API, so you name them. |
+| `NASHCODE_MIRRORS` | `~/mirrors` | Where the mirror clones live. |
+| `NASHCODE_BIND` | `127.0.0.1:8090` | Listen address. Keep it on loopback. |
+| `NASHCODE_DB` | `$NASHCODE_MIRRORS/nashcode.db` | SQLite file: comments, CI runs, audit trail. |
+| `NASHCODE_CI_LOGS` | `$NASHCODE_MIRRORS/ci-logs` | CI log files. |
+| `NASHCODE_WEBHOOKS` | *(none)* | Path to a JSON file mapping events to URLs. |
+| `NASHCODE_TRACES` | `$NASHCODE_MIRRORS/traces` | Raw agent transcripts. |
 | `ANTHROPIC_API_KEY` | *(none)* | Enables `POST /brain/ask`. Without it that route answers 404. |
-| `NASHGIT_BRAIN_MODEL` | `claude-opus-5` | Model for `/brain/ask`. |
+| `NASHCODE_BRAIN_MODEL` | `claude-opus-5` | Model for `/brain/ask`. |
 
 The client commands (`hook`, `trace`, `doctor`) read two more:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NASHGIT_URL` | `http://127.0.0.1:8090` | Where the viewer is, from the agent's machine. |
-| `NASHGIT_REPO` | *(inferred)* | Repo name, when the git remote's basename is not it. |
+| `NASHCODE_URL` | `http://127.0.0.1:8090` | Where the viewer is, from the agent's machine. |
+| `NASHCODE_REPO` | *(inferred)* | Repo name, when the git remote's basename is not it. |
 
 At startup the server prints a line for each thing that is unset and what you lose by it.
 
 ## Exposing it
 
-nashgit binds loopback and has no auth of its own. Put `tailscale serve` in front:
+nashcode binds loopback and has no auth of its own. Put `tailscale serve` in front:
 
 ```sh
 tailscale serve --bg --https 8443 http://127.0.0.1:8090
 ```
 
 Tailscale injects `Tailscale-User-Login` and `Tailscale-User-Name` on every proxied
-request. nashgit trusts those headers and stamps them on comments, merges, and reruns. A
+request. nashcode trusts those headers and stamps them on comments, merges, and reruns. A
 request without them shows as `local`.
 
 Do not expose the port any other way. The headers are trusted, so anything that can reach
@@ -98,24 +98,24 @@ the port can claim any identity.
 
 ## CI
 
-Put an executable `.nashgit/ci` in a repo. When nashgit sees a branch tip it has not seen
+Put an executable `.nashcode/ci` in a repo. When nashcode sees a branch tip it has not seen
 before, it checks that commit out into a scratch directory and runs the script. No script
 means no job.
 
-Jobs run one at a time. The script gets `GIT_TOKEN`, `NASHGIT_REPO`, `NASHGIT_BRANCH`, and
-`NASHGIT_COMMIT`, and nothing else. Non-zero exit is red. Timeout is 30 minutes. Combined
+Jobs run one at a time. The script gets `GIT_TOKEN`, `NASHCODE_REPO`, `NASHCODE_BRANCH`, and
+`NASHCODE_COMMIT`, and nothing else. Non-zero exit is red. Timeout is 30 minutes. Combined
 output goes to a log file and the status lands next to the branch everywhere it appears.
 
 There is no separate deploy system. If the script wants to deploy, it deploys.
 
 ### Security model — read this before granting push access
 
-**Push access to a repo is code execution on the nashgit host.** `.nashgit/ci` runs as
+**Push access to a repo is code execution on the nashcode host.** `.nashcode/ci` runs as
 the server's own user, with `GIT_TOKEN` in its environment, and there is no sandbox: no
 container, no seccomp, no resource limits beyond the 30-minute timeout. Anyone who can
-push a branch can run anything the nashgit user can run and can push anywhere the token
+push a branch can run anything the nashcode user can run and can push anywhere the token
 can push. On a personal tailnet where every pusher is you or your agents, that is the
-point — the CI script deploying *is* the deploy system. Do not point nashgit at repos
+point — the CI script deploying *is* the deploy system. Do not point nashcode at repos
 that people you would not hand a shell to can push to.
 
 Two sharp edges of the timeout: the kill reaches the script process itself, not
@@ -145,7 +145,7 @@ Body becomes the card detail.
 value becomes a column after them. A card whose front matter will not parse lands in a
 "needs attention" column instead of breaking the board.
 
-`branch:` and `plan:` wire the card to a branch and a plan, and nashgit computes the
+`branch:` and `plan:` wire the card to a branch and a plan, and nashcode computes the
 back-links: the branch page shows its card and plan, the plan shows its cards. A ref
 pointing at something that does not exist renders as plain text with a "missing" marker.
 
@@ -165,12 +165,12 @@ plan commentable.
 
 ```sh
 # post
-curl -X POST http://nashgit.example/alpha/comments \
+curl -X POST http://nashcode.example/alpha/comments \
   -H 'content-type: application/json' \
   -d '{"branch":"main","file":"plans/api.md","line":12,"body":"needs a timeout"}'
 
 # read, oldest first
-curl 'http://nashgit.example/alpha/comments?file=plans/api.md'
+curl 'http://nashcode.example/alpha/comments?file=plans/api.md'
 ```
 
 `file` and `line` are optional. Omit both for a branch-level comment. `author` is optional
@@ -193,8 +193,8 @@ repo's stacks page.
 
 ## Webhooks
 
-Outgoing only. dgit emits none, so nashgit's poller is the event source. Point
-`NASHGIT_WEBHOOKS` at a JSON file:
+Outgoing only. dgit emits none, so nashcode's poller is the event source. Point
+`NASHCODE_WEBHOOKS` at a JSON file:
 
 ```json
 {
@@ -210,19 +210,19 @@ POST JSON, 10-second timeout, one retry. Failures are logged, not queued.
 ## Traces
 
 A commit answers "what changed". The trace that produced it answers "why, and what was
-tried first". nashgit stores agent sessions — prompts, tool calls, results — and links
+tried first". nashcode stores agent sessions — prompts, tool calls, results — and links
 them to commits automatically: every recorded event carries the repo's `HEAD` at that
 moment, so when `HEAD` moves between two events, the commits in between belong to that
 session. No commit trailers, nothing for the agent to remember.
 
-Transcripts live in SQLite and under `NASHGIT_TRACES`, not in git. They are large and
+Transcripts live in SQLite and under `NASHCODE_TRACES`, not in git. They are large and
 append-heavy; committing them would bloat every clone. The link to git is the commit SHA.
 
 `/:repo/traces` lists sessions. A session page renders the transcript with its commits
 inline, and a commit's row on the branch page links back to the conversation that wrote
 it. `GET /:repo/commits/:sha/trace` answers the same question as JSON.
 
-One warning: a transcript contains whatever the agent saw, secrets included. nashgit does
+One warning: a transcript contains whatever the agent saw, secrets included. nashcode does
 not redact. The tailnet is the perimeter here as everywhere else.
 
 ### Prompts
@@ -235,7 +235,7 @@ substring, `?session=` narrows to one run.
 The same URL answers JSON, so your prompt library is greppable:
 
 ```sh
-curl -s -H 'accept: application/json' "http://nashgit.example/alpha/prompts?q=retry"
+curl -s -H 'accept: application/json' "http://nashcode.example/alpha/prompts?q=retry"
 ```
 
 A prompt is any recorded event whose payload carries a `prompt` field, so this works for
@@ -249,24 +249,24 @@ hooks feed it. For Claude Code, in `.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "nashgit-viewer hook" }] }],
-    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "nashgit-viewer hook" }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "nashgit-viewer hook" }] }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "nashcode-viewer hook" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "nashcode-viewer hook" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "nashcode-viewer hook" }] }]
   }
 }
 ```
 
-`nashgit-viewer hook` reads one hook payload from stdin, records it, and exits 0 — always. A
+`nashcode-viewer hook` reads one hook payload from stdin, records it, and exits 0 — always. A
 dead server, garbage input, or a missing repo never fails the agent's turn. Set
-`NASHGIT_DEBUG=1` to see why an event was dropped.
+`NASHCODE_DEBUG=1` to see why an event was dropped.
 
 For a run that happened without the hook, backfill from the harness transcript:
 
 ```sh
-nashgit-viewer trace push ~/.claude/projects/<project>/<session>.jsonl
-nashgit-viewer trace list
-nashgit-viewer trace show <session>
-nashgit-viewer doctor   # what is configured, is the server reachable
+nashcode-viewer trace push ~/.claude/projects/<project>/<session>.jsonl
+nashcode-viewer trace list
+nashcode-viewer trace show <session>
+nashcode-viewer doctor   # what is configured, is the server reachable
 ```
 
 ## Brain
@@ -278,7 +278,7 @@ activity as one JSON document. `?repo=` filters, `?since=` bounds the activity.
 `ANTHROPIC_API_KEY` and 404s without it.
 
 ```sh
-curl -X POST http://nashgit.example/brain/ask \
+curl -X POST http://nashcode.example/brain/ask \
   -H 'content-type: application/json' \
   -d '{"question":"which stack is closest to mergeable?","repo":"alpha"}'
 ```
@@ -291,36 +291,36 @@ Build on a Linux box that has `cargo`, `node`, and `npm`:
 cargo build --release
 ```
 
-Ship `target/release/nashgit-viewer` on its own. The assets are inside it, and node is not needed
+Ship `target/release/nashcode-viewer` on its own. The assets are inside it, and node is not needed
 at runtime. Only `git` is.
 
 A systemd unit:
 
 ```ini
 [Unit]
-Description=nashgit
+Description=nashcode
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/nashgit-viewer
+ExecStart=/usr/local/bin/nashcode-viewer
 Environment=DGIT_URL=https://git.your-tailnet.example
-Environment=NASHGIT_REPOS=alpha,beta
-Environment=NASHGIT_MIRRORS=/var/lib/nashgit/mirrors
-Environment=NASHGIT_BIND=127.0.0.1:8090
-EnvironmentFile=/etc/nashgit.env
+Environment=NASHCODE_REPOS=alpha,beta
+Environment=NASHCODE_MIRRORS=/var/lib/nashcode/mirrors
+Environment=NASHCODE_BIND=127.0.0.1:8090
+EnvironmentFile=/etc/nashcode.env
 Restart=on-failure
-StateDirectory=nashgit
+StateDirectory=nashcode
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Keep `GIT_TOKEN` and `ANTHROPIC_API_KEY` in `/etc/nashgit.env`, mode 600.
+Keep `GIT_TOKEN` and `ANTHROPIC_API_KEY` in `/etc/nashcode.env`, mode 600.
 
 The mirrors directory is a cache. It costs a re-clone to lose, not data. Your repos live on
 the dgit server, which is what you back up. SQLite holds the only thing that exists nowhere
-else: comments, CI history, traces, and the audit trail. Back up `NASHGIT_DB`, and
-`NASHGIT_TRACES` if the raw transcripts matter to you.
+else: comments, CI history, traces, and the audit trail. Back up `NASHCODE_DB`, and
+`NASHCODE_TRACES` if the raw transcripts matter to you.
 
 ## Development
 
@@ -331,7 +331,7 @@ cargo run             # against a local bare repo dir, per above
 
 Tests build fixture repos with real `git` commands. There are no git mocks.
 
-`NASHGIT_SKIP_ASSET_BUILD=1` skips esbuild for a Rust-only compile without node.
+`NASHCODE_SKIP_ASSET_BUILD=1` skips esbuild for a Rust-only compile without node.
 
 [SPEC.md](SPEC.md) is the contract. [NOTES.md](NOTES.md) records where the implementation
 had to choose.

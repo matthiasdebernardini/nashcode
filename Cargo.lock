@@ -1213,7 +1213,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nashgit"
+name = "nashcode"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
@@ -1234,7 +1234,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nashgit-cli"
+name = "nashcode-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -155,7 +155,7 @@ async fn traces_index(cx: &Cx) -> Result<Response> {
             <div class="Box">
                 if sessions.is_empty() {
                     <div class="Box-body color-fg-muted">
-                        "No traces yet. Wire the "<code>"nashgit-viewer hook"</code>" into your agent, or backfill with "<code>"nashgit-viewer trace push"</code>"."
+                        "No traces yet. Wire the "<code>"nashcode-viewer hook"</code>" into your agent, or backfill with "<code>"nashcode-viewer trace push"</code>"."
                     </div>
                 }
                 let n = &name;
@@ -267,7 +267,7 @@ async fn trace_session_page(cx: &Cx) -> Result<Response> {
                             <span class="color-fg-muted text-small">(format!("#{}", event.seq))</span>
                             <span class="ml-auto color-fg-muted text-small">(event.created_at.clone())</span>
                         </div>
-                        <div class="text-small mt-1 nashgit-code">(summary)</div>
+                        <div class="text-small mt-1 nashcode-code">(summary)</div>
                         for sha in produced {
                             <div key=(sha.clone()) class="mt-1 text-small">
                                 <i class="ph ph-git-commit color-fg-success"></i>
@@ -344,7 +344,7 @@ async fn prompts_index(cx: &Cx) -> Result<Response> {
                 if prompts.is_empty() {
                     <div class="Box-body color-fg-muted">
                         if search_value.is_empty() {
-                            "No prompts recorded yet. Wire the "<code>"nashgit-viewer hook"</code>" into your agent."
+                            "No prompts recorded yet. Wire the "<code>"nashcode-viewer hook"</code>" into your agent."
                         } else {
                             "No prompt matches that search."
                         }
@@ -353,7 +353,7 @@ async fn prompts_index(cx: &Cx) -> Result<Response> {
                 let n = &name;
                 for prompt in prompts {
                     <div key=(format!("{}-{}", prompt.session, prompt.seq)) class="Box-row">
-                        <div class="nashgit-prompt-text">(prompt.text.clone())</div>
+                        <div class="nashcode-prompt-text">(prompt.text.clone())</div>
                         <div class="d-flex flex-items-center gap-2 mt-1 text-small color-fg-muted">
                             <i class="ph ph-robot"></i>
                             <a class="Link--secondary" href=(format!("/{n}/traces/{}", prompt.session))>

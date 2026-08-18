@@ -38,20 +38,20 @@ pub async fn shell(
             <head>
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
-                <title>(format!("{title} · nashgit"))</title>
+                <title>(format!("{title} · nashcode"))</title>
                 <link rel="stylesheet" href=(web::css_url())>
                 <script type="module" src=(web::js_url())></script>
             </head>
             <body>
                 <header class="color-bg-inset border-bottom">
                     <div class="container-lg px-3 py-2 d-flex flex-items-center gap-2">
-                        <a href="/" class="Link--primary no-underline h4 nashgit-display">
+                        <a href="/" class="Link--primary no-underline h4 nashcode-display">
                             <i class="ph ph-git-branch"></i>
-                            " nashgit"
+                            " nashcode"
                         </a>
                         if let Some(repo) = &repo {
                             <span class="color-fg-muted">"/"</span>
-                            <a href=(format!("/{repo}")) class="Link--primary no-underline h4 nashgit-display">
+                            <a href=(format!("/{repo}")) class="Link--primary no-underline h4 nashcode-display">
                                 (repo)
                             </a>
                         }
@@ -178,7 +178,7 @@ pub async fn comment_block(
         <div class="Box-row" id=(format!("comment-{}", comment.id))>
             <div class="d-flex flex-items-center gap-2 mb-1">
                 <i class="ph ph-chat-circle color-fg-muted"></i>
-                <strong class="nashgit-display">(comment.author.clone())</strong>
+                <strong class="nashcode-display">(comment.author.clone())</strong>
                 <span class="color-fg-muted text-small">(comment.created_at.clone())</span>
                 if let Some(line) = comment.line {
                     <span class="Label Label--secondary">(format!("line {line}"))</span>
@@ -198,7 +198,7 @@ pub async fn comment_block(
                     </form>
                 }
             </div>
-            <div class="markdown-body nashgit-annotation-body">(Raw(body))</div>
+            <div class="markdown-body nashcode-annotation-body">(Raw(body))</div>
         </div>
     }
 }
@@ -213,7 +213,7 @@ pub async fn comment_composer(
 ) -> Result {
     view! {
         <form method="post" action=(format!("/{repo}/comments"))
-              class="nashgit-composer Box-row">
+              class="nashcode-composer Box-row">
             <input type="hidden" name="branch" value=(branch)>
             if let Some(file) = &file {
                 <input type="hidden" name="file" value=(file)>
@@ -237,12 +237,12 @@ pub async fn stack_column(
     #[default] current: Option<String>,
 ) -> Result {
     view! {
-        <div class="nashgit-stack-graph Box p-2">
+        <div class="nashcode-stack-graph Box p-2">
             let repo_ref = &repo;
             let current_ref = &current;
             for row in chain {
                 <div class=(format!(
-                    "nashgit-stack-row py-1 d-flex flex-items-center gap-2{}",
+                    "nashcode-stack-row py-1 d-flex flex-items-center gap-2{}",
                     if current_ref.as_deref() == Some(row.branch.as_str()) { " is-current" } else { "" }
                 ))>
                     branch_label(key: row.branch.clone(), repo: repo_ref.clone(), branch: row.branch.clone())

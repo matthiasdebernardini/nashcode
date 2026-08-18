@@ -1,4 +1,4 @@
-//! `nashgit use`, `nashgit profiles`, `nashgit token`.
+//! `nashcode use`, `nashcode profiles`, `nashcode token`.
 
 use super::Ctx;
 use crate::profile::Store;
@@ -38,7 +38,7 @@ pub fn list(ctx: &Ctx) -> Result<()> {
         json!({ "active": store.active, "profiles": rows }),
         || {
             if store.profiles.is_empty() {
-                ctx.out.line("no profiles yet. Run `nashgit setup`.");
+                ctx.out.line("no profiles yet. Run `nashcode setup`.");
                 return;
             }
             let width = store.profiles.keys().map(|k| k.len()).max().unwrap_or(4);

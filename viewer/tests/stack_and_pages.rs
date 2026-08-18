@@ -3,7 +3,7 @@
 mod common;
 
 use common::{get, simple_bed, stacked_fixture};
-use nashgit::stack::StackGraph;
+use nashcode::stack::StackGraph;
 
 #[tokio::test]
 async fn stack_inference_finds_parents_and_chains() {
@@ -31,7 +31,7 @@ async fn the_branch_page_carries_per_file_unified_diffs() {
     let (status, body) = get(&bed.router, "/demo/part-1").await;
     assert_eq!(status, 200, "{body}");
     // The embedded diff payload is a real unified diff for the changed file.
-    assert!(body.contains("nashgit-diff-data"), "diff payload missing");
+    assert!(body.contains("nashcode-diff-data"), "diff payload missing");
     assert!(body.contains("src/app.txt"), "changed file missing");
     assert!(body.contains("+two"), "added line missing from the patch: {body}");
     // The stack banner names the parent.

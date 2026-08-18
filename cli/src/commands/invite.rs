@@ -1,4 +1,4 @@
-//! `nashgit invite` — per-person push access through dgit's GIT_TOKENS var.
+//! `nashcode invite` — per-person push access through dgit's GIT_TOKENS var.
 //!
 //! dgit sees only a flat, comma-separated token list, so the names live in a
 //! mapping file the CLI owns on the host (`~/git-invites.toml`, 0600). Every
@@ -31,7 +31,7 @@ pub fn run(ctx: &Ctx, args: &InviteArgs) -> Result<()> {
     }
     match &args.name {
         Some(name) => invite(ctx, &p, &ssh, name),
-        None => bail!("say what to do: `nashgit invite <name>`, `--list`, or `--revoke <name>`"),
+        None => bail!("say what to do: `nashcode invite <name>`, `--list`, or `--revoke <name>`"),
     }
 }
 
@@ -61,7 +61,7 @@ fn invite(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
         .require("invite")?;
     let kv = parse_kv(&out.stdout);
     let probe = kv
-        .get("NASHGIT_INVITE_PROBE")
+        .get("NASHCODE_INVITE_PROBE")
         .cloned()
         .unwrap_or_default();
 
@@ -77,7 +77,7 @@ fn invite(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
             "url": p.url,
             "credential_line": credential_line,
             "probe": probe,
-            "verified": kv.get("NASHGIT_INVITE").map(String::as_str) == Some("ok"),
+            "verified": kv.get("NASHCODE_INVITE").map(String::as_str) == Some("ok"),
         }),
         || {
             ctx.out.line(format!("{name} can now push to {}", p.url));
@@ -90,7 +90,7 @@ fn invite(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
             ctx.out.line("");
             ctx.out.line(
                 "The token is push access, not network access. Add them to your \
-                 tailnet or share the node with them; nashgit does not manage \
+                 tailnet or share the node with them; nashcode does not manage \
                  Tailscale ACLs.",
             );
         },
@@ -104,14 +104,14 @@ fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
     if !valid_invite_name(name) {
         bail!(
             "`{name}` is not a usable invite name. Letters, digits, dash, and \
-             underscore, starting with a letter or digit. See `nashgit invite --list`."
+             underscore, starting with a letter or digit. See `nashcode invite --list`."
         );
     }
     ctx.out.step(format!("removing `{name}` and redeploying"));
     let out = ssh.script(&remote::revoke_script(name, p, &listen(p)))?;
     let kv = parse_kv(&out.stdout);
     let probe = kv
-        .get("NASHGIT_REVOKE_PROBE")
+        .get("NASHCODE_REVOKE_PROBE")
         .cloned()
         .unwrap_or_default();
     if !out.ok() {
@@ -121,7 +121,7 @@ fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
         match probe.as_str() {
             "400" => bail!(
                 "`{name}` was removed from the mapping and the redeploy ran, but the \
-                 revoked token is STILL accepted (HTTP 400). Run `nashgit doctor` and \
+                 revoked token is STILL accepted (HTTP 400). Run `nashcode doctor` and \
                  check the celld service."
             ),
             "" => {
@@ -130,7 +130,7 @@ fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
             code => bail!(
                 "`{name}` was revoked and the new token set deployed, but the check \
                  could not confirm it (HTTP {code} from the loopback probe). \
-                 Re-run `nashgit doctor` to see why the server is not answering."
+                 Re-run `nashcode doctor` to see why the server is not answering."
             ),
         }
     }
@@ -138,7 +138,7 @@ fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
         json!({
             "revoked": name,
             "probe": probe,
-            "verified": kv.get("NASHGIT_REVOKE").map(String::as_str) == Some("ok"),
+            "verified": kv.get("NASHCODE_REVOKE").map(String::as_str) == Some("ok"),
         }),
         || {
             ctx.out.line(format!(
@@ -151,12 +151,12 @@ fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
 
 fn list(ctx: &Ctx, ssh: &Ssh) -> Result<()> {
     let out = ssh.script(&remote::invites_list_script())?.require("list invites")?;
-    // Names only — one NASHGIT_INVITE_NAME line each. parse_kv would collapse
+    // Names only — one NASHCODE_INVITE_NAME line each. parse_kv would collapse
     // the repeated key, so read them by hand.
     let names: Vec<String> = out
         .stdout
         .lines()
-        .filter_map(|l| l.strip_prefix("NASHGIT_INVITE_NAME="))
+        .filter_map(|l| l.strip_prefix("NASHCODE_INVITE_NAME="))
         .map(str::to_string)
         .collect();
     ctx.out.emit(json!({ "names": names }), || {

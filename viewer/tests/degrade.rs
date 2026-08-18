@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common::{get, stacked_fixture, testbed_from_config, testbed_with};
-use nashgit::config::Config;
+use nashcode::config::Config;
 
 #[tokio::test]
 async fn every_page_survives_a_dead_git_server_on_an_existing_mirror() {
@@ -32,7 +32,7 @@ async fn every_page_survives_a_dead_git_server_on_an_existing_mirror() {
         repos: vec!["demo".to_owned()],
         mirrors: live.config.mirrors.clone(),
         bind: "127.0.0.1:0".to_owned(),
-        db_path: live.root.path().join("nashgit-dead.db"),
+        db_path: live.root.path().join("nashcode-dead.db"),
         ci_logs: live.root.path().join("ci-logs"),
         traces: live.root.path().join("traces"),
         webhooks: BTreeMap::new(),
@@ -72,7 +72,7 @@ async fn every_page_survives_a_dead_git_server_on_an_existing_mirror() {
     let missing_config = Arc::new(Config {
         repos: vec!["ghost".to_owned()],
         mirrors: live.root.path().join("empty-mirrors"),
-        db_path: live.root.path().join("nashgit-ghost.db"),
+        db_path: live.root.path().join("nashcode-ghost.db"),
         ..(*dead.config).clone()
     });
     let ghost = testbed_from_config(tempfile::tempdir().expect("tempdir"), missing_config);

@@ -1,5 +1,5 @@
 /*
- * The browser entry, bundled by esbuild into OUT_DIR/nashgit.js.
+ * The browser entry, bundled by esbuild into OUT_DIR/nashcode.js.
  *
  * Three jobs, all progressive enhancement over server-rendered HTML:
  *  1. render each embedded unified diff with @pierre/diffs (the real FileDiff
@@ -17,13 +17,13 @@ function renderAnnotation(annotation) {
   const meta = annotation.metadata;
   if (!meta || !meta.html) return undefined;
   const el = document.createElement("div");
-  el.className = "nashgit-annotation";
+  el.className = "nashcode-annotation";
   el.innerHTML = meta.html;
   return el;
 }
 
 function mountDiffs() {
-  for (const blob of document.querySelectorAll("script.nashgit-diff-data")) {
+  for (const blob of document.querySelectorAll("script.nashcode-diff-data")) {
     let data;
     try {
       data = JSON.parse(blob.textContent);
@@ -39,7 +39,7 @@ function mountDiffs() {
       if (!fileDiff) continue;
       // Click a line number to anchor the comment composer to that line.
       const composer =
-        mount.closest(".Box") && mount.closest(".Box").querySelector(".nashgit-composer");
+        mount.closest(".Box") && mount.closest(".Box").querySelector(".nashcode-composer");
       const instance = new FileDiff({
         theme: THEME,
         themeType: "system",
@@ -63,7 +63,7 @@ function mountDiffs() {
       });
     } catch (error) {
       // A diff that will not parse still has its <pre> fallback in the DOM.
-      console.warn("nashgit: diff render failed for", data.file, error);
+      console.warn("nashcode: diff render failed for", data.file, error);
     }
   }
 }
@@ -71,10 +71,10 @@ function mountDiffs() {
 /* ---- board ------------------------------------------------------------------ */
 
 function toast(message, tone) {
-  let host = document.querySelector(".nashgit-toasts");
+  let host = document.querySelector(".nashcode-toasts");
   if (!host) {
     host = document.createElement("div");
-    host.className = "nashgit-toasts";
+    host.className = "nashcode-toasts";
     document.body.appendChild(host);
   }
   const note = document.createElement("div");
@@ -85,24 +85,24 @@ function toast(message, tone) {
 }
 
 function mountBoard() {
-  const board = document.querySelector(".nashgit-board");
+  const board = document.querySelector(".nashcode-board");
   if (!board) return;
   const repo = board.dataset.repo;
 
-  for (const card of board.querySelectorAll(".nashgit-board-card")) {
+  for (const card of board.querySelectorAll(".nashcode-board-card")) {
     card.draggable = true;
     card.addEventListener("dragstart", (event) => {
-      event.dataTransfer.setData("text/nashgit-file", card.dataset.file);
+      event.dataTransfer.setData("text/nashcode-file", card.dataset.file);
       event.dataTransfer.effectAllowed = "move";
       card.classList.add("is-dragging");
     });
     card.addEventListener("dragend", () => card.classList.remove("is-dragging"));
   }
 
-  for (const column of board.querySelectorAll(".nashgit-board-column")) {
+  for (const column of board.querySelectorAll(".nashcode-board-column")) {
     if (column.dataset.nodrop === "true") continue;
     column.addEventListener("dragover", (event) => {
-      if (!event.dataTransfer.types.includes("text/nashgit-file")) return;
+      if (!event.dataTransfer.types.includes("text/nashcode-file")) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
       column.classList.add("is-drag-over");
@@ -111,13 +111,13 @@ function mountBoard() {
     column.addEventListener("drop", async (event) => {
       event.preventDefault();
       column.classList.remove("is-drag-over");
-      const file = event.dataTransfer.getData("text/nashgit-file");
+      const file = event.dataTransfer.getData("text/nashcode-file");
       const status = column.dataset.status;
       if (!file || !status) return;
 
-      const card = board.querySelector(`.nashgit-board-card[data-file="${CSS.escape(file)}"]`);
+      const card = board.querySelector(`.nashcode-board-card[data-file="${CSS.escape(file)}"]`);
       const origin = card && card.parentElement;
-      if (card) column.querySelector(".nashgit-board-column-body").prepend(card);
+      if (card) column.querySelector(".nashcode-board-column-body").prepend(card);
 
       try {
         const response = await fetch(`/${encodeURIComponent(repo)}/board/move`, {
@@ -159,4 +159,4 @@ if (document.readyState === "loading") {
 }
 
 // A console escape hatch for poking at the diff renderer.
-globalThis.__nashgit = { FileDiff, parsePatchFiles, mountDiffs };
+globalThis.__nashcode = { FileDiff, parsePatchFiles, mountDiffs };

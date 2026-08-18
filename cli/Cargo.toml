@@ -1,5 +1,5 @@
 [package]
-name = "nashgit-cli"
+name = "nashcode-cli"
 version = "0.1.0"
 edition = "2024"
 description = "Deploy and operate a self-hosted dgit git server on celld, over your own tailnet."
@@ -7,7 +7,7 @@ license = "Apache-2.0"
 readme = "README.md"
 
 [[bin]]
-name = "nashgit"
+name = "nashcode"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,4 +1,4 @@
-//! `nashgit invite` end to end through the fake-ssh seam — but this shim
+//! `nashcode invite` end to end through the fake-ssh seam — but this shim
 //! *executes* the script it receives, under a fake `$HOME` and a PATH of stub
 //! binaries (sudo, node, celld, systemctl, curl). So these tests watch the
 //! real behavior — the mapping file changing, GIT_TOKENS being regenerated —
@@ -80,10 +80,10 @@ impl Host {
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_nashgit"))
+        Command::new(env!("CARGO_BIN_EXE_nashcode"))
             .args(args)
-            .env("NASHGIT_CONFIG", self.dir.path().join("config.toml"))
-            .env("NASHGIT_SSH_BIN", self.dir.path().join("fake-ssh"))
+            .env("NASHCODE_CONFIG", self.dir.path().join("config.toml"))
+            .env("NASHCODE_SSH_BIN", self.dir.path().join("fake-ssh"))
             .output()
             .unwrap()
     }

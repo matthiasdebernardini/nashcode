@@ -4,10 +4,10 @@
 
 use std::process::Command;
 
-fn nashgit(config: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_nashgit"))
+fn nashcode(config: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_nashcode"))
         .args(args)
-        .env("NASHGIT_CONFIG", config)
+        .env("NASHCODE_CONFIG", config)
         .output()
         .unwrap()
 }
@@ -17,7 +17,7 @@ fn doctor_reports_the_check_shape_and_exits_nonzero_without_a_profile() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("absent.toml");
 
-    let out = nashgit(&config, &["--json", "doctor"]);
+    let out = nashcode(&config, &["--json", "doctor"]);
     assert_eq!(out.status.code(), Some(1));
 
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -26,7 +26,7 @@ fn doctor_reports_the_check_shape_and_exits_nonzero_without_a_profile() {
     let checks = v["checks"].as_array().unwrap();
     assert_eq!(checks[0]["id"], "profile");
     assert_eq!(checks[0]["status"], "fail");
-    assert!(checks[0]["detail"].as_str().unwrap().contains("nashgit setup"));
+    assert!(checks[0]["detail"].as_str().unwrap().contains("nashcode setup"));
 }
 
 #[test]
@@ -56,10 +56,10 @@ fn doctor_probes_the_profiles_listen_port_not_a_hardcoded_one() {
     )
     .unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_nashgit"))
+    let out = Command::new(env!("CARGO_BIN_EXE_nashcode"))
         .args(["--json", "doctor"])
-        .env("NASHGIT_CONFIG", &config)
-        .env("NASHGIT_SSH_BIN", &shim)
+        .env("NASHCODE_CONFIG", &config)
+        .env("NASHCODE_SSH_BIN", &shim)
         .output()
         .unwrap();
 
@@ -92,23 +92,23 @@ fn profiles_use_and_token_round_trip_through_the_store() {
     )
     .unwrap();
 
-    let out = nashgit(&config, &["--json", "profiles"]);
+    let out = nashcode(&config, &["--json", "profiles"]);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["active"], "a");
     assert_eq!(v["profiles"].as_array().unwrap().len(), 2);
 
-    let out = nashgit(&config, &["--json", "use", "b"]);
+    let out = nashcode(&config, &["--json", "use", "b"]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["active"], "b");
 
     // --profile overrides the active selection without changing it.
-    let out = nashgit(&config, &["--json", "--profile", "a", "token"]);
+    let out = nashcode(&config, &["--json", "--profile", "a", "token"]);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["token"], "aaaa");
 
     // The active profile (now b) holds no token: that is an error, not "".
-    let out = nashgit(&config, &["--json", "token"]);
+    let out = nashcode(&config, &["--json", "token"]);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(v["error"].as_str().unwrap().contains("no token"));
@@ -131,7 +131,7 @@ fn a_bad_repo_name_dies_before_it_can_become_a_url_path() {
         vec!["--json", "desc", "x/config", "--desc", "d"],
         vec!["--json", "clone", "../evil"],
     ] {
-        let out = nashgit(&config, &args);
+        let out = nashcode(&config, &args);
         assert!(!out.status.success(), "{args:?} should fail");
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert!(
@@ -148,9 +148,9 @@ fn plan_new_writes_the_template_inside_a_repo() {
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     let config = dir.path().join("absent.toml"); // plan new needs no profile
 
-    let out = Command::new(env!("CARGO_BIN_EXE_nashgit"))
+    let out = Command::new(env!("CARGO_BIN_EXE_nashcode"))
         .args(["--json", "plan", "new", "Replace", "the", "Parser"])
-        .env("NASHGIT_CONFIG", &config)
+        .env("NASHCODE_CONFIG", &config)
         .current_dir(&repo)
         .output()
         .unwrap();
@@ -163,9 +163,9 @@ fn plan_new_writes_the_template_inside_a_repo() {
     assert!(text.contains("## Steps"));
 
     // Re-running refuses to clobber the plan.
-    let out = Command::new(env!("CARGO_BIN_EXE_nashgit"))
+    let out = Command::new(env!("CARGO_BIN_EXE_nashcode"))
         .args(["plan", "new", "Replace the Parser"])
-        .env("NASHGIT_CONFIG", &config)
+        .env("NASHCODE_CONFIG", &config)
         .current_dir(&repo)
         .output()
         .unwrap();
@@ -177,7 +177,7 @@ fn setup_dry_run_prints_scripts_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
 
-    let out = nashgit(
+    let out = nashcode(
         &config,
         &[
             "setup",

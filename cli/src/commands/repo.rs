@@ -33,7 +33,7 @@ fn wire_remote(ctx: &Ctx, p: &Profile, ws: &Workspace, name: &str) -> Result<Str
             let suggested = vcs::suggested_helper();
             ctx.out.warn(format!(
                 "git has no credential helper, so the push token was not saved.\n         \
-                 Set one, then run `nashgit remote` again:\n         \
+                 Set one, then run `nashcode remote` again:\n         \
                  git config --global credential.helper {suggested}"
             ));
         }
@@ -42,7 +42,7 @@ fn wire_remote(ctx: &Ctx, p: &Profile, ws: &Workspace, name: &str) -> Result<Str
 }
 
 /// jj was asked for. An explicit `--jj` with no jj installed is an error; the
-/// `$NASHGIT_JJ=1` ambient default degrades to a warning and plain git.
+/// `$NASHCODE_JJ=1` ambient default degrades to a warning and plain git.
 fn require_jj(explicit_flag: bool, out: &crate::output::Out) -> Result<()> {
     if vcs::jj_available() {
         return Ok(());
@@ -50,7 +50,7 @@ fn require_jj(explicit_flag: bool, out: &crate::output::Out) -> Result<()> {
     if explicit_flag {
         bail!("--jj was given but jj is not on PATH. Install Jujutsu: https://jj-vcs.github.io/jj/");
     }
-    out.warn("NASHGIT_JJ=1 is set but jj is not on PATH; continuing with git only");
+    out.warn("NASHCODE_JJ=1 is set but jj is not on PATH; continuing with git only");
     Ok(())
 }
 
@@ -109,7 +109,7 @@ pub fn new(ctx: &Ctx, args: &NewArgs) -> Result<()> {
     Ok(())
 }
 
-/// `nashgit init` — turn the current directory into a versioned repository.
+/// `nashcode init` — turn the current directory into a versioned repository.
 pub fn init(ctx: &Ctx, args: &InitArgs) -> Result<()> {
     let (_, p, client) = ctx.client()?;
     let cwd = std::env::current_dir().context("read current directory")?;
@@ -183,7 +183,7 @@ pub fn init(ctx: &Ctx, args: &InitArgs) -> Result<()> {
 /// Commit whatever is uncommitted and push it. Returns false when there was
 /// nothing to send.
 fn commit_and_push(ctx: &Ctx, ws: &Workspace) -> Result<bool> {
-    const MSG: &str = "Initial commit (nashgit init)";
+    const MSG: &str = "Initial commit (nashcode init)";
     if ws.kind.is_jj() {
         // jj tracks the working copy already; `jj commit` closes the current
         // change, and a bookmark is what `jj git push` can actually send.
@@ -220,7 +220,7 @@ fn commit_and_push(ctx: &Ctx, ws: &Workspace) -> Result<bool> {
         if !commit.ok() {
             bail!("git commit failed: {}", commit.stderr.trim());
         }
-        ctx.out.step("git commit -m \"Initial commit (nashgit init)\"");
+        ctx.out.step("git commit -m \"Initial commit (nashcode init)\"");
     }
     let head = vcs::git(&ws.root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let branch = head.stdout.trim();

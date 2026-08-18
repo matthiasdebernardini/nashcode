@@ -1,5 +1,5 @@
 /*
- * The stylesheet entry, bundled by esbuild into OUT_DIR/nashgit.css.
+ * The stylesheet entry, bundled by esbuild into OUT_DIR/nashcode.css.
  *
  * Primer supplies the whole design language. `primer.css` already carries the light
  * and dark theme variables behind `[data-color-mode]` selectors, so dark mode is
@@ -54,12 +54,12 @@
 }
 
 :root {
-  --nashgit-font-code: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+  --nashcode-font-code: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
     monospace;
-  --nashgit-font-display: "Departure Mono", ui-monospace, monospace;
+  --nashcode-font-display: "Departure Mono", ui-monospace, monospace;
 
   /* Tier 1: the diff component and everything read as code. */
-  --diffs-font-family: var(--nashgit-font-code);
+  --diffs-font-family: var(--nashcode-font-code);
   --diffs-font-size: 12px;
   --diffs-line-height: 1.5;
 }
@@ -68,12 +68,12 @@
 pre,
 code,
 tt,
-.nashgit-code,
-.nashgit-ci-log,
+.nashcode-code,
+.nashcode-ci-log,
 .commit-sha,
 .markdown-body pre,
 .markdown-body code {
-  font-family: var(--nashgit-font-code);
+  font-family: var(--nashcode-font-code);
 }
 
 /* Tier 2: personality surfaces. Primer's own font stack rules are overridden here,
@@ -91,10 +91,10 @@ h6,
 .branch-name,
 .subnav-item,
 .tabnav-tab,
-.nashgit-display,
-.nashgit-board-column-header,
-.nashgit-status-label {
-  font-family: var(--nashgit-font-display);
+.nashcode-display,
+.nashcode-board-column-header,
+.nashcode-status-label {
+  font-family: var(--nashcode-font-display);
 }
 
 /* Branch pills read as identifiers, not code: Departure wins over Primer's mono. */
@@ -121,11 +121,11 @@ h6,
 
 /* ---- diffs ------------------------------------------------------------------ */
 
-.nashgit-diff-mount {
+.nashcode-diff-mount {
   margin-bottom: 16px;
 }
 
-.nashgit-diff-mount:last-child {
+.nashcode-diff-mount:last-child {
   margin-bottom: 0;
 }
 
@@ -136,18 +136,18 @@ h6,
  * pseudo-element, not a hairline rule: filled shapes read as structure, thin strokes
  * read as noise and disappear at low contrast.
  */
-.nashgit-stack-graph {
+.nashcode-stack-graph {
   display: flex;
   flex-direction: column;
   gap: 0;
 }
 
-.nashgit-stack-row {
+.nashcode-stack-row {
   position: relative;
   padding-left: 28px;
 }
 
-.nashgit-stack-row::before {
+.nashcode-stack-row::before {
   content: "";
   position: absolute;
   left: 8px;
@@ -158,19 +158,19 @@ h6,
   background-color: var(--borderColor-muted);
 }
 
-.nashgit-stack-row:first-child::before {
+.nashcode-stack-row:first-child::before {
   top: 50%;
 }
 
-.nashgit-stack-row:last-child::before {
+.nashcode-stack-row:last-child::before {
   bottom: 50%;
 }
 
-.nashgit-stack-row:only-child::before {
+.nashcode-stack-row:only-child::before {
   display: none;
 }
 
-.nashgit-stack-row::after {
+.nashcode-stack-row::after {
   content: "";
   position: absolute;
   left: 2px;
@@ -182,13 +182,13 @@ h6,
   background-color: var(--fgColor-muted);
 }
 
-.nashgit-stack-row.is-current::after {
+.nashcode-stack-row.is-current::after {
   background-color: var(--fgColor-accent);
 }
 
 /* ---- board ------------------------------------------------------------------ */
 
-.nashgit-board {
+.nashcode-board {
   display: flex;
   gap: 16px;
   align-items: flex-start;
@@ -196,7 +196,7 @@ h6,
   padding-bottom: 8px;
 }
 
-.nashgit-board-column {
+.nashcode-board-column {
   flex: 0 0 300px;
   display: flex;
   flex-direction: column;
@@ -205,7 +205,7 @@ h6,
   background-color: var(--bgColor-muted);
 }
 
-.nashgit-board-column-header {
+.nashcode-board-column-header {
   padding: 12px 12px 8px;
   display: flex;
   align-items: center;
@@ -213,7 +213,7 @@ h6,
   font-weight: 600;
 }
 
-.nashgit-board-column-body {
+.nashcode-board-column-body {
   padding: 8px;
   overflow-y: auto;
   display: flex;
@@ -222,12 +222,12 @@ h6,
   min-height: 60px;
 }
 
-.nashgit-board-column.is-drag-over .nashgit-board-column-body {
+.nashcode-board-column.is-drag-over .nashcode-board-column-body {
   background-color: var(--bgColor-accent-muted);
   border-radius: 6px;
 }
 
-.nashgit-board-card {
+.nashcode-board-card {
   display: block;
   padding: 10px 12px;
   border-radius: 10px;
@@ -238,23 +238,23 @@ h6,
   color: inherit;
 }
 
-.nashgit-board-card:hover {
+.nashcode-board-card:hover {
   background-color: var(--bgColor-neutral-muted);
   text-decoration: none;
 }
 
-.nashgit-board-card.is-dragging {
+.nashcode-board-card.is-dragging {
   opacity: 0.5;
   cursor: grabbing;
 }
 
-.nashgit-board-column[data-nodrop="true"] .nashgit-board-card {
+.nashcode-board-column[data-nodrop="true"] .nashcode-board-card {
   cursor: default;
 }
 
 /* ---- CI status dot ----------------------------------------------------------- */
 
-.nashgit-status-dot {
+.nashcode-status-dot {
   display: inline-block;
   width: 8px;
   height: 8px;
@@ -264,29 +264,29 @@ h6,
   flex: none;
 }
 
-.nashgit-status-dot.is-passed {
+.nashcode-status-dot.is-passed {
   background-color: var(--fgColor-success);
 }
 
-.nashgit-status-dot.is-failed,
-.nashgit-status-dot.is-timeout,
-.nashgit-status-dot.is-error {
+.nashcode-status-dot.is-failed,
+.nashcode-status-dot.is-timeout,
+.nashcode-status-dot.is-error {
   background-color: var(--fgColor-danger);
 }
 
-.nashgit-status-dot.is-running,
-.nashgit-status-dot.is-queued {
+.nashcode-status-dot.is-running,
+.nashcode-status-dot.is-queued {
   background-color: var(--fgColor-attention);
 }
 
-.nashgit-status-dot.is-skipped,
-.nashgit-status-dot.is-unknown {
+.nashcode-status-dot.is-skipped,
+.nashcode-status-dot.is-unknown {
   background-color: var(--borderColor-emphasis);
 }
 
 /* ---- toasts ------------------------------------------------------------------ */
 
-.nashgit-toasts {
+.nashcode-toasts {
   position: fixed;
   right: 16px;
   bottom: 16px;
@@ -299,7 +299,7 @@ h6,
 
 /* ---- comments ---------------------------------------------------------------- */
 
-.nashgit-annotation {
+.nashcode-annotation {
   border-radius: 10px;
   background-color: var(--bgColor-muted);
   margin: 6px 8px;
@@ -307,31 +307,31 @@ h6,
   font-size: 12px;
 }
 
-.nashgit-annotation-comment {
+.nashcode-annotation-comment {
   padding: 10px 12px;
 }
 
 /* Successive comments read as separate cards, stacked, with no rule between them. */
-.nashgit-annotation-comment + .nashgit-annotation-comment {
+.nashcode-annotation-comment + .nashcode-annotation-comment {
   padding-top: 0;
 }
 
-.nashgit-annotation-body > *:first-child {
+.nashcode-annotation-body > *:first-child {
   margin-top: 0;
 }
 
-.nashgit-annotation-body > *:last-child {
+.nashcode-annotation-body > *:last-child {
   margin-bottom: 0;
 }
 
-.nashgit-composer {
+.nashcode-composer {
   padding: 8px 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.nashgit-composer textarea {
+.nashcode-composer textarea {
   min-height: 60px;
   resize: vertical;
 }
@@ -432,14 +432,14 @@ h6,
 }
 
 /* The CI log and any other framed pre: a surface, not an outline. */
-.nashgit-ci-log {
+.nashcode-ci-log {
   background-color: var(--bgColor-inset, var(--bgColor-muted));
   border-radius: 10px;
   padding: 12px 16px;
 }
 
 /* Prompts read as prose, but keep the writer's line breaks. */
-.nashgit-prompt-text {
+.nashcode-prompt-text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

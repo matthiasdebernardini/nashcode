@@ -1,11 +1,11 @@
-//! jj is shelled out behind the `$NASHGIT_JJ_BIN` / `$NASHGIT_GIT_BIN` seam.
-//! These tests point both at recording shims and check which tool `nashgit`
+//! jj is shelled out behind the `$NASHCODE_JJ_BIN` / `$NASHCODE_GIT_BIN` seam.
+//! These tests point both at recording shims and check which tool `nashcode`
 //! reaches for in each repository layout: `jj git remote add` in a jj repo,
 //! `git remote add` in a git one — same URL, same credential path either way.
 //!
 //! nextest gives each test its own process, so the env vars cannot leak.
 
-use nashgit_cli::vcs;
+use nashcode_cli::vcs;
 use std::fs;
 use std::path::Path;
 
@@ -47,8 +47,8 @@ fn a_jj_repo_gets_jj_git_remote_add() {
     let jj = shim(dir.path(), "jj", "");
     let git = shim(dir.path(), "git", "");
     unsafe {
-        std::env::set_var("NASHGIT_JJ_BIN", &jj);
-        std::env::set_var("NASHGIT_GIT_BIN", &git);
+        std::env::set_var("NASHCODE_JJ_BIN", &jj);
+        std::env::set_var("NASHCODE_GIT_BIN", &git);
     }
 
     let ws = vcs::detect(&repo).unwrap();
@@ -73,8 +73,8 @@ fn a_git_repo_gets_git_remote_add() {
     let jj = shim(dir.path(), "jj", "");
     let git = shim(dir.path(), "git", "");
     unsafe {
-        std::env::set_var("NASHGIT_JJ_BIN", &jj);
-        std::env::set_var("NASHGIT_GIT_BIN", &git);
+        std::env::set_var("NASHCODE_JJ_BIN", &jj);
+        std::env::set_var("NASHCODE_GIT_BIN", &git);
     }
 
     let ws = vcs::detect(&repo).unwrap();
@@ -91,7 +91,7 @@ fn an_existing_origin_is_replaced_not_duplicated() {
 
     // `jj git remote list` output: "origin <url>" — so set-url is chosen.
     let jj = shim(dir.path(), "jj", "origin https://old/x.git\n");
-    unsafe { std::env::set_var("NASHGIT_JJ_BIN", &jj) };
+    unsafe { std::env::set_var("NASHCODE_JJ_BIN", &jj) };
 
     let ws = vcs::detect(&repo).unwrap();
     let cmd = ws.set_origin("https://example-host/myrepo.git").unwrap();
@@ -100,29 +100,29 @@ fn an_existing_origin_is_replaced_not_duplicated() {
 
 #[test]
 fn jj_availability_reads_the_test_seam_first() {
-    unsafe { std::env::set_var("NASHGIT_JJ_AVAILABLE", "0") };
+    unsafe { std::env::set_var("NASHCODE_JJ_AVAILABLE", "0") };
     assert!(!vcs::jj_available());
-    unsafe { std::env::set_var("NASHGIT_JJ_AVAILABLE", "1") };
+    unsafe { std::env::set_var("NASHCODE_JJ_AVAILABLE", "1") };
     assert!(vcs::jj_available());
 }
 
 #[test]
 fn jj_is_opt_in_for_new_and_clone_but_default_for_init() {
     unsafe {
-        std::env::remove_var("NASHGIT_JJ");
-        std::env::set_var("NASHGIT_JJ_AVAILABLE", "1");
+        std::env::remove_var("NASHCODE_JJ");
+        std::env::set_var("NASHCODE_JJ_AVAILABLE", "1");
     }
     // new/clone: only the flag or the env var opt in — jj being installed
     // does not change what clone produces.
     assert!(!vcs::jj_requested(false));
     assert!(vcs::jj_requested(true));
-    unsafe { std::env::set_var("NASHGIT_JJ", "1") };
+    unsafe { std::env::set_var("NASHCODE_JJ", "1") };
     assert!(vcs::jj_requested(false));
 
     // init creates a working copy from nothing: there jj wins when present.
-    unsafe { std::env::remove_var("NASHGIT_JJ") };
+    unsafe { std::env::remove_var("NASHCODE_JJ") };
     assert!(vcs::prefer_jj(false, false));
     assert!(!vcs::prefer_jj(false, true)); // --git overrides
-    unsafe { std::env::set_var("NASHGIT_JJ_AVAILABLE", "0") };
+    unsafe { std::env::set_var("NASHCODE_JJ_AVAILABLE", "0") };
     assert!(!vcs::prefer_jj(false, false));
 }

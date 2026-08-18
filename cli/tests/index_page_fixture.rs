@@ -1,8 +1,8 @@
-//! `nashgit ls` parses dgit's index page. The fixture is a page rendered the
+//! `nashcode ls` parses dgit's index page. The fixture is a page rendered the
 //! way dgit's `indexPage()` renders it (sections, entities, an idle-less row),
 //! saved so the parser is tested against the real markup, not a sketch of it.
 
-use nashgit_cli::index_page::parse;
+use nashcode_cli::index_page::parse;
 
 const FIXTURE: &str = include_str!("fixtures/index.html");
 

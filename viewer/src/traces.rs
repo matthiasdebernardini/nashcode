@@ -8,7 +8,7 @@
 //! in between belong to that session. No commit trailer to remember, no naming
 //! convention to get wrong, no cooperation that can be skipped.
 //!
-//! Storage lives in nashgit rather than in git. Transcripts are large and append-heavy;
+//! Storage lives in nashcode rather than in git. Transcripts are large and append-heavy;
 //! committing them would bloat every clone. Plans and cards are git-native because they
 //! are small and human-edited. A transcript is neither.
 

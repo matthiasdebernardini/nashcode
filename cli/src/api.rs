@@ -1,7 +1,7 @@
 //! The dgit HTTP surface.
 //!
 //! dgit authenticates with HTTP Basic where the *password* is the shared
-//! `GIT_TOKEN`; the username is ignored, so nashgit sends `x`. Reads of public
+//! `GIT_TOKEN`; the username is ignored, so nashcode sends `x`. Reads of public
 //! repositories need no auth at all.
 //!
 //! Endpoints used here (the whole admin API):
@@ -142,7 +142,7 @@ impl Client {
             .timeout_global(Some(timeout))
             // Read statuses ourselves: a 401 is information, not an error.
             .http_status_as_error(false)
-            .user_agent(concat!("nashgit/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("nashcode/", env!("CARGO_PKG_VERSION")))
             .build();
         let auth = (!token.is_empty()).then(|| {
             let raw = format!("x:{token}");
@@ -253,7 +253,7 @@ impl Client {
             return Ok(());
         }
         let hint = match reply.status {
-            401 => " — the profile's token was rejected; check `nashgit token`",
+            401 => " — the profile's token was rejected; check `nashcode token`",
             403 => " — the server has no GIT_TOKEN configured",
             404 => " — no such repository",
             _ => "",

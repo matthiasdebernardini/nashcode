@@ -9,15 +9,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use nashgit::brain::Brain;
-use nashgit::ci::CiQueue;
-use nashgit::config::Config;
-use nashgit::db::Db;
-use nashgit::docs::DocIndexCache;
-use nashgit::hooks::Webhooks;
-use nashgit::mirror::Mirrors;
-use nashgit::ops::{Actor, Ops};
-use nashgit::web::{self, App};
+use nashcode::brain::Brain;
+use nashcode::ci::CiQueue;
+use nashcode::config::Config;
+use nashcode::db::Db;
+use nashcode::docs::DocIndexCache;
+use nashcode::hooks::Webhooks;
+use nashcode::mirror::Mirrors;
+use nashcode::ops::{Actor, Ops};
+use nashcode::web::{self, App};
 use topcoat::router::{Body, Method, Router, request::Request, to_bytes};
 
 /// Run git in `dir`, panicking loudly on failure — a broken fixture is a broken test.
@@ -166,7 +166,7 @@ pub fn testbed_with(root: tempfile::TempDir, repos: &[&str], webhooks: BTreeMap<
         repos: repos.iter().map(|r| (*r).to_owned()).collect(),
         mirrors: root.path().join("mirrors"),
         bind: "127.0.0.1:0".to_owned(),
-        db_path: root.path().join("nashgit.db"),
+        db_path: root.path().join("nashcode.db"),
         ci_logs: root.path().join("ci-logs"),
         traces: root.path().join("traces"),
         webhooks,
@@ -195,7 +195,7 @@ pub fn observed_bed(build: impl FnOnce(&Path) -> Work, webhooks: BTreeMap<String
         repos: vec!["demo".to_owned()],
         mirrors: root.path().join("mirrors"),
         bind: "127.0.0.1:0".to_owned(),
-        db_path: root.path().join("nashgit.db"),
+        db_path: root.path().join("nashcode.db"),
         ci_logs: root.path().join("ci-logs"),
         traces: root.path().join("traces"),
         webhooks,
@@ -214,10 +214,10 @@ fn testbed_build(root: tempfile::TempDir, config: Arc<Config>, observe: bool) ->
     if observe {
         let ci = ci.clone();
         let hooks = hooks.clone();
-        mirrors = mirrors.with_observer(Arc::new(move |tip: nashgit::mirror::NewTip| {
+        mirrors = mirrors.with_observer(Arc::new(move |tip: nashcode::mirror::NewTip| {
             ci.enqueue(&tip.repo, &tip.branch, &tip.commit);
             hooks.send(
-                nashgit::hooks::PUSH,
+                nashcode::hooks::PUSH,
                 serde_json::json!({
                     "repo": tip.repo,
                     "branch": tip.branch,

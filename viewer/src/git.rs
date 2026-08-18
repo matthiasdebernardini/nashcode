@@ -1,4 +1,4 @@
-//! The only thing in nashgit that knows what git is: a thin shell-out layer.
+//! The only thing in nashcode that knows what git is: a thin shell-out layer.
 //!
 //! Every git question is answered by running the real `git` binary against a
 //! `--mirror` clone or a scratch worktree. Nothing here parses packfiles, refs, or

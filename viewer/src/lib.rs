@@ -1,4 +1,4 @@
-//! nashgit viewer library: everything the binary wires together, exposed so the
+//! nashcode viewer library: everything the binary wires together, exposed so the
 //! integration tests can drive the real router end to end.
 
 pub mod brain;

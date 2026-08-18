@@ -1,4 +1,4 @@
-//! Everything server-side runs through the system `ssh`. `$NASHGIT_SSH_BIN`
+//! Everything server-side runs through the system `ssh`. `$NASHCODE_SSH_BIN`
 //! is the seam: these tests point it at a shim that records its argv and its
 //! stdin, so the generated remote scripts are checked end to end with no
 //! network and no host.
@@ -6,8 +6,8 @@
 //! nextest runs each test in its own process, so setting the env var here
 //! cannot leak into another test.
 
-use nashgit_cli::remote::{self, Deploy};
-use nashgit_cli::ssh::Ssh;
+use nashcode_cli::remote::{self, Deploy};
+use nashcode_cli::ssh::Ssh;
 use std::fs;
 use std::path::Path;
 
@@ -63,7 +63,7 @@ fn sample_deploy() -> Deploy {
 fn the_install_script_runs_twice_and_sends_the_same_idempotent_script() {
     let dir = tempfile::tempdir().unwrap();
     let shim = install_shim(dir.path());
-    unsafe { std::env::set_var("NASHGIT_SSH_BIN", &shim) };
+    unsafe { std::env::set_var("NASHCODE_SSH_BIN", &shim) };
 
     let ssh = Ssh::new("me@example-host");
     let script = remote::install_script();
@@ -90,7 +90,7 @@ fn the_install_script_runs_twice_and_sends_the_same_idempotent_script() {
 fn scripts_travel_on_stdin_and_secrets_never_reach_argv() {
     let dir = tempfile::tempdir().unwrap();
     let shim = install_shim(dir.path());
-    unsafe { std::env::set_var("NASHGIT_SSH_BIN", &shim) };
+    unsafe { std::env::set_var("NASHCODE_SSH_BIN", &shim) };
 
     let d = sample_deploy();
     let ssh = Ssh::new("me@example-host");
@@ -115,7 +115,7 @@ fn scripts_travel_on_stdin_and_secrets_never_reach_argv() {
 fn dry_run_touches_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let shim = install_shim(dir.path());
-    unsafe { std::env::set_var("NASHGIT_SSH_BIN", &shim) };
+    unsafe { std::env::set_var("NASHCODE_SSH_BIN", &shim) };
 
     let ssh = Ssh::new("me@example-host").dry_run(true);
     let out = ssh.script(&remote::install_script()).unwrap();

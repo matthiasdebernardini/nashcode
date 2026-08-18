@@ -1,7 +1,7 @@
 use clap::Parser;
-use nashgit_cli::cli::{Cli, Command, PlanCommand};
-use nashgit_cli::commands::{Ctx, doctor, invite, plan, profiles, repo, setup};
-use nashgit_cli::output::Out;
+use nashcode_cli::cli::{Cli, Command, PlanCommand};
+use nashcode_cli::commands::{Ctx, doctor, invite, plan, profiles, repo, setup};
+use nashcode_cli::output::Out;
 
 fn main() {
     let cli = Cli::parse();

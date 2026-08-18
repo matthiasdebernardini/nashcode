@@ -1,15 +1,15 @@
 [package]
-name = "nashgit"
+name = "nashcode"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Stacked-branch review and CI for a dgit server on a tailnet"
 
-# The user-facing `nashgit` binary belongs to the cli crate; the viewer's
-# server binary carries its own name. The lib target stays `nashgit`, which is
+# The user-facing `nashcode` binary belongs to the cli crate; the viewer's
+# server binary carries its own name. The lib target stays `nashcode`, which is
 # what the integration tests import.
 [[bin]]
-name = "nashgit-viewer"
+name = "nashcode-viewer"
 path = "src/main.rs"
 
 [dependencies]

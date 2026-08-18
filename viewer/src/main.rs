@@ -1,16 +1,16 @@
-//! nashgit viewer: stacked-branch review, plans, board, CI, and brain for a dgit
+//! nashcode viewer: stacked-branch review, plans, board, CI, and brain for a dgit
 //! server. See SPEC.md for the contract and README.md for setup.
 
 use std::sync::Arc;
 
-use nashgit::ci::{CiQueue, CiWorker, DEFAULT_TIMEOUT};
-use nashgit::config::Config;
-use nashgit::db::Db;
-use nashgit::docs::DocIndexCache;
-use nashgit::hooks::Webhooks;
-use nashgit::mirror::{Mirrors, NewTip, TipObserver};
-use nashgit::ops::Ops;
-use nashgit::{brain, hooks, web};
+use nashcode::ci::{CiQueue, CiWorker, DEFAULT_TIMEOUT};
+use nashcode::config::Config;
+use nashcode::db::Db;
+use nashcode::docs::DocIndexCache;
+use nashcode::hooks::Webhooks;
+use nashcode::mirror::{Mirrors, NewTip, TipObserver};
+use nashcode::ops::Ops;
+use nashcode::{brain, hooks, web};
 
 #[tokio::main]
 async fn main() {
@@ -21,45 +21,45 @@ async fn main() {
             serve().await;
             0
         }
-        Some("hook") => nashgit::cli::hook().await,
+        Some("hook") => nashcode::cli::hook().await,
         Some("trace") => match args.get(1).map(String::as_str) {
             Some("push") => match args.get(2) {
                 Some(file) => {
-                    nashgit::cli::trace_push(
+                    nashcode::cli::trace_push(
                         file,
-                        nashgit::cli::flag_value(&args, "--session"),
-                        nashgit::cli::flag_value(&args, "--repo"),
+                        nashcode::cli::flag_value(&args, "--session"),
+                        nashcode::cli::flag_value(&args, "--repo"),
                     )
                     .await
                 }
                 None => {
-                    eprintln!("{}", nashgit::cli::USAGE);
+                    eprintln!("{}", nashcode::cli::USAGE);
                     2
                 }
             },
-            Some("list") => nashgit::cli::trace_list(nashgit::cli::flag_value(&args, "--repo")).await,
+            Some("list") => nashcode::cli::trace_list(nashcode::cli::flag_value(&args, "--repo")).await,
             Some("show") => match args.get(2) {
                 Some(session) => {
-                    nashgit::cli::trace_show(session, nashgit::cli::flag_value(&args, "--repo"))
+                    nashcode::cli::trace_show(session, nashcode::cli::flag_value(&args, "--repo"))
                         .await
                 }
                 None => {
-                    eprintln!("{}", nashgit::cli::USAGE);
+                    eprintln!("{}", nashcode::cli::USAGE);
                     2
                 }
             },
             _ => {
-                eprintln!("{}", nashgit::cli::USAGE);
+                eprintln!("{}", nashcode::cli::USAGE);
                 2
             }
         },
-        Some("doctor") => nashgit::cli::doctor().await,
+        Some("doctor") => nashcode::cli::doctor().await,
         Some("--help") | Some("-h") | Some("help") => {
-            println!("{}", nashgit::cli::USAGE);
+            println!("{}", nashcode::cli::USAGE);
             0
         }
         Some(other) => {
-            eprintln!("unknown command: {other}\n\n{}", nashgit::cli::USAGE);
+            eprintln!("unknown command: {other}\n\n{}", nashcode::cli::USAGE);
             2
         }
     };
@@ -72,7 +72,7 @@ async fn serve() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "nashgit=info,warn".into()),
+                .unwrap_or_else(|_| "nashcode=info,warn".into()),
         )
         .init();
 
@@ -149,7 +149,7 @@ async fn serve() {
             std::process::exit(1);
         }
     };
-    tracing::info!(bind = %config.bind, "nashgit listening");
+    tracing::info!(bind = %config.bind, "nashcode listening");
     if let Err(error) = topcoat::serve(listener, router).await {
         eprintln!("server error: {error}");
         std::process::exit(1);
@@ -159,7 +159,7 @@ async fn serve() {
 /// One line per thing an operator would otherwise discover the hard way.
 fn doctor(config: &Config) {
     if config.repos.is_empty() {
-        eprintln!("doctor: NASHGIT_REPOS is empty; the index page will show nothing");
+        eprintln!("doctor: NASHCODE_REPOS is empty; the index page will show nothing");
     }
     if config.dgit_url.is_empty() {
         eprintln!("doctor: DGIT_URL is unset; mirrors cannot clone or fetch");

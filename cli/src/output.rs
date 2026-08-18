@@ -40,7 +40,7 @@ impl Out {
 
     /// A line of human output. Dropped in `--json` mode.
     ///
-    /// Write errors are ignored on purpose: `nashgit ls | head -1` closes the
+    /// Write errors are ignored on purpose: `nashcode ls | head -1` closes the
     /// pipe early, and that is the reader's business, not a panic.
     pub fn line(&self, s: impl AsRef<str>) {
         if self.mode == Mode::Human {

@@ -1,7 +1,7 @@
 //! The profile store round-trips through its TOML file, keeps the token under
 //! 0600, and resolves `--profile` overrides the way every command relies on.
 
-use nashgit_cli::profile::{Profile, Store};
+use nashcode_cli::profile::{Profile, Store};
 
 fn sample() -> Profile {
     Profile {
@@ -23,7 +23,7 @@ fn sample() -> Profile {
 #[test]
 fn a_store_survives_the_disk_byte_for_byte() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("nashgit").join("config.toml");
+    let path = dir.path().join("nashcode").join("config.toml");
 
     let mut store = Store::default();
     store.insert("box", sample());
@@ -42,7 +42,7 @@ fn a_store_survives_the_disk_byte_for_byte() {
 fn the_file_is_0600_and_the_directory_0700() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("nashgit").join("config.toml");
+    let path = dir.path().join("nashcode").join("config.toml");
     let mut store = Store::default();
     store.insert("box", sample());
     store.save_to(&path).unwrap();
@@ -55,7 +55,7 @@ fn the_file_is_0600_and_the_directory_0700() {
 #[test]
 fn saving_replaces_atomically_and_leaves_no_temp_file_behind() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("nashgit").join("config.toml");
+    let path = dir.path().join("nashcode").join("config.toml");
 
     let mut store = Store::default();
     store.insert("box", sample());
@@ -92,7 +92,7 @@ fn resolve_prefers_the_override_and_reports_missing_names() {
 
     let empty = Store::default();
     let err = empty.resolve(None).unwrap_err().to_string();
-    assert!(err.contains("nashgit setup"), "{err}");
+    assert!(err.contains("nashcode setup"), "{err}");
 }
 
 #[test]

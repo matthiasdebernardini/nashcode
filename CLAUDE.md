@@ -1,4 +1,4 @@
-# nashgit
+# nashcode
 
 **Another coding agent may be working in this repo right now, on `main`, at the same time
 as you.** Read `COORDINATION.md` before you edit anything, and claim your files there.
@@ -13,4 +13,4 @@ The short version:
 - Leave notes for the other agent at the bottom of `COORDINATION.md`.
 
 `SPEC.md` is the contract. `NOTES.md` records where the implementation had to choose.
-`AGENTS.md` documents nashgit for agents that *use* it, which is a different thing.
+`AGENTS.md` documents nashcode for agents that *use* it, which is a different thing.

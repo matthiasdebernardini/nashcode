@@ -9,7 +9,7 @@ use std::sync::Arc;
 use common::{
     Work, get, post_json, spawn_stub, stacked_fixture, testbed_from_config, testbed_with,
 };
-use nashgit::config::Config;
+use nashcode::config::Config;
 
 fn two_repo_root() -> tempfile::TempDir {
     let root = tempfile::tempdir().expect("tempdir");
@@ -71,7 +71,7 @@ fn asking_bed(root: tempfile::TempDir, stub_url: &str, key: Option<&str>) -> com
         repos: vec!["demo".to_owned(), "other".to_owned()],
         mirrors: root.path().join("mirrors"),
         bind: "127.0.0.1:0".to_owned(),
-        db_path: root.path().join("nashgit.db"),
+        db_path: root.path().join("nashcode.db"),
         ci_logs: root.path().join("ci-logs"),
         traces: root.path().join("traces"),
         webhooks: BTreeMap::new(),
