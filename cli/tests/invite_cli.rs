@@ -257,6 +257,30 @@ fn list_prints_names_and_never_token_material() {
 }
 
 #[test]
+fn an_unreachable_probe_never_reports_a_revoke_as_verified() {
+    let host = Host::new("400");
+    host.run(&["--json", "invite", "alice"]);
+
+    // The service never comes back: every probe sees 000. The mapping change
+    // and redeploy did happen — the CLI must say "unverified", not "ok".
+    let curl = host.dir.path().join("stubs/curl");
+    fs::write(&curl, "#!/bin/sh\nprintf '000'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let out = host.run(&["--json", "invite", "--revoke", "alice"]);
+    assert!(!out.status.success());
+    let v = json(&out);
+    let err = v["error"].as_str().unwrap();
+    assert!(err.contains("could not confirm"), "{err}");
+    assert!(err.contains("doctor"), "{err}");
+    assert!(err.contains("000"), "{err}");
+}
+
+#[test]
 fn a_failed_probe_fails_the_invite() {
     // The server rejects the new token (401 where 400 was expected): the
     // invite must report failure, not print a token that does not work.

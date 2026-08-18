@@ -108,14 +108,32 @@ fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
         );
     }
     ctx.out.step(format!("removing `{name}` and redeploying"));
-    let out = ssh
-        .script(&remote::revoke_script(name, p, &listen(p)))?
-        .require("revoke")?;
+    let out = ssh.script(&remote::revoke_script(name, p, &listen(p)))?;
     let kv = parse_kv(&out.stdout);
     let probe = kv
         .get("NASHGIT_REVOKE_PROBE")
         .cloned()
         .unwrap_or_default();
+    if !out.ok() {
+        // The script only probes after the mapping change and redeploy went
+        // through, so a probe code means the revocation itself succeeded —
+        // say exactly which promise is broken.
+        match probe.as_str() {
+            "400" => bail!(
+                "`{name}` was removed from the mapping and the redeploy ran, but the \
+                 revoked token is STILL accepted (HTTP 400). Run `nashgit doctor` and \
+                 check the celld service."
+            ),
+            "" => {
+                out.require("revoke")?;
+            }
+            code => bail!(
+                "`{name}` was revoked and the new token set deployed, but the check \
+                 could not confirm it (HTTP {code} from the loopback probe). \
+                 Re-run `nashgit doctor` to see why the server is not answering."
+            ),
+        }
+    }
     ctx.out.emit(
         json!({
             "revoked": name,

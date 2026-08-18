@@ -749,7 +749,11 @@ rm -f "$TMP"
 log "removed $NAME from $INVITES"
 {regen}
 {probe}echo "NASHGIT_REVOKE_PROBE=$code"
-if [ "$code" = 400 ]; then log "the revoked token is still accepted"; exit 1; fi
+case "$code" in
+  401|403) ;;
+  400) log "the revoked token is still accepted"; exit 1 ;;
+  *) log "could not confirm the revocation (HTTP $code)"; exit 1 ;;
+esac
 echo "NASHGIT_REVOKE=ok"
 "#,
         name = sq(name),
@@ -802,11 +806,11 @@ fi
 echo "NASHGIT_SERVICE=$(systemctl is-active celld 2>/dev/null || echo inactive)"
 echo "NASHGIT_LOOPBACK=$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 "http://{listen}/" 2>/dev/null || echo 000)"
 echo "NASHGIT_TS_STATE=$(tailscale status --json 2>/dev/null | node -e {state} 2>/dev/null || echo Unknown)"
-if tailscale serve status 2>/dev/null | grep -q '127.0.0.1:{port}'; then
-  echo "NASHGIT_SERVE=ok"
-else
-  echo "NASHGIT_SERVE=fail"
-fi
+SERVE_STATUS="$(tailscale serve status 2>/dev/null || true)"
+case "$SERVE_STATUS" in
+  *"127.0.0.1:{port}"*) echo "NASHGIT_SERVE=ok" ;;
+  *) echo "NASHGIT_SERVE=fail" ;;
+esac
 {diagnose}"#,
         listen = listen,
         port = listen.rsplit(':').next().unwrap_or("8080"),
@@ -932,6 +936,10 @@ mod tests {
         // retried, not believed (invite hopes for 400, revoke for 401).
         assert!(s.contains(r#"case "$code" in 400|403) break ;; esac"#), "{s}");
         assert!(r.contains(r#"case "$code" in 401|403) break ;; esac"#), "{r}");
+
+        // And revoke is strict about what counts as verified: only a real
+        // rejection. An unreachable server (000) must not read as success.
+        assert!(r.contains(r#"*) log "could not confirm the revocation"#), "{r}");
 
         // The list script touches only the name column.
         let l = invites_list_script();
