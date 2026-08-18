@@ -31,6 +31,11 @@ pub struct Profile {
     /// Base URL of the nashgit viewer, when one is deployed alongside dgit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer_url: Option<String>,
+    /// Loopback port celld listens on, from `setup --listen-port`. Absent in
+    /// profiles written before this field existed; read it via
+    /// [`Profile::listen_port`], which falls back to 8080.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
 
     // --- celld facts, kept so `doctor` can check the fleet without re-asking ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,6 +62,12 @@ impl Profile {
     /// Host part of `url`, used as the key for `git credential approve`.
     pub fn url_host(&self) -> Result<String> {
         url_host(&self.url)
+    }
+
+    /// The loopback port celld listens on. 8080 when the profile predates the
+    /// field.
+    pub fn listen_port(&self) -> u16 {
+        self.listen_port.unwrap_or(8080)
     }
 }
 

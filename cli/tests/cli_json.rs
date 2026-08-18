@@ -30,6 +30,57 @@ fn doctor_reports_the_check_shape_and_exits_nonzero_without_a_profile() {
 }
 
 #[test]
+fn doctor_probes_the_profiles_listen_port_not_a_hardcoded_one() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // A fake ssh that records the doctor script it was sent.
+    let shim = dir.path().join("fake-ssh");
+    std::fs::write(
+        &shim,
+        format!("#!/bin/sh\ncat > {}/doctor-script.log\nexit 0\n", dir.path().display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // url points at a closed local port so the server checks fail fast
+    // offline; the host checks are what this test is about.
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "active = \"box\"\n\n[profiles.box]\nurl = \"http://127.0.0.1:1\"\n\
+         ssh = \"me@example-host\"\nlisten_port = 9944\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_nashgit"))
+        .args(["--json", "doctor"])
+        .env("NASHGIT_CONFIG", &config)
+        .env("NASHGIT_SSH_BIN", &shim)
+        .output()
+        .unwrap();
+
+    let script = std::fs::read_to_string(dir.path().join("doctor-script.log")).unwrap();
+    assert!(script.contains("http://127.0.0.1:9944/"), "{script}");
+    assert!(!script.contains("8080"), "hardcoded port survives: {script}");
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let loopback = v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "loopback")
+        .expect("a loopback check");
+    assert!(
+        loopback["detail"].as_str().unwrap().contains("127.0.0.1:9944"),
+        "{loopback}"
+    );
+}
+
+#[test]
 fn profiles_use_and_token_round_trip_through_the_store() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");

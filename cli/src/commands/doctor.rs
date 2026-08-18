@@ -211,7 +211,7 @@ fn host_checks(p: &Profile) -> Vec<Check> {
             .collect();
     }
 
-    let listen = format!("127.0.0.1:{}", listen_port(p));
+    let listen = format!("127.0.0.1:{}", p.listen_port());
     let out = match Ssh::new(&p.ssh).script(&remote::doctor_script(p, &listen)) {
         Ok(o) if o.ok() => o,
         Ok(o) => {
@@ -285,11 +285,6 @@ fn viewer_check(p: &Profile) -> Check {
         Ok(r) => Check::fail("viewer", "viewer", format!("HTTP {} from {url}", r.status)),
         Err(e) => Check::fail("viewer", "viewer", e.to_string()),
     }
-}
-
-/// celld's loopback port, taken from the profile URL when it names one.
-fn listen_port(_p: &Profile) -> u16 {
-    8080
 }
 
 #[cfg(test)]

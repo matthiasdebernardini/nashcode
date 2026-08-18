@@ -202,6 +202,7 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
         ssh: host.clone(),
         token: token.clone(),
         viewer_url: viewer_url.clone(),
+        listen_port: Some(args.listen_port),
         provider: Some(provider.id().to_string()),
         bucket: Some(bucket.clone()),
         endpoint: endpoint.clone(),

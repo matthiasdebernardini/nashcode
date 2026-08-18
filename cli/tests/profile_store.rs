@@ -9,6 +9,7 @@ fn sample() -> Profile {
         ssh: "me@box".into(),
         token: "deadbeef".into(),
         viewer_url: Some("https://box.example.ts.net:8443".into()),
+        listen_port: Some(9944),
         provider: Some("tigris".into()),
         bucket: Some("s3://example-cells".into()),
         endpoint: Some("https://t3.storage.dev".into()),
@@ -67,6 +68,29 @@ fn resolve_prefers_the_override_and_reports_missing_names() {
     let empty = Store::default();
     let err = empty.resolve(None).unwrap_err().to_string();
     assert!(err.contains("nashgit setup"), "{err}");
+}
+
+#[test]
+fn a_non_default_listen_port_round_trips_and_an_old_profile_defaults_to_8080() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut store = Store::default();
+    store.insert("box", sample()); // listen_port = Some(9944)
+    store.save_to(&path).unwrap();
+    let back = Store::load_from(&path).unwrap();
+    assert_eq!(back.profiles["box"].listen_port, Some(9944));
+    assert_eq!(back.profiles["box"].listen_port(), 9944);
+
+    // A profile written before the field existed still parses, and the
+    // accessor answers 8080.
+    std::fs::write(
+        &path,
+        "active = \"old\"\n\n[profiles.old]\nurl = \"https://o.example\"\n",
+    )
+    .unwrap();
+    let old = Store::load_from(&path).unwrap();
+    assert_eq!(old.profiles["old"].listen_port, None);
+    assert_eq!(old.profiles["old"].listen_port(), 8080);
 }
 
 #[test]
