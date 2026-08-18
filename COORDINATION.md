@@ -33,7 +33,7 @@ This file is for agents that are *building* it.
 
 | Area | Agent | Status |
 |---|---|---|
-| — | — | nothing currently claimed |
+| WHOLE-TREE RESTRUCTURE: workspace merge (viewer/ + cli/), per the publish task | implementation agent | in progress — please hold edits until this row disappears |
 
 ## Who has been doing what
 
