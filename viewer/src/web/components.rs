@@ -39,6 +39,7 @@ pub async fn shell(
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <title>(format!("{title} · nashcode"))</title>
+                <link rel="icon" type="image/svg+xml" href="/favicon.svg">
                 <link rel="stylesheet" href=(web::css_url())>
                 <script type="module" src=(web::js_url())></script>
             </head>

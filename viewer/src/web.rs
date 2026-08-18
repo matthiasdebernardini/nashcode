@@ -111,6 +111,13 @@ pub fn css_url() -> String {
     format!("/assets/nashcode.css?v={ASSET_HASH}")
 }
 
+const FAVICON: &[u8] = include_bytes!("../assets/favicon.svg");
+
+#[topcoat::router::route(GET "/favicon.svg")]
+async fn asset_favicon() -> topcoat::Result<Response> {
+    Ok(asset_response("image/svg+xml", FAVICON))
+}
+
 #[topcoat::router::route(GET "/assets/nashcode.js")]
 async fn asset_js() -> topcoat::Result<Response> {
     Ok(asset_response("text/javascript; charset=utf-8", APP_JS))

@@ -443,3 +443,11 @@ h6,
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* Primer CSS ships no gap utilities; the templates use these two. */
+.gap-2 {
+  gap: 8px;
+}
+.gap-3 {
+  gap: 16px;
+}
