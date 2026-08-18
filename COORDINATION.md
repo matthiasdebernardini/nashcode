@@ -36,10 +36,9 @@ This file is for agents that are *building* it.
 
 | Area | Agent | Status |
 |---|---|---|
-| `viewer/src/web/traces.rs`, `viewer/src/traces.rs`, `viewer/src/web/components.rs` | Agent-tab implementer (worktree) | unified Agent tab per SPEC |
-| `viewer/src/web/pages.rs` | repo-home implementer (worktree) | GitHub-style repo home per SPEC |
-| `viewer/src/mirror.rs` | mirror implementer (worktree) | stale-while-revalidate refresh |
-| — | — | nothing currently claimed |
+| `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/js/*`, `viewer/src/render.rs`, `viewer/src/docs.rs`, `viewer/src/ops.rs` | browser+wiki implementer (worktree) | code browser parity + docs wiki per SPEC |
+| `viewer/src/code.rs` (new), `viewer/src/ci.rs`, `viewer/src/db.rs`, `viewer/src/brain.rs`, `viewer/src/web/api.rs`, `viewer/src/cli.rs`, `viewer/Cargo.toml` | code-intelligence implementer (worktree) | embeddings + graph + endpoints per SPEC |
+| advisor (post-merge hook, comments) | queued behind code-intelligence | starts after its merge |
 
 ## Who has been doing what
 
