@@ -39,11 +39,22 @@ pub fn markdown(source: &str, repo: &str, index: Option<&DocIndex>, branches: &[
     for event in parser {
         match event {
             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_)))
-            | Event::Start(Tag::CodeBlock(CodeBlockKind::Indented))
-            | Event::Start(Tag::Link { .. })
-            | Event::Start(Tag::Image { .. }) => {
+            | Event::Start(Tag::CodeBlock(CodeBlockKind::Indented)) => {
                 verbatim_depth += 1;
                 events.push(event);
+            }
+            // Author-supplied link destinations are untrusted: a `javascript:` (or
+            // `data:` etc.) href is click-gated script execution. Unsafe schemes are
+            // replaced, never passed through.
+            Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
+                verbatim_depth += 1;
+                let dest_url = if allowed_url(&dest_url) { dest_url } else { "#".into() };
+                events.push(Event::Start(Tag::Link { link_type, dest_url, title, id }));
+            }
+            Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
+                verbatim_depth += 1;
+                let dest_url = if allowed_url(&dest_url) { dest_url } else { "".into() };
+                events.push(Event::Start(Tag::Image { link_type, dest_url, title, id }));
             }
             Event::End(TagEnd::CodeBlock) | Event::End(TagEnd::Link) | Event::End(TagEnd::Image) => {
                 verbatim_depth = verbatim_depth.saturating_sub(1);
@@ -79,6 +90,26 @@ pub fn markdown(source: &str, repo: &str, index: Option<&DocIndex>, branches: &[
     let mut html = String::new();
     pulldown_cmark::html::push_html(&mut html, events.into_iter());
     html
+}
+
+/// Is this link destination safe to render as a live href/src?
+///
+/// Allowed: `http:`, `https:`, `mailto:`, and scheme-less (relative or fragment)
+/// URLs. Everything else — `javascript:`, `data:`, `vbscript:`, `file:`, unknown
+/// schemes — is refused. Detection mirrors what browsers tolerate before scheme
+/// parsing: tabs and newlines are removed anywhere, leading and trailing controls
+/// and spaces are stripped, and the scheme match is case-insensitive.
+fn allowed_url(url: &str) -> bool {
+    let cleaned: String = url.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    let cleaned = cleaned.trim_matches(|c: char| c.is_control() || c == ' ');
+    let lower = cleaned.to_ascii_lowercase();
+    match lower.find(':') {
+        // A colon only introduces a scheme when it comes before any /, ?, or #.
+        Some(colon) if colon < lower.find(['/', '?', '#']).unwrap_or(usize::MAX) => {
+            matches!(&lower[..colon], "http" | "https" | "mailto")
+        }
+        _ => true,
+    }
 }
 
 /// Split a text node on whitespace and link every token that names an existing
@@ -199,6 +230,78 @@ mod tests {
         let html = markdown("look <img src=x onerror=alert(1)> here", "demo", None, &[]);
         assert!(!html.contains("<img"), "{html}");
         assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"), "{html}");
+    }
+
+    #[test]
+    fn unsafe_link_schemes_are_refused_and_safe_ones_kept() {
+        // Refused, including the browser-tolerated obfuscations.
+        for bad in [
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "  javascript:alert(1)",
+            "\u{1}javascript:alert(1)",
+            "java\tscript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "file:///etc/passwd",
+            "totally-made-up:payload",
+        ] {
+            assert!(!allowed_url(bad), "must refuse {bad:?}");
+        }
+        // Kept.
+        for good in [
+            "https://example.invalid/x",
+            "http://example.invalid",
+            "mailto:ada@example.invalid",
+            "/demo/plans/api.md",
+            "plans/api.md",
+            "#section",
+            "?branch=main",
+            "/path/with:colon",
+        ] {
+            assert!(allowed_url(good), "must keep {good:?}");
+        }
+    }
+
+    #[test]
+    fn a_javascript_link_renders_without_its_scheme() {
+        let html = markdown("[click me](javascript:alert(1))", "demo", None, &[]);
+        assert!(!html.to_ascii_lowercase().contains("javascript:"), "{html}");
+        assert!(html.contains("click me"), "the text survives: {html}");
+        assert!(html.contains("href=\"#\""), "neutralized to a dead href: {html}");
+    }
+
+    #[test]
+    fn a_data_url_link_is_neutralized() {
+        let html = markdown("[x](data:text/html;base64,PHNjcmlwdD4=)", "demo", None, &[]);
+        assert!(!html.contains("data:"), "{html}");
+    }
+
+    #[test]
+    fn an_entity_obfuscated_scheme_is_neutralized() {
+        // &#9; decodes to a tab inside the destination; browsers strip it.
+        let html = markdown("[x](&#9;javascript:alert(1))", "demo", None, &[]);
+        assert!(!html.to_ascii_lowercase().contains("javascript:"), "{html}");
+    }
+
+    #[test]
+    fn an_image_with_a_javascript_src_is_neutralized() {
+        let html = markdown("![alt](javascript:alert(1))", "demo", None, &[]);
+        assert!(!html.to_ascii_lowercase().contains("javascript:"), "{html}");
+    }
+
+    #[test]
+    fn ordinary_links_and_images_still_work() {
+        let html = markdown(
+            "[a](https://example.invalid) [b](/demo/x) [c](mailto:x@example.invalid) ![i](https://example.invalid/i.png)",
+            "demo",
+            None,
+            &[],
+        );
+        assert!(html.contains("href=\"https://example.invalid\""), "{html}");
+        assert!(html.contains("href=\"/demo/x\""), "{html}");
+        assert!(html.contains("href=\"mailto:x@example.invalid\""), "{html}");
+        assert!(html.contains("src=\"https://example.invalid/i.png\""), "{html}");
     }
 
     #[test]

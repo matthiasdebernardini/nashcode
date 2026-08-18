@@ -211,6 +211,30 @@ async fn hostile_comment_html_renders_escaped_everywhere() {
 }
 
 #[tokio::test]
+async fn javascript_links_in_comments_render_dead() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    for body in [
+        "[click](javascript:alert(1))",
+        "[click](JaVaScRiPt:alert(1))",
+        "[click](data:text/html,<script>alert(1)</script>)",
+    ] {
+        let (status, _) = post_json(
+            &bed.router,
+            "/demo/comments",
+            serde_json::json!({ "branch": "part-1", "body": body }),
+        )
+        .await;
+        assert_eq!(status, 201);
+    }
+
+    let (_, page) = get(&bed.router, "/demo/part-1").await;
+    let lower = page.to_ascii_lowercase();
+    assert!(!lower.contains("javascript:"), "live javascript: href leaked: {page}");
+    assert!(!lower.contains("href=\"data:"), "live data: href leaked");
+    assert!(page.contains("click"), "the link text is still readable");
+}
+
+#[tokio::test]
 async fn only_the_author_can_delete_through_the_ui_route() {
     let bed = simple_bed(|root| stacked_fixture(root, "demo"));
     // Posted without Tailscale headers: the author is `local`.
