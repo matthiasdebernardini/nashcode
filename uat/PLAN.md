@@ -7,9 +7,9 @@ when this lands. Companion code: [`uat.py`](uat.py), the automated harness.
 
 1. **All local.** No exe.dev deploy. nashgit is not hosted anywhere today; the exe.dev
    box runs only dgit.
-2. **One repo.** The live instance serves exactly one repo: nashgit itself. No demo/beta
+2. **One repo.** The live instance serves exactly one repo: nashgit itself. No extra
    fixture repos in the live setup. The harness keeps one throwaway fixture repo (named
-   `nashgit`) for write-path tests, because merges and restacks must not touch the real
+   `demo`) for write-path tests, because merges and restacks must not touch the real
    repo.
 3. **"How the code evolved" = traces + audit log + self-hosting.** nashgit pointed at its
    own repo, with the Claude session transcripts that built it backfilled, is the
@@ -19,24 +19,23 @@ when this lands. Companion code: [`uat.py`](uat.py), the automated harness.
 
 ## Status
 
-- Automated suite: **114/114 green** at `7cc3c72`, re-verified independently by a
-  second reviewer. Run: `cargo build && python3 uat/uat.py`.
-- The tree moved since the suite was written: `/:repo/prompts` page and
-  `--force-with-lease` push semantics are new and uncovered (Part 2 adds them).
-- A whole-tree workspace restructure is in progress (see `COORDINATION.md`); everything
-  below stays inside `uat/` until that claim clears.
+- The workspace restructure landed: the repo is now `viewer/` (binary
+  `nashgit-viewer`: serve, hook, trace, doctor) plus `cli/` (binary `nashgit`, the
+  deploy CLI). Everything below uses `nashgit-viewer`.
+- Automated suite: green, including the T17/T18 additions and the beta-fixture
+  flattening. Run: `cargo build && python3 uat/uat.py`.
 
 ## Part 1 — self-host nashgit on nashgit (the evolution demo)
 
-The repo has no remote today. Create a local bare hub and serve it:
+The repo's `origin` is GitHub now, so the local bare hub gets its own remote name:
 
 ```sh
 git clone --bare ~/Projects/nashgit ~/git-local/nashgit.git
-git -C ~/Projects/nashgit remote add origin ~/git-local/nashgit.git
+git -C ~/Projects/nashgit remote add hub ~/git-local/nashgit.git
 
 DGIT_URL=~/git-local NASHGIT_REPOS=nashgit \
-NASHGIT_MIRRORS=~/git-local/mirrors \
-  ~/Projects/nashgit/target/debug/nashgit serve
+NASHGIT_MIRRORS=~/git-local/mirrors NASHGIT_TRACES=~/git-local/traces \
+  ~/Projects/nashgit/target/debug/nashgit-viewer serve
 ```
 
 Backfill the sessions that built nashgit (transcripts live in
@@ -44,12 +43,17 @@ Backfill the sessions that built nashgit (transcripts live in
 
 ```sh
 for t in ~/.claude/projects/-Users-md-Projects-nashgit/*.jsonl; do
-  NASHGIT_REPO=nashgit ./target/debug/nashgit trace push "$t"
+  NASHGIT_REPO=nashgit ./target/debug/nashgit-viewer trace push "$t"
 done
 ```
 
+UAT finding, fixed in `viewer/src/cli.rs`: backfilled transcripts stored the user's
+words under `message.content`, where the prompts page cannot see them. `trace push`
+now lifts them into the event's `prompt` field (skipping harness markup), so
+`/nashgit/prompts` lists the real asks that built this tool.
+
 Wire the hook so future sessions attribute their commits automatically
-(project `.claude/settings.json`, per `AGENTS.md`): `nashgit hook` on
+(project `.claude/settings.json`, per the viewer README): `nashgit-viewer hook` on
 `UserPromptSubmit`, `PostToolUse`, and `Stop`.
 
 Accept when:
@@ -89,17 +93,18 @@ below. Fixture shape: one repo with a stacked chain (`feat/retry-core` →
 | T15 degradation | resilience | dead git server → every page 200 with the stale banner; unknown repo 404, never 500 |
 | T16 CLI | doctor | exit 0 + "reachable" when up; nonzero when down |
 
-Additions needed (new since the suite was written):
+Additions (landed with this plan):
 
-- **T17 prompts page.** `/:repo/prompts` renders; search filters; `Accept:
-  application/json` returns the list as JSON.
-- **T18 lease semantics.** A force-push or delete of a ref that moved under the viewer
-  is **rejected**, not applied (`--force-with-lease --atomic`). A UAT story that used to
-  expect success on a stale rewrite now expects rejection. Dead-host git calls fail in
-  seconds (timeouts), not hang.
-- **Fixture flattening.** Collapse the harness's second repo (`beta`) into the single
-  fixture repo; the two checks that needed two repos (two-repo brain aggregate, `?repo=`
-  filter) stay covered by the crate's own integration tests.
+- **T17 prompts page.** `/:repo/prompts` renders; `?q=` and `?session=` filter;
+  `Accept: application/json` returns the list; a backfilled Claude Code transcript's
+  user text surfaces as a searchable prompt and harness markup does not.
+- **T18 lease semantics.** Deleting a ref that moved under the viewer is **rejected**,
+  not applied (`--force-with-lease --atomic`), and the concurrent push survives; once
+  the mirror catches up the same delete succeeds. Git subprocess timeouts (60s local /
+  300s remote) stay covered by the crate's own tests.
+- **Fixture flattening.** The second repo (`beta`) is gone: the branch-only plan and
+  the skipped-CI check moved onto branches of the single fixture repo; multi-repo
+  brain aggregation and `?repo=` narrowing stay covered by the crate's own tests.
 
 ## Part 3 — visual pass (cap recordings, local, macos-harness driven)
 

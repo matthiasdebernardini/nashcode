@@ -24,7 +24,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.environ.get("NASHGIT_BIN", os.path.join(ROOT, "target", "debug", "nashgit"))
+BIN = os.environ.get("NASHGIT_BIN", os.path.join(ROOT, "target", "debug", "nashgit-viewer"))
 
 RESULTS = []  # (test_id, name, ok, detail)
 
@@ -246,6 +246,7 @@ def build_fixtures(root):
 
     g(demo, "checkout", "-qb", "feat/retry-jitter")
     write(f"{demo}/src/jitter.py", JITTER_V1)
+    write(f"{demo}/plans/extra.md", "# Branch-only plan\n\nOnly exists on feat/retry-jitter.\n")
     g(demo, "add", "-A")
     g(demo, "commit", "-qm", "Add jitter helper for backoff delays")
 
@@ -254,6 +255,12 @@ def build_fixtures(root):
     write(f"{demo}/src/oops.py", "def broken(:\n    pass\n")
     g(demo, "add", "-A")
     g(demo, "commit", "-qm", "Introduce a syntax error (CI must go red)")
+
+    # A tip with no .nashgit/ci: the runner must record `skipped`, never execute.
+    g(demo, "checkout", "-q", "main")
+    g(demo, "checkout", "-qb", "chore/no-ci")
+    g(demo, "rm", "-q", ".nashgit/ci")
+    g(demo, "commit", "-qm", "Drop the CI script (runs must be skipped)")
 
     g(demo, "checkout", "-q", "main")
     g(demo, "checkout", "-qb", "stackb/base")
@@ -270,21 +277,6 @@ def build_fixtures(root):
     g(demo, "commit", "-aqm", "stackb conflicting edit of base.txt")
     g(demo, "checkout", "-q", "main")
     g(root, "clone", "-q", "--bare", demo, os.path.join(bare_dir, "demo.git"))
-
-    beta = os.path.join(root, "work", "beta")
-    g(root, "init", "-q", "-b", "main", beta)
-    write(f"{beta}/README.md", "# beta\n")
-    write(f"{beta}/plans/api.md", "# API sketch\n\nOne endpoint, JSON in, JSON out.\n")
-    write(f"{beta}/tasks/api.md", "---\nstatus: todo\ntitle: Sketch the API\n---\n\nSee plans/api.md.\n")
-    g(beta, "add", "-A")
-    g(beta, "commit", "-qm", "Seed beta")
-    g(beta, "checkout", "-qb", "feat/endpoint")
-    write(f"{beta}/api.py", "def handler(): ...\n")
-    write(f"{beta}/plans/extra.md", "# Branch-only plan\n\nOnly exists on feat/endpoint.\n")
-    g(beta, "add", "-A")
-    g(beta, "commit", "-qm", "First endpoint stub with a branch-only plan")
-    g(beta, "checkout", "-q", "main")
-    g(root, "clone", "-q", "--bare", beta, os.path.join(bare_dir, "beta.git"))
 
     return bare_dir
 
@@ -303,7 +295,7 @@ def start_server(root, bare_dir, port, webhook_port, dgit_url=None, log_name="se
     env = {
         **os.environ,
         "DGIT_URL": dgit_url or bare_dir,
-        "NASHGIT_REPOS": "demo,beta",
+        "NASHGIT_REPOS": "demo",
         "NASHGIT_MIRRORS": os.path.join(root, "mirrors"),
         "NASHGIT_BIND": f"127.0.0.1:{port}",
         "NASHGIT_WEBHOOKS": os.path.join(root, "webhooks.json"),
@@ -326,12 +318,12 @@ def push_and_wait(bare, branch, expect_sha, page):
 def t1_pages(bare):
     print("T1 pages")
     pages = ["/", "/demo", "/demo/stacks", "/demo/plans", "/demo/board", "/demo/ci",
-             "/demo/feat/retry-core", "/demo/traces", "/beta"]
+             "/demo/feat/retry-core", "/demo/traces", "/demo/prompts"]
     for page in pages:
         status, _ = get(page)
         check("T1", f"GET {page} is 200", status == 200, f"got {status}")
     _, body = get("/")
-    check("T1", "index names both repos", b"demo" in body and b"beta" in body)
+    check("T1", "index names the repo", b"demo" in body)
     _, body = get("/demo")
     check("T1", "branch list shows stack parent and ahead count",
           b"feat/retry-jitter" in body and b"feat/retry-core" in body and b"Counter" in body)
@@ -381,7 +373,8 @@ def initial_ci():
         _, brain = jget("/brain")
         demo = next(r for r in brain["repos"] if r["name"] == "demo")
         runs = {a["branch"]: a["status"] for a in demo["activity"] if a["type"] == "ci_run"}
-        if runs.get("chore/bad-lint") == "failed" and runs.get("feat/retry-core") == "passed":
+        if (runs.get("chore/bad-lint") == "failed" and runs.get("feat/retry-core") == "passed"
+                and runs.get("chore/no-ci")):
             return runs
         return None
     return wait_for(done, timeout=180, interval=3, desc="initial CI runs")
@@ -391,11 +384,8 @@ def t4_ci(runs):
     print("T4 CI")
     check("T4", "red branch failed, green branch passed",
           runs.get("chore/bad-lint") == "failed" and runs.get("feat/retry-core") == "passed", str(runs))
-    _, brain = jget("/brain")
-    beta = next(r for r in brain["repos"] if r["name"] == "beta")
-    beta_runs = [a for a in beta["activity"] if a["type"] == "ci_run"]
-    check("T4", "repo without .nashgit/ci never executes a job",
-          beta_runs and all(a["status"] == "skipped" for a in beta_runs), str(beta_runs))
+    check("T4", "tip without .nashgit/ci records skipped, never executes",
+          runs.get("chore/no-ci") == "skipped", str(runs))
     _, body = get("/demo/feat/retry-core/ci")
     check("T4", "green log shows script output", b"all green" in body)
     _, body = get("/demo/chore/bad-lint/ci")
@@ -738,25 +728,93 @@ def t12_traces(root, bare):
     check("T12", "hook exits 0 with the server unreachable", rc == 0, str(rc))
 
 
+def t17_prompts(root):
+    print("T17 prompts page")
+    status, body = get("/demo/prompts")
+    check("T17", "prompts page renders", status == 200, f"got {status}")
+    check("T17", "hook-recorded prompt listed", b"count how many fetches" in body)
+
+    status, body = get("/demo/prompts?q=fetches")
+    check("T17", "?q= keeps matching prompts", b"count how many fetches" in body)
+    status, body = get("/demo/prompts?q=zzz-no-such-prompt")
+    check("T17", "?q= filters out non-matches", b"count how many fetches" not in body)
+
+    _, rows = jget("/demo/prompts")
+    check("T17", "Accept: json returns the prompt list",
+          isinstance(rows, list) and any("count how many fetches" in (p.get("text") or "") for p in rows),
+          str(rows)[:160])
+    check("T17", "entries carry session, seq, text, created_at",
+          rows and all(k in rows[0] for k in ("session", "seq", "text", "created_at")),
+          str(rows[:1]))
+
+    # Backfill: a harness transcript's user text must surface as a prompt too.
+    transcript = os.path.join(root, "cc-transcript.jsonl")
+    write(transcript,
+          '{"type":"user","sessionId":"uat-cc-backfill",'
+          '"message":{"role":"user","content":"please add exponential backoff"}}\n'
+          '{"type":"user","sessionId":"uat-cc-backfill",'
+          '"message":{"role":"user","content":"<local-command-stdout>noise</local-command-stdout>"}}\n')
+    rc = subprocess.run([BIN, "trace", "push", transcript, "--repo", "demo"],
+                        env={**os.environ, "NASHGIT_URL": BASE}, capture_output=True, text=True)
+    check("T17", "claude-code-shaped transcript pushes", rc.returncode == 0, rc.stderr)
+    _, rows = jget("/demo/prompts?q=exponential")
+    check("T17", "backfilled user text is searchable as a prompt",
+          any("exponential backoff" in (p.get("text") or "") for p in rows), str(rows)[:160])
+    _, rows = jget("/demo/prompts?session=uat-cc-backfill")
+    check("T17", "harness markup lines are not prompts",
+          len(rows) == 1, f"{len(rows)} prompts: {str(rows)[:160]}")
+
+
+def t18_lease(root, bare):
+    print("T18 lease semantics")
+    demo_bare = os.path.join(bare, "demo.git")
+
+    # Freshen the mirror (debounce now shields the next ~10s from re-refreshing),
+    # then move the branch directly on the remote: the exact stale-read window.
+    get("/demo")
+    clone = os.path.join(root, "work", "lease-clone")
+    g(root, "clone", "-q", demo_bare, clone)
+    g(clone, "checkout", "-q", "chore/bad-lint")
+    write(f"{clone}/racing.txt", "pushed after the viewer last looked\n")
+    g(clone, "add", "-A")
+    g(clone, "commit", "-qm", "Concurrent work the viewer has not seen")
+    g(clone, "push", "-q", "origin", "chore/bad-lint")
+    racing = tip(demo_bare, "chore/bad-lint")
+
+    status, body = http("POST", "/demo/chore/bad-lint/delete", body={}, headers=MATTHIAS)
+    check("T18", "deleting a branch that moved under the viewer is rejected",
+          status >= 400, f"got {status} {body[:120]}")
+    check("T18", "the concurrent push survived",
+          tip(demo_bare, "chore/bad-lint") == racing)
+
+    # Once the mirror catches up, the same delete goes through.
+    push_and_wait(bare, "chore/bad-lint", racing, "/demo/chore/bad-lint")
+    status, body = http("POST", "/demo/chore/bad-lint/delete", body={}, headers=MATTHIAS)
+    check("T18", "delete succeeds when the lease matches", status == 200, f"{status} {body[:80]}")
+    check("T18", "branch gone from the remote",
+          g(demo_bare, "branch", "--list", "chore/bad-lint") == "")
+
+
 def t13_brain():
     print("T13 brain")
     status, brain = jget("/brain")
     names = {r["name"] for r in brain["repos"]}
-    check("T13", "aggregate covers both repos", names == {"demo", "beta"}, str(names))
+    check("T13", "aggregate covers the repo", names == {"demo"}, str(names))
     demo = next(r for r in brain["repos"] if r["name"] == "demo")
     check("T13", "aggregate carries branches, plans, cards, activity",
           all(k in demo for k in ("branches", "plans", "cards", "activity")), str(list(demo)))
-    _, only = jget("/brain?repo=beta")
-    check("T13", "?repo= filters", [r["name"] for r in only["repos"]] == ["beta"])
+    # Multi-repo aggregation and ?repo= narrowing are covered by the crate's own tests.
+    _, only = jget("/brain?repo=demo")
+    check("T13", "?repo= filters", [r["name"] for r in only["repos"]] == ["demo"])
     _, future = jget("/brain?since=2030-01-01T00:00:00Z")
     empty = all(not r["activity"] for r in future["repos"])
     check("T13", "future ?since= empties activity without erroring", empty)
     status, body = http("POST", "/brain/ask", body={"question": "anything"})
     check("T13", "/brain/ask is 404 without ANTHROPIC_API_KEY", status == 404, f"got {status}")
 
-    status, body = get("/beta/plans?branch=feat/endpoint")
+    status, body = get("/demo/plans?branch=feat/retry-jitter")
     check("T13", "plans ?branch= shows branch-only plans", b"extra.md" in body)
-    status, body = get("/beta/plans")
+    status, body = get("/demo/plans")
     check("T13", "default plans list omits branch-only plans", b"extra.md" not in body)
 
 
@@ -841,6 +899,8 @@ def main():
         t11_restack(root, bare)
         t12_traces(root, bare)
         t13_brain()
+        t17_prompts(root)
+        t18_lease(root, bare)
         t14_webhooks()
         t15_degradation(root, bare, port, webhook_port, proc)
     finally:

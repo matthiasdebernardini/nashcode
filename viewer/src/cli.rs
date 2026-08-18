@@ -118,6 +118,31 @@ pub async fn hook() -> i32 {
     0
 }
 
+/// The prompts page shows any event whose payload carries a top-level `prompt`. The
+/// live hook provides that; harness transcripts bury the user's words under
+/// `message.content` (a string, or text blocks). Lift them out so backfilled sessions
+/// have prompts too. Lines starting with `<` are harness markup (command output,
+/// system reminders), not something a person asked for.
+fn transcript_prompt(value: &serde_json::Value) -> Option<String> {
+    if value["type"].as_str() != Some("user") || value.get("prompt").is_some() {
+        return None;
+    }
+    let text = match &value["message"]["content"] {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .find(|block| block["type"].as_str() == Some("text"))
+            .and_then(|block| block["text"].as_str())
+            .map(str::to_owned)?,
+        _ => return None,
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.starts_with('<') {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
 /// `nashgit-viewer trace push <file>` — backfill a whole transcript for a session.
 pub async fn trace_push(file: &str, session: Option<String>, repo: Option<String>) -> i32 {
     let Ok(raw) = std::fs::read_to_string(file) else {
@@ -139,10 +164,13 @@ pub async fn trace_push(file: &str, session: Option<String>, repo: Option<String
         if trimmed.is_empty() {
             continue;
         }
-        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        let mut value: serde_json::Value = match serde_json::from_str(trimmed) {
             Ok(value) => value,
             Err(_) => serde_json::json!({ "text": trimmed }),
         };
+        if let Some(prompt) = transcript_prompt(&value) {
+            value["prompt"] = serde_json::Value::String(prompt);
+        }
         if found_session.is_none() {
             found_session = value["sessionId"]
                 .as_str()
