@@ -171,4 +171,12 @@ mod tests {
     fn a_missing_webhook_file_is_not_fatal() {
         assert!(load_webhooks(Path::new("/nonexistent/hooks.json")).is_empty());
     }
+
+    #[test]
+    fn the_default_bind_is_loopback_only() {
+        // No public listener: unless the operator overrides it, we bind 127.0.0.1.
+        if std::env::var("NASHGIT_BIND").is_err() {
+            assert_eq!(Config::from_env().bind, "127.0.0.1:8090");
+        }
+    }
 }

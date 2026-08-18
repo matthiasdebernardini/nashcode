@@ -169,3 +169,42 @@ async fn bad_comment_posts_are_client_errors() {
 fn urlenc(value: &str) -> String {
     value.replace('+', "%2B").replace(':', "%3A")
 }
+
+#[tokio::test]
+async fn only_the_author_can_delete_through_the_ui_route() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    // Posted without Tailscale headers: the author is `local`.
+    let (_, body) = post_json(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({ "branch": "main", "body": "mine" }),
+    )
+    .await;
+    let stored: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let id = stored["id"].as_i64().expect("id");
+
+    // A different author's comment survives the local user's delete.
+    let (_, other) = post_json(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({ "branch": "main", "body": "theirs", "author": "ada@example.invalid" }),
+    )
+    .await;
+    let other: serde_json::Value = serde_json::from_str(&other).expect("json");
+    let other_id = other["id"].as_i64().expect("id");
+
+    let (status, _) =
+        post_json(&bed.router, &format!("/demo/comments/{other_id}/delete"), serde_json::json!({}))
+            .await;
+    assert_eq!(status, 403, "someone else's comment must not delete");
+
+    let (status, _) =
+        post_json(&bed.router, &format!("/demo/comments/{id}/delete"), serde_json::json!({}))
+            .await;
+    assert_eq!(status, 303, "own comment deletes and redirects back");
+
+    let (_, list) = get(&bed.router, "/demo/comments").await;
+    let remaining: Vec<serde_json::Value> = serde_json::from_str(&list).expect("json");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["body"], "theirs");
+}
