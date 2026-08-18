@@ -44,9 +44,11 @@ function mountDiffs() {
         hunkSeparators: "line-info",
         renderAnnotation,
       });
+      // Drop the <pre> fallback once the real component takes over.
+      mount.textContent = "";
       instance.render({
         fileDiff,
-        fileContainer: mount,
+        containerWrapper: mount,
         lineAnnotations: data.annotations || [],
       });
     } catch (error) {
@@ -132,7 +134,19 @@ function mountBoard() {
 // The composer's optional "line" input is plain HTML; nothing to wire yet beyond
 // keeping the form usable without JS. Deliberately no framework.
 
-document.addEventListener("DOMContentLoaded", () => {
+function mountAll() {
   mountDiffs();
   mountBoard();
-});
+}
+
+// A bundle this large can finish evaluating after DOMContentLoaded has already
+// fired; mount immediately in that case instead of waiting for an event that
+// will never come again.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", mountAll);
+} else {
+  mountAll();
+}
+
+// A console escape hatch for poking at the diff renderer.
+globalThis.__nashgit = { FileDiff, parsePatchFiles, mountDiffs };

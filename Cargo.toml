@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Stacked-branch review and CI for a dgit server on a tailnet"
-repository = "https://github.com/nashvilleautomation/nashgit"
 
 [dependencies]
 topcoat = "0.6"

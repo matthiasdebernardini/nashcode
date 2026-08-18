@@ -43,8 +43,17 @@ where the implementation had to choose.
 - **Restack pushes are atomic:** all rebases happen in a scratch clone first, then one
   `git push --force --atomic` pushes every new tip; a conflict aborts before any push.
 
-## Scratch files
+## Known caveats
 
-`.probe*.js` and `.aliastest/` were the previous agent's import experiments against
-`@pierre/diffs` (confirming `FileDiff`/`parsePatchFiles` are importable from the package
-root). Safe to delete.
+- **The JS bundle is ~10 MB unminified-by-content.** `@pierre/diffs` pulls in Shiki, and
+  Shiki's default entry point carries every bundled grammar and theme. It gzips to a
+  fraction of that and is cached after the first load, but it is the one number in this
+  project that would embarrass you on a cold load over a slow link. The fix, if it ever
+  matters: register only the languages the repos actually contain via
+  `registerCustomLanguage` / `preloadHighlighter` and import Shiki's core entry instead of
+  the full bundle. Not done here because it trades a real correctness property (any file
+  in any language highlights) for a load-time number nobody on a tailnet will notice.
+- **CI runs jobs serially** in one global worker, per the spec. The `// ponytail` marker
+  at the queue notes where to parallelize per repo if it ever backs up.
+- **`git` is assumed on `PATH`** at runtime, not just at build time. There is no
+  vendored git and there never should be.
