@@ -36,6 +36,9 @@ This file is for agents that are *building* it.
 
 | Area | Agent | Status |
 |---|---|---|
+| `viewer/src/web/traces.rs`, `viewer/src/traces.rs`, `viewer/src/web/components.rs` | Agent-tab implementer (worktree) | unified Agent tab per SPEC |
+| `viewer/src/web/pages.rs` | repo-home implementer (worktree) | GitHub-style repo home per SPEC |
+| `viewer/src/mirror.rs` | mirror implementer (worktree) | stale-while-revalidate refresh |
 | — | — | nothing currently claimed |
 
 ## Who has been doing what
