@@ -21,6 +21,7 @@ against `git clone --mirror` copies on local disk.
 - `/:repo/plans` — markdown under `plans/`, rendered and commentable
 - `/:repo/board` — markdown under `tasks/` as a drag-and-drop kanban board
 - `/:repo/ci` — recent CI runs and their logs
+- `/:repo/traces` — agent sessions: the transcript that produced each commit
 - `/brain` — the whole tailnet's work state as JSON
 
 ## Requirements
@@ -65,8 +66,16 @@ Environment only. Nothing about your deployment lives in the source.
 | `NASHGIT_DB` | `$NASHGIT_MIRRORS/nashgit.db` | SQLite file: comments, CI runs, audit trail. |
 | `NASHGIT_CI_LOGS` | `$NASHGIT_MIRRORS/ci-logs` | CI log files. |
 | `NASHGIT_WEBHOOKS` | *(none)* | Path to a JSON file mapping events to URLs. |
+| `NASHGIT_TRACES` | `$NASHGIT_MIRRORS/traces` | Raw agent transcripts. |
 | `ANTHROPIC_API_KEY` | *(none)* | Enables `POST /brain/ask`. Without it that route answers 404. |
 | `NASHGIT_BRAIN_MODEL` | `claude-opus-5` | Model for `/brain/ask`. |
+
+The client commands (`hook`, `trace`, `doctor`) read two more:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NASHGIT_URL` | `http://127.0.0.1:8090` | Where the viewer is, from the agent's machine. |
+| `NASHGIT_REPO` | *(inferred)* | Repo name, when the git remote's basename is not it. |
 
 At startup the server prints a line for each thing that is unset and what you lose by it.
 
@@ -181,6 +190,52 @@ Outgoing only. dgit emits none, so nashgit's poller is the event source. Point
 ```
 
 POST JSON, 10-second timeout, one retry. Failures are logged, not queued.
+
+## Traces
+
+A commit answers "what changed". The trace that produced it answers "why, and what was
+tried first". nashgit stores agent sessions — prompts, tool calls, results — and links
+them to commits automatically: every recorded event carries the repo's `HEAD` at that
+moment, so when `HEAD` moves between two events, the commits in between belong to that
+session. No commit trailers, nothing for the agent to remember.
+
+Transcripts live in SQLite and under `NASHGIT_TRACES`, not in git. They are large and
+append-heavy; committing them would bloat every clone. The link to git is the commit SHA.
+
+`/:repo/traces` lists sessions. A session page renders the transcript with its commits
+inline, and a commit's row on the branch page links back to the conversation that wrote
+it. `GET /:repo/commits/:sha/trace` answers the same question as JSON.
+
+One warning: a transcript contains whatever the agent saw, secrets included. nashgit does
+not redact. The tailnet is the perimeter here as everywhere else.
+
+### Wiring an agent
+
+The nashgit binary is also the client. Put it on the agent's machine and let the harness
+hooks feed it. For Claude Code, in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "nashgit hook" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "nashgit hook" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "nashgit hook" }] }]
+  }
+}
+```
+
+`nashgit hook` reads one hook payload from stdin, records it, and exits 0 — always. A
+dead server, garbage input, or a missing repo never fails the agent's turn. Set
+`NASHGIT_DEBUG=1` to see why an event was dropped.
+
+For a run that happened without the hook, backfill from the harness transcript:
+
+```sh
+nashgit trace push ~/.claude/projects/<project>/<session>.jsonl
+nashgit trace list
+nashgit trace show <session>
+nashgit doctor        # what is configured, is the server reachable
+```
 
 ## Brain
 

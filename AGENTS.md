@@ -185,6 +185,30 @@ curl -s "$NASHGIT/$REPO/raw/main/plans/retries.md"
 
 Exact bytes, `text/plain`. The branch may contain slashes.
 
+## Traces
+
+If the `nashgit hook` is wired into your harness (see the README), every commit you make
+is linked to your session automatically — no trailer, no convention. Humans get from your
+diff to your transcript in one click; you can read sessions back too:
+
+```sh
+curl -s -H 'accept: application/json' "$NASHGIT/$REPO/traces"
+curl -s -H 'accept: application/json' "$NASHGIT/$REPO/traces/<session>"
+curl -s "$NASHGIT/$REPO/commits/<sha>/trace"
+```
+
+To record events yourself, POST batches; `(session, seq)` is idempotent, so retries are
+safe:
+
+```sh
+curl -X POST "$NASHGIT/$REPO/traces/events" \
+  -H 'content-type: application/json' \
+  -d '{"session":"my-session","agent":"my-agent","events":[
+        {"seq":1,"kind":"prompt","payload":{"prompt":"..."},"head":"<git rev-parse HEAD>"}]}'
+```
+
+Include `head` whenever you can — it is the whole linking mechanism.
+
 ## Rules
 
 - Never force-push a branch a human is reviewing without saying so in a comment first.

@@ -23,8 +23,12 @@ where the implementation had to choose.
   are parsed off the tail: `.../ci`, `.../ci/rerun`, `.../merge`, `.../restack`,
   `.../delete`. A branch name therefore may not *end* in one of those suffixes.
 - Reserved first segments under a repo (never valid branch names): `stacks`, `plans`,
-  `tasks`, `board`, `ci`, `comments`, `raw`. `tasks` is reserved beyond the spec's list
-  because a card page renders at `/{repo}/tasks/{*path}` (spec only names `board`).
+  `tasks`, `board`, `ci`, `comments`, `raw`, `traces`, `commits`, `assets`. `tasks` and
+  `commits` are reserved beyond the spec's list: a card page renders at
+  `/{repo}/tasks/{*path}` and the commit-to-trace link at `/{repo}/commits/{sha}/trace`.
+- `GET /{repo}/traces[...]` is both a page and an API: `Accept: application/json`
+  selects JSON, anything else gets HTML. One URL per resource instead of a parallel
+  `/api` tree.
 - `/{repo}/raw/{*rest}`: the branch part of the rest is matched greedily against real
   branch names (longest prefix wins) so branches with `/` still get raw URLs; if nothing
   matches, the first segment is taken as the revision.
