@@ -171,6 +171,46 @@ fn urlenc(value: &str) -> String {
 }
 
 #[tokio::test]
+async fn hostile_comment_html_renders_escaped_everywhere() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    let payload = "<img src=x onerror=alert(1)> and <script>alert(2)</script>";
+
+    // Line-anchored on the diffed file: reaches the annotation payload the browser
+    // injects via innerHTML.
+    let (status, _) = post_json(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({
+            "branch": "part-1",
+            "file": "src/app.txt",
+            "line": 2,
+            "body": payload,
+        }),
+    )
+    .await;
+    assert_eq!(status, 201);
+    // Branch-level too: reaches the comment blocks in the page body.
+    let (status, _) = post_json(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({ "branch": "part-1", "body": payload }),
+    )
+    .await;
+    assert_eq!(status, 201);
+
+    let (_, page) = get(&bed.router, "/demo/part-1").await;
+    assert!(!page.contains("<img src=x"), "raw img tag leaked: {page}");
+    assert!(!page.contains("<script>alert"), "raw script tag leaked");
+    // The text itself is still readable, escaped.
+    assert!(
+        page.contains("&lt;img src=x onerror=alert(1)&gt;")
+            || page.contains("\\u003cimg src=x onerror=alert(1)\\u003e")
+            || page.contains("\\u003cimg"),
+        "escaped form missing: {page}"
+    );
+}
+
+#[tokio::test]
 async fn only_the_author_can_delete_through_the_ui_route() {
     let bed = simple_bed(|root| stacked_fixture(root, "demo"));
     // Posted without Tailscale headers: the author is `local`.

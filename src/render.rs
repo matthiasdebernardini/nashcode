@@ -67,6 +67,11 @@ pub fn markdown(source: &str, repo: &str, index: Option<&DocIndex>, branches: &[
                     events.push(Event::Code(code));
                 }
             }
+            // Raw HTML in the source is untrusted: comment bodies arrive through a
+            // public POST API and plan/card bodies through a push. Re-emitting these
+            // events as text makes push_html escape them.
+            Event::Html(html) => events.push(Event::Text(html)),
+            Event::InlineHtml(html) => events.push(Event::Text(html)),
             other => events.push(other),
         }
     }
@@ -180,5 +185,32 @@ mod tests {
         let html = markdown("`not-a-branch`", "demo", None, &["main".to_owned()]);
         assert!(html.contains("<code>not-a-branch</code>"));
         assert!(!html.contains("<a "), "{html}");
+    }
+
+    #[test]
+    fn raw_block_html_is_escaped_not_executed() {
+        let html = markdown("<script>alert(1)</script>", "demo", None, &[]);
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
+    }
+
+    #[test]
+    fn raw_inline_html_is_escaped_not_executed() {
+        let html = markdown("look <img src=x onerror=alert(1)> here", "demo", None, &[]);
+        assert!(!html.contains("<img"), "{html}");
+        assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"), "{html}");
+    }
+
+    #[test]
+    fn html_inside_an_autolinked_document_is_still_escaped() {
+        let index = index_with(&["plans/api.md"]);
+        let html = markdown(
+            "see plans/api.md <script>alert(1)</script>",
+            "demo",
+            Some(&index),
+            &[],
+        );
+        assert!(html.contains("<a href=\"/demo/plans/api.md\">"), "{html}");
+        assert!(!html.contains("<script>"), "{html}");
     }
 }

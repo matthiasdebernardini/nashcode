@@ -48,6 +48,25 @@ async fn plans_list_and_render_and_raw_returns_exact_bytes() {
 }
 
 #[tokio::test]
+async fn hostile_html_in_a_plan_body_renders_escaped() {
+    let bed = simple_bed(|root| {
+        let work = stacked_fixture(root, "demo");
+        work.write(
+            "plans/evil.md",
+            "# Plan\n\n<script>alert(1)</script>\n\n<img src=x onerror=alert(2)>\n",
+        );
+        work.commit_all("evil plan");
+        work.push("main");
+        work
+    });
+    let (status, page) = get(&bed.router, "/demo/plans/evil.md").await;
+    assert_eq!(status, 200);
+    assert!(!page.contains("<script>alert"), "raw script leaked: {page}");
+    assert!(!page.contains("<img src=x"), "raw img leaked");
+    assert!(page.contains("&lt;script&gt;"), "escaped form missing");
+}
+
+#[tokio::test]
 async fn the_board_shows_three_columns_and_quarantines_bad_front_matter() {
     let bed = simple_bed(linked_fixture);
     let (status, board) = get(&bed.router, "/demo/board").await;
