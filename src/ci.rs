@@ -162,25 +162,47 @@ impl CiWorker {
             .stderr(Stdio::null())
             .kill_on_drop(true);
 
-        let child = match command.spawn() {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => return (status::ERROR, format!("cannot run {CI_SCRIPT}: {error}")),
         };
 
-        match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
-            Err(_elapsed) => (
-                status::TIMEOUT,
-                format!("timed out after {}s", self.timeout.as_secs()),
-            ),
-            Ok(Err(error)) => (status::ERROR, format!("cannot collect output: {error}")),
-            Ok(Ok(output)) => {
-                let log = String::from_utf8_lossy(&output.stdout).into_owned();
-                if output.status.success() {
-                    (status::PASSED, log)
-                } else {
-                    (status::FAILED, log)
+        // Stream the output against a deadline, so a timed-out job still keeps
+        // everything it printed before the axe fell.
+        use tokio::io::AsyncReadExt as _;
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let mut collected: Vec<u8> = Vec::new();
+        let mut buffer = [0u8; 8192];
+        let timed_out = loop {
+            match tokio::time::timeout_at(deadline, stdout.read(&mut buffer)).await {
+                Err(_elapsed) => break true,
+                Ok(Ok(0)) => break false,
+                Ok(Ok(read)) => collected.extend_from_slice(&buffer[..read]),
+                Ok(Err(error)) => {
+                    collected
+                        .extend_from_slice(format!("\n[read error: {error}]").as_bytes());
+                    break false;
                 }
             }
+        };
+
+        if timed_out {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let mut log = String::from_utf8_lossy(&collected).into_owned();
+            log.push_str(&format!(
+                "\n\n[nashgit: killed after the {}s timeout; output above is partial]",
+                self.timeout.as_secs()
+            ));
+            return (status::TIMEOUT, log);
+        }
+
+        let log = String::from_utf8_lossy(&collected).into_owned();
+        match child.wait().await {
+            Err(error) => (status::ERROR, format!("{log}\n[cannot collect status: {error}]")),
+            Ok(exit) if exit.success() => (status::PASSED, log),
+            Ok(_) => (status::FAILED, log),
         }
     }
 

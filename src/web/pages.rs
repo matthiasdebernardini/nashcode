@@ -27,12 +27,11 @@ const ACTION_SUFFIXES: [&str; 5] = ["ci/rerun", "ci", "merge", "restack", "delet
 /// Split `rest` into `(branch, action)`.
 pub fn split_action(rest: &str) -> (&str, Option<&str>) {
     for action in ACTION_SUFFIXES {
-        if let Some(branch) = rest.strip_suffix(action) {
-            if let Some(branch) = branch.strip_suffix('/')
-                && !branch.is_empty()
-            {
-                return (branch, Some(action));
-            }
+        if let Some(branch) = rest.strip_suffix(action)
+            && let Some(branch) = branch.strip_suffix('/')
+            && !branch.is_empty()
+        {
+            return (branch, Some(action));
         }
     }
     (rest, None)
@@ -578,7 +577,8 @@ async fn repo_board(cx: &Cx) -> Result {
     let order = docs::order_columns(statuses);
 
     // Cards ordered newest-first by the last commit that touched them.
-    let mut columns: Vec<(String, Vec<(Document, Option<String>)>)> = Vec::new();
+    type Column = (String, Vec<(Document, Option<String>)>);
+    let mut columns: Vec<Column> = Vec::new();
     for column_name in &order {
         let mut cards: Vec<(String, Document)> = Vec::new();
         for card in index.cards() {

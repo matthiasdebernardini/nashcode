@@ -80,12 +80,17 @@ async fn a_repo_without_a_ci_script_is_skipped() {
 }
 
 #[tokio::test]
-async fn a_hung_script_times_out_and_records_it() {
-    let bed = simple_bed(|root| with_ci_script(root, "#!/bin/sh\nsleep 30\n"));
-    run_tip(&bed, Webhooks::new(BTreeMap::new()), Duration::from_millis(300), "main").await;
+async fn a_hung_script_times_out_but_keeps_its_partial_output() {
+    let bed = simple_bed(|root| {
+        with_ci_script(root, "#!/bin/sh\necho progress before the hang\nsleep 30\n")
+    });
+    run_tip(&bed, Webhooks::new(BTreeMap::new()), Duration::from_millis(500), "main").await;
     let tip = bed.mirrors.repo("demo").tip("main").await.expect("tip");
     let run = bed.db.latest_run("demo", &tip).expect("query").expect("run exists");
     assert_eq!(run.status, status::TIMEOUT);
+    let log = std::fs::read_to_string(run.log_path.expect("log path")).expect("log file");
+    assert!(log.contains("progress before the hang"), "partial output kept: {log}");
+    assert!(log.contains("output above is partial"), "timeout marker present: {log}");
 }
 
 #[tokio::test]

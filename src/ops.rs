@@ -281,7 +281,7 @@ impl Ops {
         if delete_branch {
             detail.push_str(&format!("; deleted {branch}"));
         }
-        let _ = self.db.record_audit(NewAudit {
+        if let Err(error) = self.db.record_audit(NewAudit {
             repo: repo_name.to_owned(),
             actor: actor.login.clone(),
             action: "merge".to_owned(),
@@ -289,7 +289,10 @@ impl Ops {
             old_tip: old_tip.clone(),
             new_tip: new_tip.clone(),
             detail,
-        });
+        }) {
+            // The push already happened; a missing audit line must at least be loud.
+            tracing::error!(repo_name, branch, %error, "merge pushed but the audit write failed");
+        }
         self.hooks.send(
             hooks::MERGED,
             serde_json::json!({
@@ -448,7 +451,7 @@ impl Ops {
         self.mirrors.refresh_now(repo_name).await;
 
         for (name, old_tip, new_tip) in &rebased {
-            let _ = self.db.record_audit(NewAudit {
+            if let Err(error) = self.db.record_audit(NewAudit {
                 repo: repo_name.to_owned(),
                 actor: actor.login.clone(),
                 action: "restack".to_owned(),
@@ -456,7 +459,9 @@ impl Ops {
                 old_tip: old_tip.clone(),
                 new_tip: new_tip.clone(),
                 detail: format!("restacked after {branch} moved"),
-            });
+            }) {
+                tracing::error!(repo_name, branch = %name, %error, "restack force-pushed but the audit write failed");
+            }
         }
         self.hooks.send(
             hooks::RESTACKED,
@@ -498,7 +503,7 @@ impl Ops {
             return Err(OpError::Git(format!("delete rejected: {}", out.stderr.trim())));
         }
         self.mirrors.refresh_now(repo_name).await;
-        let _ = self.db.record_audit(NewAudit {
+        if let Err(error) = self.db.record_audit(NewAudit {
             repo: repo_name.to_owned(),
             actor: actor.login.clone(),
             action: "delete".to_owned(),
@@ -506,7 +511,9 @@ impl Ops {
             old_tip,
             new_tip: String::new(),
             detail: format!("deleted {branch}"),
-        });
+        }) {
+            tracing::error!(repo_name, branch, %error, "branch deleted but the audit write failed");
+        }
         Ok(())
     }
 

@@ -126,9 +126,7 @@ async fn a_refusal_becomes_a_502_with_the_explanation() {
         "stop_reason": "refusal",
         "model": "claude-opus-5",
     });
-    let _stub_keepalive;
     let stub = spawn_stub("HTTP/1.1 200 OK", response.to_string()).await;
-    _stub_keepalive = stub.url.clone();
     let bed = asking_bed(two_repo_root(), &stub.url, Some("test-key"));
 
     let (status, body) =

@@ -108,6 +108,20 @@ output goes to a log file and the status lands next to the branch everywhere it 
 
 There is no separate deploy system. If the script wants to deploy, it deploys.
 
+### Security model — read this before granting push access
+
+**Push access to a repo is code execution on the nashgit host.** `.nashgit/ci` runs as
+the server's own user, with `GIT_TOKEN` in its environment, and there is no sandbox: no
+container, no seccomp, no resource limits beyond the 30-minute timeout. Anyone who can
+push a branch can run anything the nashgit user can run and can push anywhere the token
+can push. On a personal tailnet where every pusher is you or your agents, that is the
+point — the CI script deploying *is* the deploy system. Do not point nashgit at repos
+that people you would not hand a shell to can push to.
+
+Two sharp edges of the timeout: the kill reaches the script process itself, not
+grandchildren it spawned into their own process groups — a detached child can outlive
+the job — and a timed-out job keeps whatever output it printed, marked as partial.
+
 ## Plans and boards
 
 Two conventions, both file-native. Nothing about a plan, a card, or a link is stored in the
