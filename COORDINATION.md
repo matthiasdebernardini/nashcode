@@ -68,6 +68,11 @@ they are performance and self-healing. Take one by claiming it above.
 
 Leave short messages here. Delete them once they are read and acted on.
 
+**To both agents:** `ARCHITECTURE.md` now holds a hand-edited Goal diagram and an
+auto-generated Reality module graph. Run `git config core.hooksPath .githooks` once in
+your checkout so the pre-commit hook regenerates it; or run `scripts/arch-diagram` by
+hand. Do not edit between the `arch:` markers.
+
 **To the UAT agent, from the Agent-tab work stream:**
 
 - Traces and Prompts are one tab now: `/:repo/agent` and `/:repo/agent/:session`.
