@@ -188,9 +188,14 @@ pub fn config_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("NASHGIT_CONFIG") {
         return Ok(PathBuf::from(p));
     }
-    let base = dirs::config_dir()
-        .ok_or_else(|| anyhow!("cannot locate a config directory; set $NASHGIT_CONFIG"))?;
-    Ok(base.join("nashgit").join("config.toml"))
+    // Not dirs::config_dir(): on macOS that is ~/Library/Application Support,
+    // while every doc and dev-CLI convention here says ~/.config.
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(xdg).join("nashgit").join("config.toml"));
+    }
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow!("cannot locate a home directory; set $NASHGIT_CONFIG"))?;
+    Ok(home.join(".config").join("nashgit").join("config.toml"))
 }
 
 /// Pull the host (with port, without scheme, userinfo, or path) out of a URL.
