@@ -60,6 +60,29 @@ async fn index_code_and_stacks_pages_render() {
 }
 
 #[tokio::test]
+async fn a_hostile_branch_name_cannot_escape_into_inline_js() {
+    let bed = simple_bed(|root| {
+        let work = stacked_fixture(root, "demo");
+        // Legal in git, hostile in a single-quoted JS string.
+        common::git(&work.dir, &["checkout", "-b", "evil');alert(1)"]);
+        work.write("docs/evil.txt", "payload\n");
+        work.commit_all("evil branch");
+        work.push("evil');alert(1)");
+        work
+    });
+
+    let (status, page) =
+        get(&bed.router, "/demo/evil%27%29%3Balert%281%29").await;
+    assert_eq!(status, 200);
+    // The delete confirm is static text; the branch name never reaches inline JS.
+    assert!(
+        !page.contains("confirm('Delete evil"),
+        "branch name leaked into inline JS: {page}"
+    );
+    assert!(page.contains("Delete this branch on the git server?"));
+}
+
+#[tokio::test]
 async fn unknown_repo_and_branch_are_4xx_not_500() {
     let bed = simple_bed(|root| stacked_fixture(root, "demo"));
     let (status, _) = get(&bed.router, "/nope").await;

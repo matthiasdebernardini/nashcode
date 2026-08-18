@@ -843,7 +843,10 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
                     if !is_default && children.is_empty() {
                         <form method="post" action=(format!("/{name}/{branch}/delete"))>
                             <button type="submit" class="btn btn-danger"
-                                    onclick=(format!("return confirm('Delete {branch} on the git server?')"))>
+                                    // Static text only: a branch name interpolated into
+                                    // inline JS could escape the string (apostrophes
+                                    // survive attribute escaping).
+                                    onclick="return confirm('Delete this branch on the git server?')">
                                 <i class="ph ph-trash"></i>" Delete branch"
                             </button>
                         </form>

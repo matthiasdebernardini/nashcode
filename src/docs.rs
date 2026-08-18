@@ -101,32 +101,51 @@ impl Tasks {
     }
 }
 
+/// Byte bounds of the front-matter block in `source`:
+/// `(front_start, front_end, body_start)`, where `front_start..front_end` is the text
+/// between the fences (possibly empty) and `body_start..` is the body.
+///
+/// Rewrites must work on these offsets — searching for the block's *content* finds the
+/// wrong place whenever that content also appears earlier (or is empty).
+fn front_matter_bounds(source: &str) -> Option<(usize, usize, usize)> {
+    // Tolerate a UTF-8 byte-order mark, which editors on other platforms leave behind.
+    let bom = if source.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let text = &source[bom..];
+    let open = if text.starts_with("---\n") {
+        4
+    } else if text.starts_with("---\r\n") {
+        5
+    } else {
+        return None;
+    };
+    let front_start = bom + open;
+
+    // Find the closing fence at the start of a line.
+    let rest = &source[front_start..];
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed == "---" || trimmed == "..." {
+            let front_end = front_start + offset;
+            return Some((front_start, front_end, front_end + line.len()));
+        }
+        offset += line.len();
+    }
+    // An unterminated fence is not front matter.
+    None
+}
+
 /// Split a document into its front-matter block and its body.
 ///
 /// The block is the text between a leading `---` line and the next `---` line. A file
 /// without one is all body.
 pub fn split_front_matter(source: &str) -> (Option<&str>, &str) {
-    // Tolerate a UTF-8 byte-order mark, which editors on other platforms leave behind.
-    let text = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let rest = match text.strip_prefix("---\n") {
-        Some(rest) => rest,
-        None => match text.strip_prefix("---\r\n") {
-            Some(rest) => rest,
-            None => return (None, text),
-        },
-    };
-    // Find the closing fence at the start of a line.
-    let mut offset = 0;
-    for line in rest.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed == "---" || trimmed == "..." {
-            let body = &rest[offset + line.len()..];
-            return (Some(&rest[..offset]), body);
+    match front_matter_bounds(source) {
+        Some((front_start, front_end, body_start)) => {
+            (Some(&source[front_start..front_end]), &source[body_start..])
         }
-        offset += line.len();
+        None => (None, source.strip_prefix('\u{feff}').unwrap_or(source)),
     }
-    // An unterminated fence is not front matter; treat the whole file as body.
-    (None, text)
 }
 
 /// Parse one markdown file into a document.
@@ -233,12 +252,8 @@ fn first_paragraph(body: &str) -> String {
 /// Everything else in the file, byte for byte, is left alone. That matters: a card is a
 /// human-edited document, and a move must not reformat it.
 pub fn rewrite_status(source: &str, new_status: &str) -> Option<String> {
-    let (front, _) = split_front_matter(source);
-    let front = front?;
-    // Locate the front-matter block inside the original text so the rewrite can be
-    // done on the real byte offsets rather than on a reassembled copy.
-    let start = source.find(front)?;
-    let end = start + front.len();
+    let (start, end, _) = front_matter_bounds(source)?;
+    let front = &source[start..end];
 
     let mut rewritten = String::with_capacity(front.len() + new_status.len());
     let mut replaced = false;
@@ -542,6 +557,22 @@ mod tests {
     #[test]
     fn rewriting_a_file_without_front_matter_is_refused() {
         assert!(rewrite_status("# no front matter\n", "done").is_none());
+    }
+
+    #[test]
+    fn an_empty_front_matter_block_gains_a_status_inside_the_fences() {
+        // The empty block used to trip `source.find("")` == 0 and prepend the status
+        // before the opening fence. Byte-for-byte expectation:
+        let moved = rewrite_status("---\n---\nbody\n", "todo").unwrap();
+        assert_eq!(moved, "---\nstatus: todo\n---\nbody\n");
+    }
+
+    #[test]
+    fn front_matter_that_repeats_earlier_bytes_rewrites_in_place() {
+        // A block of dashes also occurs inside the opening fence; offsets, not a
+        // substring search, must locate the block.
+        let moved = rewrite_status("---\n-\n---\nbody\n", "todo").unwrap();
+        assert_eq!(moved, "---\n-\nstatus: todo\n---\nbody\n");
     }
 
     #[test]
