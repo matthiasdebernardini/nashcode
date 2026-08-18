@@ -1,11 +1,19 @@
 //! Mirror management: `git clone --mirror` copies of every configured repo, refreshed
-//! on page load behind a short debounce.
+//! behind the page load rather than in front of it.
 //!
 //! The rule this module exists to enforce is that **a page never fails because dgit is
 //! down**. A fetch that cannot reach the server leaves the existing mirror in place and
 //! marks it stale; the page renders from what is on disk and says so. Only a repo that
 //! has never been cloned is genuinely unavailable, and even that is an error card, not
 //! a 500.
+//!
+//! The second rule is that **a page never waits for dgit either**. A fetch of a real repo
+//! costs seconds. So [`Mirrors::refresh`] serves the mirror already on disk and starts the
+//! fetch as a background task; the next page load sees its result. The debounce still
+//! applies, and the per-repo lock still guarantees one fetch at a time. The one request
+//! that blocks is the first view of a repo with no mirror, which has nothing to render.
+//! Write paths use [`Mirrors::refresh_now`], which fetches inline: after a push the caller
+//! must see its own write.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -106,38 +114,97 @@ impl Mirrors {
         Repo::mirror(self.config.mirror_path(repo), self.auth())
     }
 
-    /// Bring a mirror up to date, subject to the debounce, and report its health.
+    /// Report a mirror's health, and bring it up to date behind the caller's back.
+    ///
+    /// Returns as soon as it has read the shared state: the page renders from the mirror
+    /// on disk. If the debounce has lapsed and no fetch for this repo is already running,
+    /// the fetch is spawned as a background task, and whatever it learns shows up on the
+    /// next request. The exception is a repo with no mirror at all, where there is nothing
+    /// to render: that request blocks on the clone.
     ///
     /// This never returns an error: every failure mode becomes a status the page can
     /// render.
     pub async fn refresh(&self, repo: &str) -> MirrorStatus {
-        let lock = {
-            let mut locks = self.locks.lock().await;
-            locks.entry(repo.to_owned()).or_default().clone()
+        if !self.config.mirror_path(repo).exists() {
+            // Nothing on disk. The first view of a repo has to wait for the clone.
+            return self.refresh_inline(repo).await;
+        }
+
+        let state = self.state.lock().await.get(repo).cloned().unwrap_or_default();
+        let due = state.last_attempt.is_none_or(|at| at.elapsed() >= DEBOUNCE);
+        if due {
+            self.spawn_fetch(repo).await;
+        }
+        Self::status_of(&state)
+    }
+
+    /// The health the shared state already knows about, with no fetch involved.
+    ///
+    /// `stale` means the last attempt failed, and nothing else. A fetch that is merely
+    /// in flight leaves the page alone: it has not learned anything yet.
+    fn status_of(state: &RepoState) -> MirrorStatus {
+        match &state.last_error {
+            Some(message) => MirrorStatus {
+                available: true,
+                stale: true,
+                message: Some(message.clone()),
+                last_fetched: state.last_success.clone(),
+            },
+            None => MirrorStatus::fresh(state.last_success.clone()),
+        }
+    }
+
+    /// The repo's fetch lock, created on first use.
+    async fn lock_for(&self, repo: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.locks.lock().await;
+        locks.entry(repo.to_owned()).or_default().clone()
+    }
+
+    /// Start a background fetch, unless this repo already has one running.
+    ///
+    /// The in-flight guard is the repo's own lock: it is taken here, without waiting, and
+    /// moved into the task, so it is held for exactly as long as the fetch runs. A second
+    /// caller finds it taken and does nothing.
+    async fn spawn_fetch(&self, repo: &str) {
+        let Ok(guard) = self.lock_for(repo).await.try_lock_owned() else {
+            return; // A fetch for this repo is already in flight.
         };
+        let mirrors = self.clone();
+        let repo = repo.to_owned();
+        tokio::spawn(async move {
+            let _guard = guard;
+            mirrors.fetch(&repo).await;
+        });
+    }
+
+    /// Fetch on the caller's own time: take the lock, honour the debounce, and wait for
+    /// the result. Startup and the write paths want this; a page load does not.
+    async fn refresh_inline(&self, repo: &str) -> MirrorStatus {
+        let lock = self.lock_for(repo).await;
         let _guard = lock.lock().await;
 
-        let path = self.config.mirror_path(repo);
-        let exists = path.exists();
-
-        // Debounce: a recent attempt means the answer on disk is good enough.
-        if exists {
+        // Debounce: a recent attempt means the answer on disk is good enough. Checked
+        // under the lock, so a fetch we queued behind does not run twice.
+        if self.config.mirror_path(repo).exists() {
             let state = self.state.lock().await.get(repo).cloned().unwrap_or_default();
             if let Some(attempted) = state.last_attempt
                 && attempted.elapsed() < DEBOUNCE
             {
-                return match state.last_error {
-                    Some(message) => MirrorStatus {
-                        available: true,
-                        stale: true,
-                        message: Some(message),
-                        last_fetched: state.last_success,
-                    },
-                    None => MirrorStatus::fresh(state.last_success),
-                };
+                return Self::status_of(&state);
             }
         }
 
+        self.fetch(repo).await
+    }
+
+    /// The fetch itself. The caller holds the repo's lock; this never takes it.
+    ///
+    /// Whether it runs inline or on a background task changes nothing here: the shared
+    /// state is updated the same way either way, and the state mutex is never held across
+    /// the git call.
+    async fn fetch(&self, repo: &str) -> MirrorStatus {
+        let path = self.config.mirror_path(repo);
+        let exists = path.exists();
         let remote = self.config.remote_url(repo);
         let outcome = if exists {
             let handle = self.repo(repo);
@@ -247,21 +314,27 @@ impl Mirrors {
         }
     }
 
-    /// Refresh every configured repo. Used at startup and by the merge/restack path,
-    /// which must leave the mirror agreeing with dgit.
+    /// Refresh every configured repo and wait for each. Startup calls this to warm the
+    /// mirrors before the first request arrives.
     pub async fn refresh_all(&self) -> HashMap<String, MirrorStatus> {
         let mut all = HashMap::new();
         for repo in &self.config.repos {
-            all.insert(repo.clone(), self.refresh(repo).await);
+            all.insert(repo.clone(), self.refresh_inline(repo).await);
         }
         all
     }
 
-    /// Force a refresh, ignoring the debounce. A write path calls this so the next
-    /// page render already reflects the push it just made.
+    /// Force a refresh, ignoring the debounce, and wait for it. A write path calls this
+    /// so the next page render already reflects the push it just made.
+    ///
+    /// The debounce is cleared under the lock, after any fetch already in flight has
+    /// finished. That fetch may have read the server before this caller's push, so its
+    /// result does not count: this one must go to the wire.
     pub async fn refresh_now(&self, repo: &str) -> MirrorStatus {
+        let lock = self.lock_for(repo).await;
+        let _guard = lock.lock().await;
         self.state.lock().await.entry(repo.to_owned()).or_default().last_attempt = None;
-        self.refresh(repo).await
+        self.fetch(repo).await
     }
 }
 

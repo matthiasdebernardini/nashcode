@@ -73,6 +73,33 @@ where the implementation had to choose.
 - **Restack pushes are atomic:** all rebases happen in a scratch clone first, then one
   `git push --force --atomic` pushes every new tip; a conflict aborts before any push.
 
+## Mirror refresh: stale while revalidate
+
+The fetch used to run on the request path. Against the real remote it costs 4 to 6.5
+seconds, so the first navigation after ten idle seconds paid all of it: measured 6.5s to
+first byte cold, 0.28s warm. `Mirrors::refresh` now answers from the mirror on disk and
+puts the fetch on a background task. Choices worth knowing about:
+
+- **`stale` still means "the last attempt failed", not "a fetch is running".** A fetch in
+  flight has learned nothing yet, so flipping the page to the stale banner would be a lie
+  that clears itself a second later. A failed background fetch shows up on the next
+  request, which for a person navigating is the next click.
+- **The in-flight guard is the repo's own lock, not a second flag.** `spawn_fetch` takes
+  the lock with `try_lock_owned` and moves the guard into the task, so the guard is held
+  for exactly the life of the fetch and a second caller finds the repo busy and leaves.
+  Two flags (a lock plus an "is fetching" bool) could disagree; one cannot.
+- **Three entry points, one fetch.** `refresh` is the page path (never waits, except on
+  a repo with no mirror, which has nothing to render). `refresh_all` warms every mirror at
+  startup and waits. `refresh_now` is the write path: it takes the lock, clears the
+  debounce *under* it, and fetches inline. Clearing the debounce before taking the lock
+  would let a fetch that started before the caller's push satisfy it, and the caller would
+  not see its own write.
+- **The state mutex is never held across the git call.** `fetch` reads no state and takes
+  the state lock only to record the result.
+- **A missing mirror still retries on every request,** with no debounce, exactly as
+  before. It blocks, but it is the only way that request can have content, and one clone
+  ends it.
+
 ## Known caveats
 
 - **The JS bundle is ~10 MB unminified-by-content.** `@pierre/diffs` pulls in Shiki, and
