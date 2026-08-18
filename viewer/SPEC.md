@@ -47,6 +47,8 @@ Two pieces:
     catch-all must not swallow. The Forgejo-style branch list moves to the Stacks tab.
   - `/:repo/stacks` — full stack graph for the repo, the branch list (branch, stack
     parent, ahead count, last commit, CI dot), plus the merge/restack audit log.
+  - `/:repo/docs` — the wiki: every markdown file in the repo, sidebar-navigable (see
+    "Docs (wiki)").
   - `/:repo/plans` — the Plans tab (see below).
   - `/:repo/ci` — recent CI runs for the repo.
   - `/:repo/:branch` — the "PR view": commits unique to B (`parent..B`), then per-file
@@ -181,6 +183,25 @@ way it moves anything else: edit the file, push.
   before the endpoint reports success, so the mirror and dgit never diverge; on failure the
   UI shows a toast and the card snaps back.
 - `board` joins the reserved branch-name words.
+
+## Docs (wiki)
+
+Every repo's markdown is its wiki. There is no separate wiki store: the pages are the
+files already in git — READMEs, `docs/`, `lat.md`, design notes — so agents edit the wiki
+with ordinary commits and the wiki is always at the version you are looking at.
+
+- `/:repo/docs` — the wiki home: `docs/index.md` if present, else the root README. A
+  persistent sidebar lists every markdown file in the repo as a tree (directories
+  collapsible, current page highlighted), so any page is reachable in one click.
+- `/:repo/docs/*path` — any markdown file rendered in the same frame. Relative links
+  between markdown files rewrite to their `/docs/` equivalents, so a repo whose docs
+  cross-reference each other on GitHub navigates the same way here.
+- `lat.md`, when present, is pinned to the top of the sidebar: it is the contract agents
+  load, so it is the page a person most often needs to re-read.
+- Rendering reuses the plans renderer (escaping and all). Non-markdown files are not the
+  wiki's business; they belong to `/blob/`.
+- `docs` joins the reserved branch-name words. No web editing — git is the editor, by
+  design.
 
 ## Links
 
@@ -363,6 +384,67 @@ subjective layer on top of it.
   - The key is read from `ANTHROPIC_API_KEY` only. It is never logged and never appears in
     any config or profile surface. `NASHCODE_ANTHROPIC_URL` overrides the base URL so tests
     can point at a stub.
+
+## Code intelligence
+
+Three complementary indexes make a repo queryable by an agent, all refreshed by the same
+trigger and all fronted by brain: full text answers "where does this string appear",
+embeddings answer "what is *about* X", and the code graph answers "who calls this".
+
+- **Trigger: every merge to the default branch** (the same post-merge point that flips
+  cards), plus a `nashcode index [repo]` CLI command for manual runs and backfills.
+  Indexing runs on the CI queue, never on a request path.
+- **Incremental by content.** Chunks and graph entries are keyed by blob SHA, so an
+  index run touches only files whose blobs changed. A full rebuild is just the
+  degenerate case of everything having changed.
+- **Full text** needs no stored index: `git grep` against the mirror at query time,
+  exposed as `GET /:repo/code/text?q=`.
+- **Embeddings: fastembed**, in-process (ONNX), no sidecar service. Code is chunked
+  (per function where tree-sitter can parse it, per ~50-line window where it cannot),
+  embedded with a code-retrieval model (`NASHCODE_EMBED_MODEL` selects it; the default
+  is pinned in NOTES.md once benchmarked), and stored in SQLite as vector blobs.
+  Query: `GET /:repo/code/similar?q=` — the query is embedded, brute-force cosine over
+  the repo's chunks, top-k with file, line range, and snippet. Brute force is a
+  deliberate ceiling: these are personal repos, not monorepos; an ANN index earns its
+  place only when a scan measurably hurts.
+- **Code graph: the indexer is chosen by the research pass** (SCIP-family is the
+  working assumption; the decision and its date go in NOTES.md). Whatever the tool, the
+  contract is: it runs headless on merge, emits definitions/references/call edges for
+  Rust, Python, and TypeScript, and the server loads the result into SQLite tables it
+  owns. Queries: `GET /:repo/code/def?symbol=`, `GET /:repo/code/refs?symbol=`,
+  `GET /:repo/code/callers?symbol=`. A language the indexer cannot parse degrades to
+  text search, never to an error.
+- **Brain is the front door.** `GET /brain` grows a per-repo `code` stanza (index age,
+  chunk and symbol counts). `POST /brain/ask` gains tool access to the three query
+  endpoints so "where is retry handled and who calls it" is answerable in one question.
+  The JSON endpoints stay public individually — an agent that knows what it wants
+  should not pay for a model round-trip.
+
+## Advisor
+
+`lat.md` states the project's rules; the advisor reads a merged diff against them and
+says what it thinks. It is a reviewer, never a gate.
+
+- **Advisory only, by design.** A language model's judgment is probabilistic; a merge
+  gate must not be. Anything worth blocking on becomes a deterministic check in
+  `.nashcode/ci`. The advisor's job is the gray zone: "this new module duplicates what
+  `ops.rs` already does", "rule 4 says errors are typed, this returns String".
+- **Trigger: on merge to the default branch**, on the CI queue, for repos that have a
+  `lat.md`. Input: the merged diff plus `lat.md`, nothing else. Output: zero or more
+  findings.
+- **Findings are comments.** Each finding lands in the existing comments system,
+  anchored to the file (and line where the model gives one), authored as `advisor` so
+  it is filterable and cannot impersonate a person. No new UI: the branch page and
+  comment feeds already render them.
+- **The model is local and env-configured.** `NASHCODE_ADVISOR_URL` points at any
+  OpenAI-compatible completions endpoint on the tailnet (ollama, llama.cpp,
+  whatever); `NASHCODE_ADVISOR_MODEL` names the model. Unset means the advisor is off —
+  same pattern as `/brain/ask` and `ANTHROPIC_API_KEY`.
+- **Degrades to silence.** An unreachable endpoint, a timeout, or an unparseable
+  response records one line in the audit log and posts nothing. A flaky advisor that
+  spams half-findings would teach its reader to ignore it, which is worse than absent.
+- Advisor comments carry a dismiss affordance like any comment thread; dismissing is a
+  normal comment resolution, no special machinery.
 
 ## Agents
 
