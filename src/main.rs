@@ -14,6 +14,61 @@ use nashgit::{brain, hooks, web};
 
 #[tokio::main]
 async fn main() {
+    // The same binary is the server and the agent-side client.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let code = match args.first().map(String::as_str) {
+        None | Some("serve") => {
+            serve().await;
+            0
+        }
+        Some("hook") => nashgit::cli::hook().await,
+        Some("trace") => match args.get(1).map(String::as_str) {
+            Some("push") => match args.get(2) {
+                Some(file) => {
+                    nashgit::cli::trace_push(
+                        file,
+                        nashgit::cli::flag_value(&args, "--session"),
+                        nashgit::cli::flag_value(&args, "--repo"),
+                    )
+                    .await
+                }
+                None => {
+                    eprintln!("{}", nashgit::cli::USAGE);
+                    2
+                }
+            },
+            Some("list") => nashgit::cli::trace_list(nashgit::cli::flag_value(&args, "--repo")).await,
+            Some("show") => match args.get(2) {
+                Some(session) => {
+                    nashgit::cli::trace_show(session, nashgit::cli::flag_value(&args, "--repo"))
+                        .await
+                }
+                None => {
+                    eprintln!("{}", nashgit::cli::USAGE);
+                    2
+                }
+            },
+            _ => {
+                eprintln!("{}", nashgit::cli::USAGE);
+                2
+            }
+        },
+        Some("doctor") => nashgit::cli::doctor().await,
+        Some("--help") | Some("-h") | Some("help") => {
+            println!("{}", nashgit::cli::USAGE);
+            0
+        }
+        Some(other) => {
+            eprintln!("unknown command: {other}\n\n{}", nashgit::cli::USAGE);
+            2
+        }
+    };
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+async fn serve() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

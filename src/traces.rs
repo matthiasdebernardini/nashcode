@@ -1,198 +1,352 @@
-//! Traces: agent sessions as first-class artifacts.
+//! Turning agent hook events into a trace, and a trace into commits.
 //!
-//! A trace is one agent run — its prompts, tool calls, and the commits it produced.
-//! Events live in SQLite; raw transcripts live as files under `$NASHGIT_TRACES`. The
-//! link to git is a commit SHA, attributed automatically: every event carries the
-//! repo's `HEAD` at the moment it happened, and when `HEAD` moves between two events
-//! of a session, the commits in between belong to that session.
+//! The transcript and the diff are the same artifact seen from two sides. A commit says
+//! what changed; the trace that produced it says why, and what was tried first.
 //!
-//! Traces live here rather than in git. They are large and append-heavy, and
-//! committing them would bloat every clone. Plans and cards are git-native because
-//! they are small and human-edited; a transcript is neither.
+//! The link needs nothing from the agent. Every event carries the repo's `HEAD` at the
+//! moment it happened, so when `HEAD` moves between two events of a session, the commits
+//! in between belong to that session. No commit trailer to remember, no naming
+//! convention to get wrong, no cooperation that can be skipped.
+//!
+//! Storage lives in nashgit rather than in git. Transcripts are large and append-heavy;
+//! committing them would bloat every clone. Plans and cards are git-native because they
+//! are small and human-edited. A transcript is neither.
 
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
 
-use serde::Deserialize;
-
-use crate::config::Config;
-use crate::db::{Db, NewTraceEvent};
+use crate::db::{Db, DbResult, NewTraceEvent};
 use crate::git::Repo;
 
-/// One event in a POST batch.
-#[derive(Debug, Clone, Deserialize)]
-pub struct EventIn {
-    /// Position in the session. Batches set it so a retried POST stores one copy;
-    /// live hook events omit it and the server assigns the next number.
+/// One moment in an agent run, as the CLI posts it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IncomingEvent {
+    /// The event's place in the session. Supplied by the client so a retried batch
+    /// stores one copy; omitted for a live single event, which appends.
     #[serde(default)]
     pub seq: Option<i64>,
-    pub kind: String,
-    /// The event body, stored verbatim.
+    /// What happened: `prompt`, `tool`, `result`, `stop`, whatever the harness calls it.
     #[serde(default)]
-    pub payload: serde_json::Value,
-    /// The agent's repo `HEAD` when this happened.
+    pub kind: String,
+    /// The repo `HEAD` when this happened. This is the whole linking mechanism.
     #[serde(default)]
     pub head: Option<String>,
+    /// The harness payload, kept verbatim.
+    #[serde(default)]
+    pub payload: serde_json::Value,
 }
 
-/// The `POST /{repo}/traces/events` body.
-#[derive(Debug, Clone, Deserialize)]
-pub struct BatchIn {
+/// A batch of events for one session.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TraceBatch {
     pub session: String,
     #[serde(default)]
     pub agent: Option<String>,
-    pub events: Vec<EventIn>,
+    #[serde(default)]
+    pub events: Vec<IncomingEvent>,
 }
 
-/// What recording a batch did.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct BatchOutcome {
+/// What an ingest actually did, so the API can answer honestly.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct Ingested {
     pub stored: usize,
     pub duplicates: usize,
-    pub attributed_commits: Vec<String>,
+    /// Commits newly attributed to this session.
+    pub commits: Vec<String>,
 }
 
-/// A session id is used in URLs and filenames; keep it boring.
-pub fn valid_session(session: &str) -> bool {
-    !session.is_empty()
-        && session.len() <= 128
-        && session
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-        && !session.starts_with('.')
-}
-
-fn plausible_sha(value: &str) -> bool {
-    (7..=64).contains(&value.len()) && value.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-/// Record a batch of events, attributing any commits `HEAD` passed over.
-pub async fn record_batch(
+/// Record a batch and attribute any commit the session's `HEAD` moved onto.
+///
+/// `repo_handle` is the mirror, used only to expand a `HEAD` jump into the individual
+/// commits between the two points. When it cannot answer (the work is not pushed yet,
+/// which is the common case) the destination commit alone is attributed.
+pub async fn ingest(
     db: &Db,
-    mirror: &Repo,
     repo: &str,
-    batch: &BatchIn,
-) -> Result<BatchOutcome, rusqlite::Error> {
-    let mut stored = 0usize;
-    let mut duplicates = 0usize;
-    let mut attributed: Vec<String> = Vec::new();
+    batch: &TraceBatch,
+    repo_handle: Option<&Repo>,
+) -> DbResult<Ingested> {
+    let mut result = Ingested::default();
+    let mut previous = db.trace_last_head(repo, &batch.session)?;
 
     for event in &batch.events {
-        let previous = db.trace_last_head(repo, &batch.session)?;
+        let payload = if event.payload.is_null() {
+            "{}".to_owned()
+        } else {
+            event.payload.to_string()
+        };
 
-        let head = event.head.clone().filter(|h| plausible_sha(h));
-        let new = NewTraceEvent {
+        let stored = db.add_trace_event(&NewTraceEvent {
             repo: repo.to_owned(),
             session: batch.session.clone(),
             seq: event.seq,
-            kind: event.kind.clone(),
-            payload: serde_json::to_string(&event.payload).unwrap_or_else(|_| "null".into()),
-            head: head.clone(),
+            kind: if event.kind.is_empty() { "event".to_owned() } else { event.kind.clone() },
+            payload,
+            head: event.head.clone(),
             agent: batch.agent.clone(),
-        };
-        if !db.add_trace_event(&new)? {
-            duplicates += 1;
+        })?;
+
+        if !stored {
+            result.duplicates += 1;
             continue;
         }
-        stored += 1;
+        result.stored += 1;
 
-        // HEAD moved since the session's previous event: those commits are this
-        // session's work.
-        if let (Some(previous), Some(head)) = (previous, head)
-            && previous != head
-        {
-            let commits = commits_between(mirror, &previous, &head).await;
+        let Some(head) = event.head.as_deref() else { continue };
+        let moved = matches!(&previous, Some(before) if before != head);
+        if moved {
+            let from = previous.as_deref().unwrap_or_default();
+            let commits = expand(repo_handle, from, head).await;
             db.attribute_commits(repo, &batch.session, &commits)?;
-            attributed.extend(commits);
+            result.commits.extend(commits);
         }
+        previous = Some(head.to_owned());
     }
 
-    Ok(BatchOutcome { stored, duplicates, attributed_commits: attributed })
+    result.commits.dedup();
+    Ok(result)
 }
 
-/// The commits `old..new`, asked of the mirror; when the mirror does not (yet) know
-/// them, the new head alone is attributed — the link stays even if the push comes
-/// later.
-async fn commits_between(mirror: &Repo, old: &str, new: &str) -> Vec<String> {
-    if let Ok(out) = mirror
-        .run(&["rev-list", "--max-count=100", "--end-of-options", &format!("{old}..{new}")])
-        .await
+/// The commits between two points, newest last. Falls back to just the destination when
+/// the mirror does not have the range, which happens whenever the work is still local.
+async fn expand(repo: Option<&Repo>, from: &str, to: &str) -> Vec<String> {
+    if let Some(repo) = repo
+        && let Ok(out) = repo.run(&["rev-list", "--reverse", &format!("{from}..{to}")]).await
     {
-        let shas: Vec<String> =
+        let listed: Vec<String> =
             out.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect();
-        if !shas.is_empty() {
-            return shas;
+        if !listed.is_empty() {
+            return listed;
         }
     }
-    vec![new.to_owned()]
+    vec![to.to_owned()]
 }
 
-/// Where a session's raw transcript lives.
-pub fn transcript_path(config: &Config, repo: &str, session: &str) -> PathBuf {
-    config.traces.join(repo).join(format!("{session}.transcript"))
+/// Where a session's raw transcript is kept.
+pub fn transcript_path(root: &std::path::Path, repo: &str, session: &str) -> std::path::PathBuf {
+    root.join(repo).join(format!("{}.jsonl", sanitize(session)))
 }
 
-/// Store the raw transcript, verbatim.
-pub fn store_transcript(
-    config: &Config,
-    repo: &str,
-    session: &str,
-    bytes: &[u8],
-) -> std::io::Result<PathBuf> {
-    let path = transcript_path(config, repo, session);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, bytes)?;
-    Ok(path)
+/// Session ids come from another program, so they never reach the filesystem raw.
+fn sanitize(session: &str) -> String {
+    session
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(120)
+        .collect()
 }
 
-/// A one-line human summary of an event payload, for the session page.
-pub fn summarize(kind: &str, payload: &str) -> String {
-    let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
-    let pick = |keys: &[&str]| -> Option<String> {
-        keys.iter().find_map(|key| {
-            value
-                .get(key)
-                .and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s.clone()),
-                    other if !other.is_null() => Some(other.to_string()),
-                    _ => None,
-                })
-                .filter(|s| !s.trim().is_empty())
-        })
+/// A one-line description of an event, for the session page and `trace show`.
+pub fn summarize(kind: &str, payload: &serde_json::Value) -> String {
+    let field = |name: &str| payload.get(name).and_then(|v| v.as_str()).unwrap_or("");
+
+    let text = match kind {
+        "prompt" => field("prompt"),
+        "tool" | "result" => {
+            let tool = field("tool_name");
+            if !tool.is_empty() {
+                return match tool {
+                    "Bash" => {
+                        let command = payload
+                            .get("tool_input")
+                            .and_then(|i| i.get("command"))
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("");
+                        clip(&format!("Bash: {command}"))
+                    }
+                    other => {
+                        let path = payload
+                            .get("tool_input")
+                            .and_then(|i| i.get("file_path").or_else(|| i.get("path")))
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("");
+                        clip(&format!("{other}{}", if path.is_empty() { String::new() } else { format!(": {path}") }))
+                    }
+                };
+            }
+            ""
+        }
+        _ => "",
     };
-    let text = pick(&["prompt", "message", "tool_name", "text", "content", "command"])
-        .unwrap_or_else(|| {
-            let compact = value.to_string();
-            if compact == "null" { String::new() } else { compact }
-        });
-    let mut summary: String = text.chars().take(200).collect();
-    if summary.chars().count() < text.chars().count() {
-        summary.push('…');
+
+    if text.is_empty() { kind.to_owned() } else { clip(text) }
+}
+
+fn clip(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 120 {
+        return flat;
     }
-    if summary.is_empty() { kind.to_owned() } else { summary }
+    let short: String = flat.chars().take(117).collect();
+    format!("{short}...")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn session_ids_are_url_and_filename_safe() {
-        assert!(valid_session("sess-01HXYZ.2"));
-        assert!(!valid_session(""));
-        assert!(!valid_session("../etc/passwd"));
-        assert!(!valid_session("a/b"));
-        assert!(!valid_session(".hidden"));
+    fn event(seq: i64, kind: &str, head: Option<&str>) -> IncomingEvent {
+        IncomingEvent {
+            seq: Some(seq),
+            kind: kind.to_owned(),
+            head: head.map(str::to_owned),
+            payload: serde_json::json!({"n": seq}),
+        }
+    }
+
+    fn batch(session: &str, events: Vec<IncomingEvent>) -> TraceBatch {
+        TraceBatch {
+            session: session.to_owned(),
+            agent: Some("claude-code".to_owned()),
+            events,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_head_move_attributes_the_commit_to_the_session() {
+        let db = Db::in_memory().unwrap();
+        let result = ingest(
+            &db,
+            "demo",
+            &batch(
+                "s1",
+                vec![
+                    event(1, "prompt", Some("aaa")),
+                    event(2, "tool", Some("aaa")),
+                    // HEAD moved: the session committed.
+                    event(3, "tool", Some("bbb")),
+                    event(4, "stop", Some("bbb")),
+                ],
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stored, 4);
+        // The first HEAD is where the session started, so it is not attributed.
+        assert_eq!(result.commits, vec!["bbb"]);
+        assert_eq!(db.trace_session_commits("demo", "s1").unwrap(), vec!["bbb"]);
+    }
+
+    #[tokio::test]
+    async fn every_commit_in_a_session_is_attributed() {
+        let db = Db::in_memory().unwrap();
+        ingest(
+            &db,
+            "demo",
+            &batch(
+                "s2",
+                vec![
+                    event(1, "prompt", Some("c0")),
+                    event(2, "tool", Some("c1")),
+                    event(3, "tool", Some("c2")),
+                ],
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.trace_session_commits("demo", "s2").unwrap(), vec!["c1", "c2"]);
+    }
+
+    #[tokio::test]
+    async fn the_same_batch_twice_stores_one_copy() {
+        let db = Db::in_memory().unwrap();
+        let events = vec![event(1, "prompt", Some("aaa")), event(2, "tool", Some("bbb"))];
+        let first = ingest(&db, "demo", &batch("s3", events.clone()), None).await.unwrap();
+        let second = ingest(&db, "demo", &batch("s3", events), None).await.unwrap();
+
+        assert_eq!(first.stored, 2);
+        assert_eq!(second.stored, 0);
+        assert_eq!(second.duplicates, 2);
+        assert!(second.commits.is_empty(), "no commit attributed twice");
+        assert_eq!(db.trace_events("demo", "s3").unwrap().len(), 2);
+        assert_eq!(db.trace_session_commits("demo", "s3").unwrap(), vec!["bbb"]);
+    }
+
+    #[tokio::test]
+    async fn a_later_batch_continues_the_same_session() {
+        let db = Db::in_memory().unwrap();
+        ingest(&db, "demo", &batch("s4", vec![event(1, "prompt", Some("aaa"))]), None)
+            .await
+            .unwrap();
+        // The move is detected across batches, not only inside one.
+        let second = ingest(&db, "demo", &batch("s4", vec![event(2, "tool", Some("bbb"))]), None)
+            .await
+            .unwrap();
+        assert_eq!(second.commits, vec!["bbb"]);
+    }
+
+    #[tokio::test]
+    async fn events_without_a_head_do_not_break_attribution() {
+        let db = Db::in_memory().unwrap();
+        let result = ingest(
+            &db,
+            "demo",
+            &batch(
+                "s5",
+                vec![
+                    event(1, "prompt", None),
+                    event(2, "tool", Some("aaa")),
+                    event(3, "tool", None),
+                    event(4, "tool", Some("bbb")),
+                ],
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.commits, vec!["bbb"]);
+    }
+
+    #[tokio::test]
+    async fn a_commit_points_back_at_its_session() {
+        let db = Db::in_memory().unwrap();
+        ingest(
+            &db,
+            "demo",
+            &batch("s6", vec![event(1, "prompt", Some("aaa")), event(2, "tool", Some("bbb"))]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.trace_sessions_for_commit("demo", "bbb").unwrap(), vec!["s6"]);
+        assert!(db.trace_sessions_for_commit("demo", "aaa").unwrap().is_empty());
     }
 
     #[test]
-    fn summaries_prefer_human_fields_and_truncate() {
-        let long = format!("{{\"prompt\": \"{}\"}}", "x".repeat(500));
-        let summary = summarize("UserPromptSubmit", &long);
-        assert!(summary.chars().count() <= 201);
-        assert!(summary.ends_with('…'));
-        assert_eq!(summarize("Stop", "{\"tool_name\": \"Bash\"}"), "Bash");
-        assert_eq!(summarize("Stop", "null"), "Stop");
+    fn a_session_id_never_reaches_the_filesystem_raw() {
+        let path = transcript_path(std::path::Path::new("/traces"), "demo", "../../etc/passwd");
+        assert_eq!(path, std::path::Path::new("/traces/demo/______etc_passwd.jsonl"));
+    }
+
+    #[test]
+    fn summaries_name_the_tool_and_what_it_touched() {
+        let bash = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo nextest run"}
+        });
+        assert_eq!(summarize("tool", &bash), "Bash: cargo nextest run");
+
+        let edit = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/main.rs"}
+        });
+        assert_eq!(summarize("tool", &edit), "Edit: src/main.rs");
+
+        let prompt = serde_json::json!({"prompt": "  fix   the   parser  "});
+        assert_eq!(summarize("prompt", &prompt), "fix the parser");
+
+        // Nothing recognizable still yields something scannable.
+        assert_eq!(summarize("stop", &serde_json::json!({})), "stop");
+    }
+
+    #[test]
+    fn long_summaries_are_clipped_not_wrapped() {
+        let long = "x".repeat(400);
+        let payload = serde_json::json!({"prompt": long});
+        let summary = summarize("prompt", &payload);
+        assert_eq!(summary.chars().count(), 120);
+        assert!(summary.ends_with("..."));
     }
 }
