@@ -5,6 +5,8 @@ edition = "2024"
 description = "Deploy and operate a self-hosted dgit git server on celld, over your own tailnet."
 license = "MIT"
 readme = "README.md"
+# Placeholder until the crate moves into the nashgit workspace repo.
+repository = "https://github.com/nashgit/nashgit"
 
 [[bin]]
 name = "nashgit"

@@ -268,7 +268,12 @@ fn host_checks(p: &Profile) -> Vec<Check> {
         "skip" => Check::skip(
             "bucket",
             "bucket",
-            "cannot read /etc/celld/celld.env without passwordless sudo",
+            "cannot check the bucket without passwordless sudo on the host",
+        ),
+        "missing" => Check::fail(
+            "bucket",
+            "bucket",
+            "no /etc/celld/celld.env on the host — did setup finish?",
         ),
         _ => Check::fail("bucket", "bucket", "celld diagnose could not reach the store"),
     });

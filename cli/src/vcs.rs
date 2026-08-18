@@ -235,11 +235,20 @@ pub fn credential_approve(host: &str, username: &str, password: &str) -> Result<
     Ok(())
 }
 
-/// Which credential helper git will use, if any. Empty means none, and then
-/// `credential approve` silently discards the token.
-pub fn credential_helper() -> Result<Option<String>> {
+/// Which credential helper git will use for `url`, if any. Empty means none,
+/// and then `credential approve` silently discards the token.
+///
+/// `--get-urlmatch` rather than `--get`: it sees URL-scoped configuration
+/// (`credential.https://host.helper`) and resolves multi-valued helpers the
+/// way git itself will.
+pub fn credential_helper(url: &str) -> Result<Option<String>> {
     let dir = std::env::current_dir().context("read current directory")?;
-    let r = run_in(&dir, &git_bin(), &["config", "--get", "credential.helper"], None)?;
+    let r = run_in(
+        &dir,
+        &git_bin(),
+        &["config", "--get-urlmatch", "credential.helper", url],
+        None,
+    )?;
     let v = r.stdout.trim().to_string();
     Ok((r.ok() && !v.is_empty()).then_some(v))
 }

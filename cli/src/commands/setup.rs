@@ -175,6 +175,14 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
     run_script(out, &ssh, args.dry_run, "serve", &remote::serve_script(&deploy), false)?;
 
     let url = if args.dry_run || dns_name.is_empty() {
+        if !args.dry_run {
+            out.warn(format!(
+                "the node reported no MagicDNS name, so the profile URL is a guess \
+                 (https://{}). Enable MagicDNS in the Tailscale admin console, or edit \
+                 `url` in the profile by hand.",
+                short_host(&host)
+            ));
+        }
         format!("https://{}", short_host(&host))
     } else {
         format!("https://{dns_name}")
@@ -515,10 +523,14 @@ pub fn normalise_bucket(input: &str) -> String {
     }
 }
 
-/// `me@build-box.example.ts.net` -> `build-box`.
+/// `me@build-box.example.ts.net` -> `build-box`. An IP address stays whole:
+/// its dots are not subdomains, and `192` is not a hostname.
 pub fn short_host(dest: &str) -> String {
     let host = dest.rsplit_once('@').map(|(_, h)| h).unwrap_or(dest);
     let host = host.split(':').next().unwrap_or(host);
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return host.to_string();
+    }
     host.split('.').next().unwrap_or(host).to_string()
 }
 
@@ -551,6 +563,7 @@ mod tests {
         assert_eq!(short_host("me@build-box.example.ts.net"), "build-box");
         assert_eq!(short_host("build-box"), "build-box");
         assert_eq!(short_host("me@build-box:22"), "build-box");
+        assert_eq!(short_host("me@203.0.113.7"), "203.0.113.7");
     }
 
     #[test]

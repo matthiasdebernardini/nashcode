@@ -218,7 +218,12 @@ pub fn suggest_name(ssh_or_url: &str) -> String {
         .unwrap_or(ssh_or_url);
     let s = s.rsplit_once('@').map(|(_, h)| h).unwrap_or(s);
     let s = s.split(['/', ':']).next().unwrap_or(s);
-    let host = s.split('.').next().unwrap_or(s);
+    // An IP host keeps every octet: `192` names nothing.
+    let host = if s.parse::<std::net::IpAddr>().is_ok() {
+        s
+    } else {
+        s.split('.').next().unwrap_or(s)
+    };
     let cleaned: String = host
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -248,6 +253,12 @@ mod tests {
         assert_eq!(suggest_name("me@build-box.example.ts.net"), "build-box");
         assert_eq!(suggest_name("https://Build_Box.example.net"), "build-box");
         assert_eq!(suggest_name(""), "default");
+    }
+
+    #[test]
+    fn an_ip_host_keeps_all_its_octets() {
+        assert_eq!(suggest_name("me@203.0.113.7"), "203-0-113-7");
+        assert_eq!(suggest_name("203.0.113.7"), "203-0-113-7");
     }
 
     #[test]

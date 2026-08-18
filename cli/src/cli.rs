@@ -232,7 +232,11 @@ Open a plan file in plannotator, a local annotation tool.
 plannotator is a separate program. When it is not installed, this prints where
 to get it and does nothing else. When the active profile has a viewer URL, the
 plan's URL on the viewer is printed too, which is the link to send to someone
-who should comment on it.")]
+who should comment on it.
+
+With --json nothing is launched: the output only reports the file, where
+plannotator is (null when absent), and the viewer URL — plannotator is
+interactive, and an agent asking for JSON does not want an editor opening.")]
     Annotate(AnnotateArgs),
 
     /// Read the human comments left on a plan in the viewer.
@@ -372,7 +376,8 @@ pub struct SetupArgs {
     #[arg(long, value_name = "NAME")]
     pub site_owner: Option<String>,
 
-    /// Use this push token instead of generating one.
+    /// Use this push token instead of generating one. Careful: a flag lands
+    /// in your shell history; letting nashgit generate one does not.
     #[arg(long, value_name = "TOKEN")]
     pub token: Option<String>,
 

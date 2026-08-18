@@ -783,14 +783,14 @@ pub fn doctor_script(p: &Profile, listen: &str) -> String {
                 flags.push_str(&format!(" --region {}", sq(r)));
             }
             format!(
-                r#"if as_root test -r /etc/celld/celld.env 2>/dev/null; then
-  if as_root sh -c 'set -a; . /etc/celld/celld.env; set +a; exec "$0" diagnose "$@"' "$(command -v celld || echo celld)" {flags} >/dev/null 2>&1; then
-    echo "NASHGIT_BUCKET=ok"
-  else
-    echo "NASHGIT_BUCKET=fail"
-  fi
-else
+                r#"if ! as_root true 2>/dev/null; then
   echo "NASHGIT_BUCKET=skip"
+elif ! as_root test -e /etc/celld/celld.env 2>/dev/null; then
+  echo "NASHGIT_BUCKET=missing"
+elif as_root sh -c 'set -a; . /etc/celld/celld.env; set +a; exec "$0" diagnose "$@"' "$(command -v celld || echo celld)" {flags} >/dev/null 2>&1; then
+  echo "NASHGIT_BUCKET=ok"
+else
+  echo "NASHGIT_BUCKET=fail"
 fi
 "#
             )

@@ -24,7 +24,7 @@ fn wire_remote(ctx: &Ctx, p: &Profile, ws: &Workspace, name: &str) -> Result<Str
             .warn("this profile holds no token, so pushes will ask for a password");
         return Ok(url);
     }
-    match vcs::credential_helper()? {
+    match vcs::credential_helper(&p.url)? {
         Some(helper) => {
             vcs::credential_approve(&p.url_host()?, "x", &p.token)?;
             ctx.out.step(format!("token stored via credential.{helper}"));
@@ -297,7 +297,7 @@ pub fn clone(ctx: &Ctx, args: &CloneArgs) -> Result<()> {
         bail!("`{dir}` already exists");
     }
     // Store the token first, so a private repository clones without a prompt.
-    if !p.token.is_empty() && vcs::credential_helper()?.is_some() {
+    if !p.token.is_empty() && vcs::credential_helper(&p.url)?.is_some() {
         vcs::credential_approve(&p.url_host()?, "x", &p.token)?;
     }
     let cwd = std::env::current_dir().context("read current directory")?;

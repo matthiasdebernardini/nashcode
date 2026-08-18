@@ -39,9 +39,12 @@ impl Out {
     }
 
     /// A line of human output. Dropped in `--json` mode.
+    ///
+    /// Write errors are ignored on purpose: `nashgit ls | head -1` closes the
+    /// pipe early, and that is the reader's business, not a panic.
     pub fn line(&self, s: impl AsRef<str>) {
         if self.mode == Mode::Human {
-            println!("{}", s.as_ref());
+            let _ = writeln!(std::io::stdout(), "{}", s.as_ref());
         }
     }
 
@@ -60,7 +63,11 @@ impl Out {
     /// The single JSON value for this command. Dropped in human mode.
     pub fn json(&self, v: &Value) {
         if self.mode == Mode::Json {
-            println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+            let _ = writeln!(
+                std::io::stdout(),
+                "{}",
+                serde_json::to_string_pretty(v).unwrap_or_default()
+            );
         }
     }
 
@@ -73,7 +80,7 @@ impl Out {
     }
 }
 
-/// `✓` / `✗` / `-`, degraded to ASCII when the terminal cannot be trusted.
+/// `✓` for ok, `✗` for fail, `-` for anything else (skip).
 pub fn mark(status: &str) -> &'static str {
     match status {
         "ok" => "✓",
