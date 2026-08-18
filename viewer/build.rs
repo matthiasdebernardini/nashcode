@@ -1,9 +1,12 @@
 //! Build the browser bundle.
 //!
-//! esbuild turns `js/app.js` + `js/app.css` (Primer + @pierre/diffs) into two files in
-//! `OUT_DIR`, which the server embeds with `include_bytes!`. `cargo build` on a fresh
-//! clone therefore produces a runnable server, provided node+npm are installed: if
-//! `node_modules` is missing, this script runs `npm ci` first.
+//! esbuild turns `js/app.js` into a code-split ES module tree under `OUT_DIR/assets`
+//! and `js/app.css` into `OUT_DIR/nashcode.css`; the server embeds the whole assets
+//! directory plus the stylesheet. Splitting matters because @pierre/diffs pulls shiki,
+//! whose grammars and themes sit behind `import()` — without it esbuild inlines every
+//! language into the entry point. `cargo build` on a fresh clone produces a runnable
+//! server, provided node+npm are installed: if `node_modules` is missing, this script
+//! runs `npm ci` first.
 
 use std::path::Path;
 use std::process::Command;
@@ -21,12 +24,22 @@ fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
     let root = Path::new(&manifest);
 
+    // Chunk names carry a content hash, so a stale chunk from a previous build would
+    // otherwise linger in the directory and get embedded forever.
+    let assets = Path::new(&out_dir).join("assets");
+    if assets.exists() {
+        std::fs::remove_dir_all(&assets).expect("clear assets dir");
+    }
+    std::fs::create_dir_all(&assets).expect("create assets dir");
+    let entry_js = assets.join("nashcode.js");
+    let app_css = format!("{out_dir}/nashcode.css");
+
     // A Rust-only compile without node: empty bundles, clearly marked.
     println!("cargo:rerun-if-env-changed=NASHCODE_SKIP_ASSET_BUILD");
     if std::env::var("NASHCODE_SKIP_ASSET_BUILD").is_ok_and(|v| !v.trim().is_empty()) {
         let stub = "/* NASHCODE_SKIP_ASSET_BUILD was set: assets not built */\n";
-        std::fs::write(format!("{out_dir}/nashcode.js"), stub).expect("write stub js");
-        std::fs::write(format!("{out_dir}/nashcode.css"), stub).expect("write stub css");
+        std::fs::write(&entry_js, stub).expect("write stub js");
+        std::fs::write(&app_css, stub).expect("write stub css");
         println!("cargo:rustc-env=NASHCODE_ASSET_HASH=skipped");
         return;
     }
@@ -49,9 +62,15 @@ fn main() {
             .arg("js/app.js")
             .arg("--bundle")
             .arg("--format=esm")
+            .arg("--splitting")
             .arg("--minify")
             .arg("--target=es2022")
-            .arg(format!("--outfile={out_dir}/nashcode.js")),
+            // Flat names inside one directory: chunks import each other as
+            // `./chunk-*.js`, which resolves against `/assets/` in the browser.
+            .arg("--entry-names=nashcode")
+            .arg("--chunk-names=chunk-[hash]")
+            .arg("--asset-names=asset-[hash]")
+            .arg(format!("--outdir={}", assets.display())),
         "esbuild js",
     );
 
@@ -67,14 +86,15 @@ fn main() {
             .arg("--loader:.woff=empty")
             .arg("--loader:.ttf=empty")
             .arg("--loader:.woff2=dataurl")
-            .arg(format!("--outfile={out_dir}/nashcode.css")),
+            .arg(format!("--outfile={app_css}")),
         "esbuild css",
     );
 
-    // A short content hash busts browser caches when either bundle changes.
+    // A short content hash busts browser caches when either bundle changes. Hashing the
+    // entry is enough: a changed chunk changes the import name inside the entry.
     let mut hasher = Sha256::new();
-    hasher.update(std::fs::read(format!("{out_dir}/nashcode.js")).expect("bundle exists"));
-    hasher.update(std::fs::read(format!("{out_dir}/nashcode.css")).expect("bundle exists"));
+    hasher.update(std::fs::read(&entry_js).expect("bundle exists"));
+    hasher.update(std::fs::read(&app_css).expect("bundle exists"));
     let digest = hasher.finalize();
     let hash: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
     println!("cargo:rustc-env=NASHCODE_ASSET_HASH={hash}");

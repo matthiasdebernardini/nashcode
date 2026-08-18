@@ -451,3 +451,8 @@ h6,
 .gap-3 {
   gap: 16px;
 }
+
+/* Departure Mono's space glyph is thin; icon+label pairs need a visible gap. */
+.ph:not(:last-child) {
+  margin-right: 0.35em;
+}

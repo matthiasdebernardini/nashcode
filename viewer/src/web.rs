@@ -106,7 +106,9 @@ pub fn see_other(to: &str) -> topcoat::Result<Response> {
 // ---- embedded assets -------------------------------------------------------------
 
 pub const ASSET_HASH: &str = env!("NASHCODE_ASSET_HASH");
-const APP_JS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nashcode.js"));
+/// The code-split JS tree: the `nashcode.js` entry plus its content-hashed
+/// `chunk-*.js` siblings (shiki grammars and themes, loaded on demand).
+static ASSETS: include_dir::Dir<'static> = include_dir::include_dir!("$OUT_DIR/assets");
 const APP_CSS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nashcode.css"));
 
 pub fn js_url() -> String {
@@ -124,9 +126,25 @@ async fn asset_favicon() -> topcoat::Result<Response> {
     Ok(asset_response("image/svg+xml", FAVICON))
 }
 
-#[topcoat::router::route(GET "/assets/nashcode.js")]
-async fn asset_js() -> topcoat::Result<Response> {
-    Ok(asset_response("text/javascript; charset=utf-8", APP_JS))
+topcoat::router::path_param!(file);
+
+/// The JS entry and every chunk it pulls in. Chunks import each other as
+/// `./chunk-*.js`, which the browser resolves inside `/assets/`, so one flat route
+/// serves the whole tree. Lookups hit the embedded directory only — there is no
+/// filesystem underneath and so nothing to traverse out of.
+#[topcoat::router::route(GET "/assets/{file}")]
+async fn asset_js(cx: &Cx) -> topcoat::Result<Response> {
+    let name = topcoat::router::path_param::<File>(cx);
+    let Some(entry) = ASSETS.get_file(name) else {
+        return Err(topcoat::router::error::not_found().into());
+    };
+    let content_type = match name.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        _ => "application/octet-stream",
+    };
+    Ok(asset_response(content_type, entry.contents()))
 }
 
 #[topcoat::router::route(GET "/assets/nashcode.css")]
