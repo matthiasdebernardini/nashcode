@@ -209,6 +209,18 @@ curl -X POST "$NASHGIT/$REPO/traces/events" \
 
 Include `head` whenever you can — it is the whole linking mechanism.
 
+## Prompts
+
+Every prompt recorded through the hook is listed at `/:repo/prompts`, searchable, linked
+back to its session. Read them as JSON to see what a human has been asking for:
+
+```sh
+curl -s -H 'accept: application/json' "$NASHGIT/$REPO/prompts?q=retry"
+curl -s -H 'accept: application/json' "$NASHGIT/$REPO/prompts?session=<session>"
+```
+
+Each entry carries `session`, `seq`, `text`, `head`, `agent`, and `created_at`.
+
 ## Rules
 
 - Never force-push a branch a human is reviewing without saying so in a comment first.

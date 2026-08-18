@@ -22,6 +22,8 @@ against `git clone --mirror` copies on local disk.
 - `/:repo/board` — markdown under `tasks/` as a drag-and-drop kanban board
 - `/:repo/ci` — recent CI runs and their logs
 - `/:repo/traces` — agent sessions: the transcript that produced each commit
+- `/:repo/traces` — agent sessions, each linked to the commits it produced
+- `/:repo/prompts` — every prompt you have written, searchable
 - `/brain` — the whole tailnet's work state as JSON
 
 ## Requirements
@@ -208,6 +210,22 @@ it. `GET /:repo/commits/:sha/trace` answers the same question as JSON.
 
 One warning: a transcript contains whatever the agent saw, secrets included. nashgit does
 not redact. The tailnet is the perimeter here as everywhere else.
+
+### Prompts
+
+Your prompts are the most re-readable part of a trace, so they get their own page.
+`/:repo/prompts` lists every prompt written in that repo, newest first, each linked to the
+session it came from and marked when that session produced a commit. `?q=` searches by
+substring, `?session=` narrows to one run.
+
+The same URL answers JSON, so your prompt library is greppable:
+
+```sh
+curl -s -H 'accept: application/json' "http://nashgit.example/alpha/prompts?q=retry"
+```
+
+A prompt is any recorded event whose payload carries a `prompt` field, so this works for
+any harness that reports one.
 
 ### Wiring an agent
 
