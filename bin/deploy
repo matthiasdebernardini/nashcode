@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Ship the viewer to the tailnet box. Procedure from goals/viewer-features/goal.md.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+HOST=root@nashcode.tail76ec53.ts.net
+BIN=/usr/local/bin/nashcode-viewer
+
+cargo zigbuild --release -p nashcode --target x86_64-unknown-linux-gnu
+scp target/x86_64-unknown-linux-gnu/release/nashcode-viewer "$HOST:$BIN.new"
+ssh "$HOST" "chmod 755 $BIN.new && mv $BIN.new $BIN && systemctl restart nashcode-viewer && systemctl is-active nashcode-viewer"
+curl -fsS -o /dev/null https://nashcode.tail76ec53.ts.net:8443/nashcode
+echo "deployed: https://nashcode.tail76ec53.ts.net:8443/nashcode"
