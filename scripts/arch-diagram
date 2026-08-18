@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Regenerates the "Reality" mermaid diagram in ARCHITECTURE.md from the actual
+# module graph: one node per top-level module (a directory collapses to one
+# node), one edge per `crate::<mod>` reference. main.rs and lib.rs are skipped
+# as edge sources — they wire everything and would only add noise.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+diagram() {
+  echo 'graph LR'
+  for crate in cli viewer; do
+    # collect node names first so edges only point at real modules
+    nodes=""
+    for f in "$crate"/src/*.rs; do
+      m=$(basename "$f" .rs)
+      [ "$m" = main ] || [ "$m" = lib ] || nodes="$nodes $m"
+    done
+    for d in "$crate"/src/*/; do
+      [ -d "$d" ] && nodes="$nodes $(basename "$d")"
+    done
+    # a module can be both foo.rs and foo/ — keep one node
+    nodes=$(echo "$nodes" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+
+    echo "  subgraph $crate"
+    for m in $nodes; do
+      echo "    ${crate}_${m}[$m]"
+    done
+    echo "  end"
+
+    for m in $nodes; do
+      srcs=""
+      [ -f "$crate/src/$m.rs" ] && srcs="$crate/src/$m.rs"
+      [ -d "$crate/src/$m" ] && srcs="$srcs $(ls "$crate/src/$m"/*.rs 2>/dev/null || true)"
+      [ -n "$srcs" ] || continue
+      # shellcheck disable=SC2086
+      { grep -ohE 'crate::[a-z_]+' $srcs || true; } | sed 's/crate:://' | sort -u |
+        while read -r dep; do
+          [ "$dep" = "$m" ] && continue
+          case " $nodes " in *" $dep "*) echo "  ${crate}_${m} --> ${crate}_${dep}";; esac
+        done
+    done
+  done
+}
+
+tmp=$(mktemp)
+diagram > "$tmp"
+awk -v f="$tmp" '
+  /<!-- arch:begin -->/ {
+    print; print "```mermaid"
+    while ((getline line < f) > 0) print line
+    print "```"; skip=1; next
+  }
+  /<!-- arch:end -->/ { skip=0 }
+  !skip { print }
+' ARCHITECTURE.md > ARCHITECTURE.md.tmp
+rm -f "$tmp"
+mv ARCHITECTURE.md.tmp ARCHITECTURE.md

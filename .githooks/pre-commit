@@ -1,0 +1,4 @@
+#!/bin/sh
+# Keep the Reality diagram in ARCHITECTURE.md in sync with the source tree.
+scripts/arch-diagram
+git diff --quiet -- ARCHITECTURE.md || git add ARCHITECTURE.md
