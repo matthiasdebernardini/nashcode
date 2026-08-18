@@ -245,7 +245,7 @@ impl Ops {
         // Card automation: flip `branch: <branch>` cards to done on the default branch.
         let default_branch = graph.default_branch.clone();
         let cards_done = self
-            .flip_cards_done(&scratch, &mirror, &default_branch, repo_name, branch)
+            .flip_cards_done(&scratch, &mirror, &default_branch, &parent, repo_name, branch)
             .await?;
 
         let mut refspecs = vec![format!("refs/heads/{parent}:refs/heads/{parent}")];
@@ -308,14 +308,16 @@ impl Ops {
         scratch: &Scratch,
         mirror: &Repo,
         default_branch: &str,
+        parent: &str,
         repo_name: &str,
         branch: &str,
     ) -> OpResult<Vec<String>> {
         let tip = mirror.tip(default_branch).await?;
         let paths = mirror.list_files(&tip, docs::TASKS_DIR).await?;
-        let mut flipped = Vec::new();
 
-        scratch.checkout(default_branch).await?;
+        // Find the rewrites first: checking out the default branch would clobber a
+        // merge commit sitting on it, so only switch branches when there is work.
+        let mut rewrites: Vec<(String, String)> = Vec::new();
         for path in paths {
             if !(path.ends_with(".md") || path.ends_with(".markdown")) {
                 continue;
@@ -330,16 +332,30 @@ impl Ops {
                 continue;
             }
             let Some(rewritten) = docs::rewrite_status(&source, "done") else { continue };
+            rewrites.push((path, rewritten));
+        }
+        if rewrites.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // When the merge target IS the default branch, the card commit goes on top of
+        // the merge we just made; switching branches would throw the merge away.
+        if parent != default_branch {
+            scratch.checkout(default_branch).await?;
+        }
+        let mut flipped = Vec::new();
+        for (path, rewritten) in rewrites {
             let on_disk = scratch.repo.path().join(&path);
             std::fs::write(&on_disk, rewritten).map_err(|e| OpError::Git(e.to_string()))?;
             scratch.git(&["add", &path]).await?;
             flipped.push(path);
         }
-
-        if !flipped.is_empty() {
-            let message = format!("Mark done: {} ({} merged)", flipped.join(", "), branch);
-            scratch.git(&["commit", "-m", &message]).await?;
-            tracing::info!(repo_name, branch, ?flipped, "cards flipped to done");
+        let message = format!("Mark done: {} ({} merged)", flipped.join(", "), branch);
+        scratch.git(&["commit", "-m", &message]).await?;
+        tracing::info!(repo_name, branch, ?flipped, "cards flipped to done");
+        // Back to the parent so the push refspec sees the right tips.
+        if parent != default_branch {
+            scratch.git(&["checkout", parent]).await?;
         }
         Ok(flipped)
     }
