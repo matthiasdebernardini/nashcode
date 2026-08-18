@@ -1,4 +1,4 @@
-# Error tracking in nashgit — research digest
+# Error tracking in nashcode — research digest
 
 Compiled 2026-08-18 by a 10-agent research workflow (Exa + Firecrawl against primary sources).
 Six topics, then three gap follow-ups. Facts are dated where they are version-sensitive.
@@ -17,21 +17,21 @@ Six topics, then three gap follow-ups. Facts are dated where they are version-se
 - Issue grouping: an explicit SDK 'fingerprint' wins (mechanism-independent); otherwise v2 (default since 2.5.0) groups by exception type + value normalized with Sentry's own normalize_message_for_grouping (strips IDs, IPs, numbers); v1 grouped by 'title ⋄ transaction'; grouping keys are sha256-hashed rows in a Grouping table pointing at Issues; grouping mechanisms are versioned per-project with a 30-day transition window.
 - Regression handling: a new event on a resolved issue runs release-aware issue_is_regression (supports 'resolved in next release' and per-release fixed_at markers); on regression the issue is reopened (IssueStateManager.reopen), a TurningPoint kind=REGRESSED is recorded, and a regression alert fires.
 - Notifications: email (stepped user/team/project opt-in) plus webhook chat backends — Slack-compatible, Discord, Mattermost, MS Teams (merged 11 Aug 2026), Telegram, and a generic 'custom' JSON webhook; triggers are new issue, regression, and unmute; there is NO Pushover support anywhere (zero hits in code, issues, or PRs) — the only bolt-on path is the custom webhook pointed at a relay that converts JSON to Pushover's form-encoded POST.
-- The /envelope/ endpoint must return JSON {"id": "<event_id>"} on 200 — Bugsink's empty-body response broke sentry-elixir v11 into a retry loop and was fixed in PR #396 (merged June 2026); nashgit should return that body from day one.
+- The /envelope/ endpoint must return JSON {"id": "<event_id>"} on 200 — Bugsink's empty-body response broke sentry-elixir v11 into a retry loop and was fixed in PR #396 (merged June 2026); nashcode should return that body from day one.
 - Pricing: self-hosted is free with unlimited users/events; hosted tiers are Free (15K events/mo), $16/75K, $50/600K, $158/3M, $568/15M, $1,288/50M per month.
 - The author's blog documents exactly what a minimal Sentry-compatible server needs: 'Understanding Sentry DSNs', 'Single-writer Database Architecture with SQLite', 'Snappea: A Simple Task Queue', 'Moving Event Data Out of the Database', 'Multi-process Docker Images' (monofy), 'Does it scale (down)?', 'Track Errors First' / 'You don't need APM' (the errors-only design thesis), and 'Handled Errors'.
-- The separate bugsink/event-samples GitHub repo contains MIT-licensed sample Sentry event JSON (plus minidump samples) explicitly intended for testing — safe fixtures for nashgit's ingest tests.
+- The separate bugsink/event-samples GitHub repo contains MIT-licensed sample Sentry event JSON (plus minidump samples) explicitly intended for testing — safe fixtures for nashcode's ingest tests.
 
 ### Recommendations
 - Implement /api/{project_id}/envelope/ as the primary ingest endpoint (plus optionally the legacy /store/), accept auth via ?sentry_key= query param, X-Sentry-Auth header, AND the dsn envelope header, and return JSON {"id": "<event_id>"} on 200 — sentry-elixir and other strict SDKs break on an empty body (Bugsink PR #396).
 - Mint DSNs Bugsink-style: a random 32-hex key per project plus an integer project id, format {scheme}://{key}@{host}/{project_id}; validate by (project_id, key) pair and return 403 on mismatch, 429 on quota.
-- Process only envelope items of type 'event' (drop transaction/session/client_report/check_in/profile with a log line), but consider ALSO accepting 'log' items (Sentry Structured Logs) since nashgit wants server logs — that is a real gap in Bugsink.
+- Process only envelope items of type 'event' (drop transaction/session/client_report/check_in/profile with a log line), but consider ALSO accepting 'log' items (Sentry Structured Logs) since nashcode wants server logs — that is a real gap in Bugsink.
 - Support gzip, deflate, and brotli request-body decompression with streaming size caps (1MiB event, 20MiB compressed envelope, mirroring Sentry Relay); add zstd to beat Bugsink and cover newer SDKs.
-- Copy the architecture, not the code: ingest writes raw bytes fast and enqueues; a single-writer digest task does parse→group→store→alert inside one transaction — this maps 1:1 onto nashgit's SQLite + tokio design and is proven at 1.5M events/day on a $5 VPS.
+- Copy the architecture, not the code: ingest writes raw bytes fast and enqueues; a single-writer digest task does parse→group→store→alert inside one transaction — this maps 1:1 onto nashcode's SQLite + tokio design and is proven at 1.5M events/day on a $5 VPS.
 - Group by sha256 of (exception type + value normalized to strip IDs/IPs/numbers), let an explicit SDK 'fingerprint' override, and store the grouping-key→issue mapping in its own table; on a new event for a resolved issue, reopen it and fire a regression notification.
 - Adopt simple quotas (per-project events per 5min/hour/month → 429, SDKs back off automatically) and per-project max-stored-events retention with age-weighted eviction; Bugsink's default of 10,000 stored events per project is a sane starting point.
-- Build Pushover as a first-class alert backend on the three Bugsink triggers (new issue, regression, unmute) with an hourly send cap — Bugsink has zero Pushover support and no shim exists, so this is nashgit's clearest win over the current nac-bugs setup.
-- Do NOT copy any Bugsink source into nashgit: it is PolyForm Shield 1.0.0 (noncompete, source-available), and the vendored 'sentry/' dirs are BSD-3-Clause; reimplement from Sentry's public develop docs (develop.sentry.dev/sdk/foundations/) instead, which the license cannot reach.
+- Build Pushover as a first-class alert backend on the three Bugsink triggers (new issue, regression, unmute) with an hourly send cap — Bugsink has zero Pushover support and no shim exists, so this is nashcode's clearest win over the current nac-bugs setup.
+- Do NOT copy any Bugsink source into nashcode: it is PolyForm Shield 1.0.0 (noncompete, source-available), and the vendored 'sentry/' dirs are BSD-3-Clause; reimplement from Sentry's public develop docs (develop.sentry.dev/sdk/foundations/) instead, which the license cannot reach.
 - Use the MIT-licensed bugsink/event-samples repo as ingest test fixtures (real event JSON from sentry and glitchtip codebases, plus minidump samples).
 - Skip minidumps entirely (Bugsink feature-flags them off as a DoS magnet) and skip the Sentry Web API surface — a 404 catch-all for unimplemented /api/ routes is what Bugsink ships and SDKs tolerate it fine.
 
@@ -62,7 +62,7 @@ Endpoints (`ingest/urls.py`, `bugsink/urls.py`):
 
 Envelope item handling (`ingest/views.py`, `_post2` factory, ~line 900): items are streamed and **only two types are kept**: `event`, and `attachment` with `attachment_type == "event.minidump"` (when the feature flag is on). Everything else — `transaction`, `session`/`sessions` (release health), `log` (Sentry Structured Logs), `client_report`, `check_in` (crons), `profile`, other attachments — is read to a NullWriter and skipped with a log line. Only **one event per envelope** is accepted; multi-event envelopes are ignored wholesale. Envelope headers validated: `dsn`, `sdk`, `sent_at`, `event_id` (`ingest/header_validators.py`).
 
-Response shape: `/envelope/` returns `JsonResponse({"id": event_id})`. This was an empty body until PR #396 (merged 2026-06-04) — sentry-elixir v11 treated the empty body as transport failure and entered a retry/client-report loop. A wire-compat lesson for nashgit.
+Response shape: `/envelope/` returns `JsonResponse({"id": event_id})`. This was an empty body until PR #396 (merged 2026-06-04) — sentry-elixir v11 treated the empty body as transport failure and entered a retry/client-report loop. A wire-compat lesson for nashcode.
 
 What works from the SDK's perspective: error events (exceptions and log-message events, incl. `capture_message` and logging integrations — grouped as "Log Message"), breadcrumbs, contexts/tags/user data, releases (auto-created on digest, `create_release_if_needed`), environments, explicit fingerprints, handled/unhandled mechanism, sourcemapped JS stacktraces, local variables. Deliberately NOT implemented: tracing/performance/APM, session/release-health stats, metrics, profiling, structured logs, cron monitoring, user feedback. The docs are explicit: "Bugsink intentionally focuses only on error events. It does not handle metrics, traces, or other event types" (docs/sdk-recommendations, linking the "Track Errors First" post). The UI's SDK snippets set `traces_sample_rate=0` and recommend `send_default_pii=True` (self-hosted, so keep the data).
 
@@ -90,11 +90,11 @@ What works from the SDK's perspective: error events (exceptions and log-message 
 
 - **Native channels**: (1) Email — per-user opt-in resolved through a stepped user → team → project preference chain (`alerts/tasks.py`), throttled by `MAX_EMAILS_PER_HOUR` default 60; (2) webhook "messaging backends" (`alerts/service_backends/`): **Slack-compatible incoming webhooks, Discord, Mattermost, MS Teams (merged 11 Aug 2026), Telegram, and a generic `custom` JSON webhook** that POSTs a serialized issue payload. Outbound webhooks pass SSRF protection (URL validation, DNS-rebinding pinning fixed in 2.4.0 GHSA-w589-2ffr-2prv, allow/deny lists, deny-non-global-IPs default).
 - **Triggers**: new issue, regression, unmute — per-project toggles (`alert_on_new_issue`, `alert_on_regression`, `alert_on_unmute`, all default true). No per-issue thresholds beyond mute-until conditions; no digests/summaries.
-- **Pushover**: **zero support**. `rg -i pushover` over the whole repo: no hits. GitHub issue/PR search for pushover, ntfy, gotify, apprise: no hits. Issue #118 ("Add Multiple Messaging Backends", open) is the umbrella for new backends and invites suggestions — Pushover has not even been requested. People who want push notifications today must point the `custom` webhook backend at a self-hosted relay that reshapes the JSON into Pushover's form-encoded `POST https://api.pushover.net/1/messages.json` (token/user/message) — Pushover does not accept arbitrary JSON webhooks, so a shim is mandatory. This is exactly the gap Matthias's nac-bugs setup papers over, and a native-Pushover nashgit tracker eliminates the shim.
+- **Pushover**: **zero support**. `rg -i pushover` over the whole repo: no hits. GitHub issue/PR search for pushover, ntfy, gotify, apprise: no hits. Issue #118 ("Add Multiple Messaging Backends", open) is the umbrella for new backends and invites suggestions — Pushover has not even been requested. People who want push notifications today must point the `custom` webhook backend at a self-hosted relay that reshapes the JSON into Pushover's form-encoded `POST https://api.pushover.net/1/messages.json` (token/user/message) — Pushover does not accept arbitrary JSON webhooks, so a shim is mandatory. This is exactly the gap Matthias's nac-bugs setup papers over, and a native-Pushover nashcode tracker eliminates the shim.
 
 ## 7. License, pricing, maintenance
 
-- **License**: **PolyForm Shield License 1.0.0** since Jan 2025 (blog "New License & Pricing"). Free for every purpose EXCEPT "providing any product that competes with the software or any product the licensor... provides using the software"; competition counts across interface kinds and "even when provided free of charge". Plus: sentry-vendored dirs are BSD-3-Clause (Sentry's), `ee/` reserved for a future Enterprise Edition license, Heroicons MIT. Implications for nashgit: (a) running Bugsink internally is a permitted purpose; (b) **copying Bugsink source into nashgit would drag PolyForm Shield terms in — don't**; (c) a from-scratch Rust implementation of the *Sentry protocol* (from Sentry's public develop docs and observed wire behavior) is outside the license's reach entirely — the license governs use of the software, not the ideas; (d) the separate `bugsink/event-samples` repo is **MIT** and explicitly meant for testing.
+- **License**: **PolyForm Shield License 1.0.0** since Jan 2025 (blog "New License & Pricing"). Free for every purpose EXCEPT "providing any product that competes with the software or any product the licensor... provides using the software"; competition counts across interface kinds and "even when provided free of charge". Plus: sentry-vendored dirs are BSD-3-Clause (Sentry's), `ee/` reserved for a future Enterprise Edition license, Heroicons MIT. Implications for nashcode: (a) running Bugsink internally is a permitted purpose; (b) **copying Bugsink source into nashcode would drag PolyForm Shield terms in — don't**; (c) a from-scratch Rust implementation of the *Sentry protocol* (from Sentry's public develop docs and observed wire behavior) is outside the license's reach entirely — the license governs use of the software, not the ideas; (d) the separate `bugsink/event-samples` repo is **MIT** and explicitly meant for testing.
 - **Pricing**: self-hosted **free, unlimited users and events**. Hosted (bugsink.com homepage, Aug 2026): Free 15K events/mo → $16/mo 75K → $50/mo 600K → $158/mo 3M → $568/mo 15M → $1,288/mo 50M. There's also paid self-hosted **support** for Sentry/Bugsink installs.
 - **Maintenance**: very active solo-lead project. 48 releases; 2.5.0 on 2026-07-21 (versioned grouping, global issue list, admin QoL); 2.4.0 on 2026-07-10 (webhook SSRF fix, sparklines); last commit on main 2026-08-11 (MS Teams backend). ~1,928 stars, 40 contributors, 129 open issues.
 
@@ -111,9 +111,9 @@ What works from the SDK's perspective: error events (exceptions and log-message 
 - **Handled Errors** (blog/handled-errors) and **Grouping Connection-Errors** (bugsink.com/sentry-fingerprint/): practical notes on the `mechanism.handled` flag and SDK-side `fingerprint` usage.
 - There is no single "anatomy of the envelope" post; for the wire format the author leans on Sentry's own develop docs (develop.sentry.dev/sdk/foundations/envelopes/, .../transport/authentication/), which the code comments cite line-by-line.
 
-## 9. What nashgit can learn (delta vs Bugsink)
+## 9. What nashcode can learn (delta vs Bugsink)
 
-Bugsink proves that an unmodified official Sentry SDK is satisfied by: one `/api/{id}/envelope/` endpoint, sentry_key auth from three places, gzip/deflate/br decompression, keeping only `type: "event"` items, and a `{"id": ...}` JSON response. Genuine gaps nashgit can beat: **native Pushover** (Bugsink has none), **zstd Content-Encoding** (Bugsink lacks it), and **accepting Sentry Structured Logs (`log` envelope items)** for the server-logs use case (Bugsink drops them; its only log story is error-level log records arriving as regular events via SDK logging integrations).
+Bugsink proves that an unmodified official Sentry SDK is satisfied by: one `/api/{id}/envelope/` endpoint, sentry_key auth from three places, gzip/deflate/br decompression, keeping only `type: "event"` items, and a `{"id": ...}` JSON response. Genuine gaps nashcode can beat: **native Pushover** (Bugsink has none), **zstd Content-Encoding** (Bugsink lacks it), and **accepting Sentry Structured Logs (`log` envelope items)** for the server-logs use case (Bugsink drops them; its only log story is error-level log records arriving as regular events via SDK logging integrations).
 
 ### Sources
 - https://github.com/bugsink/bugsink
@@ -149,27 +149,27 @@ Bugsink proves that an unmodified official Sentry SDK is satisfied by: one `/api
 - Official self-hosted Sentry requires 4 CPU cores, 16 GB RAM + 16 GB swap (32 GB recommended) and ~40+ containers (Kafka, ClickHouse, Snuba, Relay, Symbolicator, Postgres, Redis), under the FSL-1.1-Apache-2.0 license (each version converts to Apache-2.0 two years after release) — disqualifying as a tailnet side-feature.
 - Bugsink itself (Python/Django, single-writer SQLite, Polyform Shield license, 2.0.7 released Jan 2026) is errors-only by explicit design (ignores transactions/metrics) and alerts via email plus Slack/Mattermost/Discord webhooks — still no native Pushover.
 - A 2026 wave of solo-built micro Sentry-clones proves the ingest subset is one-developer territory: errex (Rust + SQLite, AGPL-3.0, ~7 MB RAM, alpha), stackpit (Rust + SQLite, MIT core), TrapFall (Rust, Apache-2.0, 6 MB Docker image), tindra (Go + Postgres, ELv2, errors + performance + uptime + cron), urgentry (Go, FSL, Tiny mode ~52 MB), kestrel (Go, MIT, abandoned WIP) — all under ~65 stars, single-maintainer, months old: excellent references, unacceptable dependencies.
-- stackpit (franzos/stackpit) is the closest existing artifact to the nashgit plan — Rust single binary, SQLite, envelope + legacy store endpoints with all auth methods, grouping, releases, logs, source maps, cron monitors, MCP endpoint — and its core is MIT, so nashgit can legally mine its implementation.
+- stackpit (franzos/stackpit) is the closest existing artifact to the nashcode plan — Rust single binary, SQLite, envelope + legacy store endpoints with all auth methods, grouping, releases, logs, source maps, cron monitors, MCP endpoint — and its core is MIT, so nashcode can legally mine its implementation.
 - Among observability platforms only Uptrace (AGPL-3.0, Go + ClickHouse + Postgres) officially ingests unmodified Sentry SDK traffic (beta-quality, needs a hand-tweaked DSN); SigNoz closed its Sentry-ingest issue as wontfix (OTel-only), HyperDX only bridges Sentry SDKs through its own npm OTel packages, OpenObserve has no Sentry ingest, and Highlight.io requires its own SDK and was absorbed into LaunchDarkly (April 2025).
-- The sentry-types crate (MIT, published by getsentry, v0.49.1, Aug 2026, 50M+ downloads) already models the whole ingest surface nashgit needs: Dsn parsing plus Envelope::from_slice/to_writer and an EnvelopeItem enum covering Event, Transaction, SessionUpdate/Aggregates, Attachment, MonitorCheckIn, ClientReport, and LogsContainer (structured logs).
+- The sentry-types crate (MIT, published by getsentry, v0.49.1, Aug 2026, 50M+ downloads) already models the whole ingest surface nashcode needs: Dsn parsing plus Envelope::from_slice/to_writer and an EnvelopeItem enum covering Event, Transaction, SessionUpdate/Aggregates, Attachment, MonitorCheckIn, ClientReport, and LogsContainer (structured logs).
 - getsentry/relay's crates (relay-event-schema, relay-protocol with its lenient Annotated<T> model) are NOT on crates.io (git-dependency only) and are FSL-1.1-Apache-2.0; relay releases older than two years have already converted to Apache-2.0 — treat relay as a reference for normalization/grouping, not a dependency.
-- Sentry structured logs are first-class in the Rust SDK (logs feature + enable_logs, tracing/log integrations) and travel through the same envelope endpoint, so nashgit's 'also store server logs' requirement rides the identical ingest path with zero custom client code.
-- No tool in the entire landscape ships native Pushover notifications — everything is email plus Slack-shaped JSON webhooks (Pushover needs a form-encoded POST with token/user, which generic JSON webhooks cannot produce without a bridge) — so Pushover-only alerting is a genuine nashgit differentiator that cannot be bought off the shelf.
+- Sentry structured logs are first-class in the Rust SDK (logs feature + enable_logs, tracing/log integrations) and travel through the same envelope endpoint, so nashcode's 'also store server logs' requirement rides the identical ingest path with zero custom client code.
+- No tool in the entire landscape ships native Pushover notifications — everything is email plus Slack-shaped JSON webhooks (Pushover needs a form-encoded POST with token/user, which generic JSON webhooks cannot produce without a bridge) — so Pushover-only alerting is a genuine nashcode differentiator that cannot be bought off the shelf.
 - The Sentry ingest protocol subset that matters is small and stable: POST /api/<project_id>/envelope/ (plus legacy /store/), X-Sentry-Auth header or sentry_key query param, gzip/deflate bodies, numeric project IDs in the DSN path — fully documented at develop.sentry.dev (envelopes + event payloads), with relay's mini-sentry test server as a minimal reference implementation.
 - The feature cliff every micro-tracker hits is browser JavaScript sourcemap symbolication plus the sentry-cli upload API — Bugsink and stackpit have it, errex does not; server-side Rust/Python/Ruby projects never need it.
 - Non-Sentry-protocol trackers are irrelevant to a DSN-swap strategy: Errbit (Ruby + MongoDB, MIT, Airbrake protocol, 4.3K stars but slow maintenance) and errorpush (Rollbar protocol); Telebugs (Ruby, $299 one-time, errors-only Sentry ingest, email/push/webhooks) is the only other commercial small player.
-- The landscape verdict: embedding an errors+logs-only Sentry-compatible ingest into nashgit is exactly the scope multiple solo developers shipped in 2026, and sentry-types removes the riskiest part (protocol modeling); keep Bugsink running only as a transition crutch and for any future minified-JS sourcemap need.
+- The landscape verdict: embedding an errors+logs-only Sentry-compatible ingest into nashcode is exactly the scope multiple solo developers shipped in 2026, and sentry-types removes the riskiest part (protocol modeling); keep Bugsink running only as a transition crutch and for any future minified-JS sourcemap need.
 
 ### Recommendations
-- Embed the tracker in nashgit: build an errors+logs-only Sentry-compatible ingest on the sentry-types crate (MIT, getsentry) — use Dsn for minted per-project DSNs (keep project IDs numeric) and Envelope::from_slice for ingest; store raw item JSON in SQLite and deserialize into typed structs opportunistically so exotic-SDK payloads never bounce.
+- Embed the tracker in nashcode: build an errors+logs-only Sentry-compatible ingest on the sentry-types crate (MIT, getsentry) — use Dsn for minted per-project DSNs (keep project IDs numeric) and Envelope::from_slice for ingest; store raw item JSON in SQLite and deserialize into typed structs opportunistically so exotic-SDK payloads never bounce.
 - Implement the small protocol surface only: POST /api/<project_id>/envelope/ plus legacy /store/, X-Sentry-Auth header and sentry_key query auth, gzip/deflate body decoding; accept-and-discard (but count) Transaction/Session/ClientReport items so default SDK configs (tracesSampleRate etc.) work without errors.
 - Ship server-log storage via the same pipe: enable the Sentry Rust SDK logs feature (enable_logs + tracing/log integrations) in client projects so logs arrive as LogsContainer envelope items — no custom log-shipping protocol needed.
 - Write the Pushover notifier natively (reqwest form-POST to api.pushover.net/1/messages.json) and copy Bugsink's alert-state model — notify on new issue, regression, and unmute only, never per-event — with per-project cooldowns.
 - Mine, don't depend: read stackpit (MIT, Rust+SQLite, envelope+store+grouping+logs — the closest existing artifact to this plan) for implementation patterns, relay's relay-event-schema/relay-event-normalization for grouping/fingerprinting logic (FSL; tags older than two years are already Apache-2.0), and relay's mini-sentry test server plus develop.sentry.dev's Envelopes and Event Payloads pages as the spec.
 - Punt browser-JS sourcemap symbolication; it is the one genuinely expensive feature (sentry-cli chunk-upload API + resolution) and irrelevant for server-side Rust/Python projects — if a minified-frontend project needs it later, that is the sole reason to keep a Bugsink instance around.
-- Migrate incrementally: keep nac-bugs.fly.dev running and swap one project's DSN at a time into nashgit (update the nac-bugs-wire skill afterward); the DSN swap is reversible per project, so the decision carries almost no lock-in risk.
-- Do not adopt any 2026 micro-tracker (errex/TrapFall/tindra/urgentry) as infrastructure — all are single-maintainer alphas — and do not stand up GlitchTip (Postgres + Django + email ops for features nashgit does not need); also note errex is AGPL-3.0, so avoid copying its code verbatim unless comfortable with AGPL terms.
-- Guard nashgit's core: bound the ingest path (size caps per envelope, bounded ingest queue, single-writer SQLite discipline) so a misbehaving SDK cannot degrade the git server sharing the process.
+- Migrate incrementally: keep nac-bugs.fly.dev running and swap one project's DSN at a time into nashcode (update the nac-bugs-wire skill afterward); the DSN swap is reversible per project, so the decision carries almost no lock-in risk.
+- Do not adopt any 2026 micro-tracker (errex/TrapFall/tindra/urgentry) as infrastructure — all are single-maintainer alphas — and do not stand up GlitchTip (Postgres + Django + email ops for features nashcode does not need); also note errex is AGPL-3.0, so avoid copying its code verbatim unless comfortable with AGPL terms.
+- Guard nashcode's core: bound the ingest path (size caps per envelope, bounded ingest queue, single-writer SQLite discipline) so a misbehaving SDK cannot degrade the git server sharing the process.
 
 ### Detail
 
@@ -191,7 +191,7 @@ Bugsink proves that an unmodified official Sentry SDK is satisfied by: one `/api
 - **Protocol subset:** Sentry-DSN drop-in for **error events**, plus **basic performance transactions** — which the founder describes in issue #70 as kept "on life support" (no detail view, weak filtering). Built-in uptime monitoring. No session replay, no profiling.
 - **Notifications:** email + webhooks (Slack/Discord/Rocket.Chat-style and generic JSON, with recent MRs adding customizable metadata fields). **No Pushover.**
 - **Maintenance (2026):** healthy — v6.2.6 tagged, Docker image (5M+ pulls) updated within the last two weeks, active 7.0 branch (squashed migrations, single-process mode, dropping legacy event shapes). Paid hosted option funds it.
-- **For nashgit:** proof that Postgres + Django + email is the "standard" shape — i.e., everything nashgit is trying not to run. Nothing to reuse (Python), but its scoping (errors + uptime, transactions reluctantly) is instructive.
+- **For nashcode:** proof that Postgres + Django + email is the "standard" shape — i.e., everything nashcode is trying not to run. Nothing to reuse (Python), but its scoping (errors + uptime, transactions reluctantly) is instructive.
 
 ### Bugsink — the incumbent (what nac-bugs.fly.dev runs)
 - **Language/storage:** Python/Django; **SQLite by default** with a deliberate single-writer architecture (their blog documents it well — directly relevant prior art for a rusqlite design); MySQL/Postgres optional. Single container.
@@ -255,26 +255,26 @@ Version **0.49.1 (Aug 3, 2026)**, 50M+ total downloads, actively maintained as p
 - `POST /api/<project_id>/envelope/` (modern; all current SDKs) and optionally legacy `POST /api/<project_id>/store/`.
 - Auth: `X-Sentry-Auth` header (`sentry_key=...`) or `?sentry_key=` query param. Bodies arrive gzip/deflate-compressed. Keep project IDs numeric in minted DSNs (some SDKs validate).
 - Specs: develop.sentry.dev — Envelopes, Event Payloads, and the self-hosted docs.
-- **Logs:** Sentry Rust SDK ships structured logs (`logs` feature, `enable_logs`, `log`/`tracing` integrations) through the **same envelope endpoint** as `LogsContainer` items — nashgit's "store server logs" requirement needs zero custom client protocol.
+- **Logs:** Sentry Rust SDK ships structured logs (`logs` feature, `enable_logs`, `log`/`tracing` integrations) through the **same envelope endpoint** as `LogsContainer` items — nashcode's "store server logs" requirement needs zero custom client protocol.
 - **The feature cliff:** browser-JS sourcemap symbolication + the sentry-cli chunk-upload API. Bugsink, stackpit, and tindra do it; errex doesn't. Server-side Rust/Python/Ruby stack traces don't need it.
 
 ### Pushover
-No surveyed tool has native Pushover. All webhook systems emit Slack-shaped JSON; Pushover's `POST https://api.pushover.net/1/messages.json` wants form-encoded `token`/`user`/`message`, so even "custom webhook" features need a bridge. In nashgit it is ~20 lines of reqwest, and Bugsink's alert-state model (notify on new issue, regression, unmute — never per-event) is the correct throttling design to copy.
+No surveyed tool has native Pushover. All webhook systems emit Slack-shaped JSON; Pushover's `POST https://api.pushover.net/1/messages.json` wants form-encoded `token`/`user`/`message`, so even "custom webhook" features need a bridge. In nashcode it is ~20 lines of reqwest, and Bugsink's alert-state model (notify on new issue, regression, unmute — never per-event) is the correct throttling design to copy.
 
-## 6. Honest assessment: embed in nashgit vs keep Bugsink
+## 6. Honest assessment: embed in nashcode vs keep Bugsink
 
 **The landscape argues for embedding, with eyes open.**
 
 For embedding:
 1. **The scope is proven solo-sized.** Five separate people shipped Rust/Go + SQLite Sentry-compatible trackers in 2026; errex holds 7,500 events/s in 10 MB RAM. Errors + logs + grouping + Pushover is smaller than what any of them built.
 2. **The riskiest part is already a maintained MIT crate.** sentry-types gives DSN + envelope parsing + the full event model, maintained by Sentry itself and guaranteed round-trip-compatible with the SDKs. No other ecosystem (Go included) gets the vendor's own protocol types for free.
-3. **Nothing off the shelf fits nashgit's actual constraints.** Tailnet identity headers, no auth, loopback bind, one SQLite file, Pushover-only: GlitchTip drags in Postgres + Django + email; Bugsink stays a separate Django deployment outside the tailnet on fly.dev; the micro-trackers are alphas with their own auth/UI opinions; Uptrace drags in ClickHouse. Pushover-only alerting exists nowhere.
-4. **Bugsink's own philosophy endorses the plan.** Its errors-only scoping and single-writer SQLite architecture are exactly nashgit's shape — the difference is Python vs Rust and a separate box vs the server you already run.
+3. **Nothing off the shelf fits nashcode's actual constraints.** Tailnet identity headers, no auth, loopback bind, one SQLite file, Pushover-only: GlitchTip drags in Postgres + Django + email; Bugsink stays a separate Django deployment outside the tailnet on fly.dev; the micro-trackers are alphas with their own auth/UI opinions; Uptrace drags in ClickHouse. Pushover-only alerting exists nowhere.
+4. **Bugsink's own philosophy endorses the plan.** Its errors-only scoping and single-writer SQLite architecture are exactly nashcode's shape — the difference is Python vs Rust and a separate box vs the server you already run.
 
 Against (what keeping Bugsink buys):
-1. **Maturity:** grouping quality, retention/eviction, SDK-quirk tolerance, and sourcemap support represent years of accumulated fixes; v1 nashgit grouping will be cruder.
+1. **Maturity:** grouping quality, retention/eviction, SDK-quirk tolerance, and sourcemap support represent years of accumulated fixes; v1 nashcode grouping will be cruder.
 2. **Sourcemaps:** if a minified-browser-JS project ever matters, that is the one feature genuinely expensive to rebuild.
-3. **Blast radius:** the error tracker moves inside the same process/DB as nashgit itself — an ingest bug can now take down the git server (mitigate with bounded ingest buffers à la errex, and remember a tailnet-only ingest surface mostly neutralizes the abuse concern that public trackers must engineer for).
+3. **Blast radius:** the error tracker moves inside the same process/DB as nashcode itself — an ingest bug can now take down the git server (mitigate with bounded ingest buffers à la errex, and remember a tailnet-only ingest surface mostly neutralizes the abuse concern that public trackers must engineer for).
 
 **Net:** absorb it. Build errors+logs-only ingest on sentry-types, native Pushover, accept-and-count-but-drop transactions/sessions so default SDK configs don't break, and keep nac-bugs.fly.dev alive only until each project's DSN is swapped — migration is literally one DSN change per project, in both directions, which also makes the decision cheaply reversible.
 
@@ -330,31 +330,31 @@ Against (what keeping Bugsink buys):
 
 ### Key facts
 - A DSN parses as '{PROTOCOL}://{PUBLIC_KEY}:{SECRET_KEY}@{HOST}{PATH}/{PROJECT_ID}'; the secret key is optional and effectively deprecated, and the ingest URL is '{PROTOCOL}://{HOST}{PATH}/api/{PROJECT_ID}/{ENDPOINT}/' (verified develop.sentry.dev, 2026-08).
-- The only endpoint nashgit must implement is POST /api/<project_id>/envelope/ — all five target SDKs (current Python, JS/Bun, Rust, Ruby, Swift) send everything (events, transactions, sessions, logs, check-ins, client reports) through it; /store/ is deprecated and only pre-2020 SDKs use it.
+- The only endpoint nashcode must implement is POST /api/<project_id>/envelope/ — all five target SDKs (current Python, JS/Bun, Rust, Ruby, Swift) send everything (events, transactions, sessions, logs, check-ins, client reports) through it; /store/ is deprecated and only pre-2020 SDKs use it.
 - Auth arrives three ways and the server must accept any one: X-Sentry-Auth header (server SDKs), ?sentry_key=...&sentry_version=7 query string (browser JS, to avoid CORS preflight), or a 'dsn' key in the envelope's first JSON header line; sentry_version is 7.
 - An envelope is: one JSON-object header line, then repeated (item-header JSON line + payload) pairs separated by \n; the item header's 'length' gives payload bytes (if absent, payload runs to the next newline), and servers MUST skip-and-retain items of unknown type, never reject them.
 - Relay accepts content-encodings gzip, deflate, br, and zstd; sentry-python defaults to gzip -9 but silently switches its default to brotli when the 'brotli' module is importable, so the server needs at least gzip+deflate+br (zstd for completeness).
 - On success Relay returns 200 with JSON {"id": "<event_id>"} (id omitted when the envelope had none); an empty 200 body breaks stricter SDKs — sentry-elixir v11+ treats it as a transport failure and retry-loops (Bugsink shipped exactly this fix, PR #396, June 2026).
-- Rate limiting: 429 + Retry-After, plus X-Sentry-Rate-Limits: '<seconds>:<cat1;cat2>:<scope>:...' which may be sent on ANY response including 200 — so nashgit can proactively return e.g. '86400:transaction;span;profile;replay:project' on every 200 and compliant SDKs stop sending those categories for that window (they re-send after expiry, so keep emitting the header).
+- Rate limiting: 429 + Retry-After, plus X-Sentry-Rate-Limits: '<seconds>:<cat1;cat2>:<scope>:...' which may be sent on ANY response including 200 — so nashcode can proactively return e.g. '86400:transaction;span;profile;replay:project' on every 200 and compliant SDKs stop sending those categories for that window (they re-send after expiry, so keep emitting the header).
 - Rate-limit categories are NOT item types: error events = 'error'/'default', transactions = 'transaction', logs = 'log_item' (+ 'log_byte'), check-ins = 'monitor', sessions = 'session'; an empty category list means all categories, and client_report is 'internal' (never rate-limited explicitly).
 - Event payload: only event_id (32-char lowercase hex uuid4, no dashes), timestamp (RFC 3339 string or Unix seconds number), and platform are required; level/logger/exception/message/tags/extra/contexts/sdk/release/environment/user/breadcrumbs are optional, and the server is expected to tolerate non-canonical historical formats — store raw JSON, parse only what you index.
 - Sentry Logs (stable spec v2.2.0, 2026-06-22) flow through the SAME DSN and envelope endpoint as a single 'log' item per envelope with headers {type:"log", item_count:N, content_type:"application/vnd.sentry.items.log+json"} and payload {"items":[...]}; each log entry requires timestamp (Unix seconds), trace_id, level (trace|debug|info|warn|error|fatal), body, with optional severity_number and typed attributes ({value, type}).
 - Logs SDK support (verified docs.sentry.io, Aug 2026): JS >= 9.41.0 (enableLogs: true, Sentry.logger.*), Python >= 2.35.0 (sentry_sdk.logger.*), Ruby >= 5.24.0 (enable_logs, Sentry.logger), Rust >= 0.42.0 (logger_info! macros, on by default via 'logs' feature, plus tracing/log forwarding), Cocoa >= 8.55.0 (stable in 9.0.0); spec v2.0.0 (2026-04-09) flipped enableLogs default to true; SDKs batch <= 100 logs per envelope, flushing at 100 items or 5 s.
 - Check-ins are 'check_in' items (max one per envelope, 100 KiB cap): {check_in_id, monitor_slug, status: in_progress|ok|error, duration?, monitor_config?{schedule,...}} — trivially storable and genuinely useful for cron monitoring with Pushover alerts.
-- Client reports are 'client_report' items ({timestamp?, discarded_events:[{reason, category, quantity}]}, 4 KiB cap) that SDKs send piggybacked on other envelopes; accept and either discard or store as counters — note that once nashgit 429s transactions, SDKs will report ratelimit_backoff outcomes here.
+- Client reports are 'client_report' items ({timestamp?, discarded_events:[{reason, category, quantity}]}, 4 KiB cap) that SDKs send piggybacked on other envelopes; accept and either discard or store as counters — note that once nashcode 429s transactions, SDKs will report ratelimit_backoff outcomes here.
 - The sentry-types crate (crates.io, v0.49.1, same version train as the Rust SDK) gives a reusable server-side parser: sentry_types::protocol::v7::Envelope::from_slice(&[u8]) plus EnvelopeItem {Event, Transaction, SessionUpdate, SessionAggregates, Attachment, MonitorCheckIn, ClientReport, ItemContainer (logs/metrics), Raw} and Dsn/Auth types; the relay-* crates (relay-event-schema etc.) are NOT published on crates.io — usable only as git dependencies from getsentry/relay.
 - Relay's reference implementation lives in getsentry/relay: relay-server/src/endpoints/envelope.rs (auth extraction incl. the fallback that reads the DSN from the envelope's first line), relay-server/src/envelope.rs (item parsing), relay-event-schema/src/protocol (full event schema, rustdoc at getsentry.github.io/relay); envelope size limits: 200 MiB decompressed total, 1 MiB per event/log item, 100 KiB per check-in, 4 KiB per client report.
 
 ### Recommendations
 - Implement exactly one ingest route: POST /api/<project_id>/envelope/ (trailing slash), plus the pipeline decompress (gzip, deflate, br, zstd) -> split envelope -> auth -> store; skip /store/ entirely — none of the five target SDKs use it.
-- Accept auth from all three sources in priority order — X-Sentry-Auth header, ?sentry_key= query param (browser/Bun JS uses this), envelope 'dsn' header — and map the public key to a nashgit project, 403 when absent everywhere; use numeric project ids in minted DSNs to stay compatible with strict SDK parsers.
+- Accept auth from all three sources in priority order — X-Sentry-Auth header, ?sentry_key= query param (browser/Bun JS uses this), envelope 'dsn' header — and map the public key to a nashcode project, 403 when absent everywhere; use numeric project ids in minted DSNs to stay compatible with strict SDK parsers.
 - Return 200 with content-type application/json and body {"id":"<event_id_hex32>"} (or {}), never an empty body — the empty-body bug bit Bugsink (PR #396) via sentry-elixir's retry loop.
 - Write the envelope splitter by hand (~100 lines: JSON header line, then per-item header + length-or-newline-delimited payload) and keep every item's raw bytes; use the sentry-types crate (0.49.x) for Dsn/Auth parsing and optionally for typed Event/Log deserialization, but verify its from_slice behavior on unknown item types with real captured envelopes before relying on it; treat getsentry/relay as reference code only (its crates are not on crates.io).
 - Never 400 on unknown item types — skip them; this is the number-one interop rule in the spec and the historical source of broken servers.
 - Suppress telemetry you do not store by emitting X-Sentry-Rate-Limits on every 200 (e.g. '86400:transaction;span;profile;profile_chunk;replay;trace_metric:project:unwanted') instead of silently discarding — SDKs then stop sending client-side; keep emitting it since limits expire; never include error, default, log_item, monitor, or session in that list, and never use an empty category list (it would also kill logs and errors).
 - Parse-and-index only the minimal event fields (event_id, timestamp both formats, level, release, environment, platform, exception type/value + top in-app frames for the fingerprint, message/logentry fallback) and store the full raw JSON for the detail view — the spec explicitly blesses lenient servers.
-- Store 'log' items as first-class rows (timestamp, trace_id, level, severity_number, body, attributes JSON) keyed to the project — logs arrive on the same DSN/endpoint, so nashgit's own server logs can use the same store either via its own DSN or by direct insert; support means JS >=9.41, Python >=2.35, Ruby >=5.24, Rust >=0.42, Cocoa >=9.0, so all five stacks can send logs today.
-- Store check_in items (tiny table: check_in_id, monitor_slug, status, duration, monitor_config) — they enable cron monitoring with Pushover 'missed run / failed run' alerts, which fits nashgit's notification model perfectly; accept client_report items and either aggregate to counters or drop them silently.
+- Store 'log' items as first-class rows (timestamp, trace_id, level, severity_number, body, attributes JSON) keyed to the project — logs arrive on the same DSN/endpoint, so nashcode's own server logs can use the same store either via its own DSN or by direct insert; support means JS >=9.41, Python >=2.35, Ruby >=5.24, Rust >=0.42, Cocoa >=9.0, so all five stacks can send logs today.
+- Store check_in items (tiny table: check_in_id, monitor_slug, status, duration, monitor_config) — they enable cron monitoring with Pushover 'missed run / failed run' alerts, which fits nashcode's notification model perfectly; accept client_report items and either aggregate to counters or drop them silently.
 - Wire Pushover on: first event of a new fingerprint (new issue), regression (event on resolved issue), check_in status=error, and missed check-in sweep; do not notify per-event.
 - Acceptance test with real SDKs against a dev instance: sentry-python with and without the brotli package installed (its default content-encoding flips to br when brotli is importable), @sentry/bun, sentry (Rust crate), sentry-ruby in a Rails app, sentry-cocoa — plus 'sentry-cli send-envelope' and hand-built adversarial envelopes (implicit length, no trailing newline, unknown item types, empty envelope, mismatched event_id).
 
@@ -373,11 +373,11 @@ DSN (Data Source Name — the one config string an SDK needs):
 ```
 
 - `PROTOCOL`: http or https.
-- `PUBLIC_KEY`: opaque string, acts as the credential. nashgit mints one per project.
+- `PUBLIC_KEY`: opaque string, acts as the credential. nashcode mints one per project.
 - `SECRET_KEY`: optional, "effectively deprecated"; DSN parsing must not require it; future Sentry versions ignore it entirely. Do not mint one.
-- `HOST[:PORT]`: the ingest host. For nashgit: the tailnet hostname.
-- `PATH`: optional URL prefix before the project id (`https://key@host/prefix/42` → base URI `https://host/prefix`). SDKs support it, so nashgit could mount ingest under a subpath; empty path is simplest.
-- `PROJECT_ID`: the last path segment. Type String per the docs (Sentry uses integers; nashgit can use any slug-safe string, but numeric is the conservative choice — some SDK DSN parsers have historically validated it as an integer).
+- `HOST[:PORT]`: the ingest host. For nashcode: the tailnet hostname.
+- `PATH`: optional URL prefix before the project id (`https://key@host/prefix/42` → base URI `https://host/prefix`). SDKs support it, so nashcode could mount ingest under a subpath; empty path is simplest.
+- `PROJECT_ID`: the last path segment. Type String per the docs (Sentry uses integers; nashcode can use any slug-safe string, but numeric is the conservative choice — some SDK DSN parsers have historically validated it as an integer).
 
 URL construction (what SDKs do, verified in sentry-javascript `packages/core/src/api.ts`):
 
@@ -398,7 +398,7 @@ Trailing slash included; route it exactly (tolerating the slash-less variant cos
 
 ### Legacy POST /api/<project_id>/store/
 
-Officially deprecated ("Sending event payloads to the /store/ API endpoint is deprecated"). Current Python (2.x), JS (9/10.x), Rust (0.4x), Ruby (5.x), and Cocoa (8/9.x) SDKs never call it — sentry-python 2.x's transport.py contains no store path at all; JS core only builds `/envelope/`. Only raven-era / pre-2020 SDKs use `/store/` (JSON event body, possibly zlib+base64). Bugsink and GlitchTip implement it for old-client compatibility; nashgit does not need it.
+Officially deprecated ("Sending event payloads to the /store/ API endpoint is deprecated"). Current Python (2.x), JS (9/10.x), Rust (0.4x), Ruby (5.x), and Cocoa (8/9.x) SDKs never call it — sentry-python 2.x's transport.py contains no store path at all; JS core only builds `/envelope/`. Only raven-era / pre-2020 SDKs use `/store/` (JSON event body, possibly zlib+base64). Bugsink and GlitchTip implement it for old-client compatibility; nashcode does not need it.
 
 ### Authentication — three interchangeable mechanisms
 
@@ -410,7 +410,7 @@ Officially deprecated ("Sending event payloads to the /store/ API endpoint is de
 2. **Query string** (browser JS, to avoid CORS preflight — verified in JS SDK source): `?sentry_version=7&sentry_key=<public_key>&sentry_client=sentry.javascript.browser/9.41.0`.
 3. **Envelope header `dsn` key**: the full DSN in the envelope's first JSON line self-authenticates the request (requires Relay >= 21.6.0 server-side). Relay's endpoint code shows the fallback: if header/query auth is missing, it reads the first line of the body and takes the DSN from there. Cocoa also sends the `dsn` envelope header *in addition* to header auth.
 
-Relay validates that multiple auth sources match, and rejects with **403 Forbidden** when all are missing. For nashgit on a no-auth tailnet the pragmatic rule: extract `sentry_key` from whichever source is present (header → query → envelope `dsn` header), map it to a project, verify it matches the `project_id` in the URL, 403/404 on mismatch or unknown key.
+Relay validates that multiple auth sources match, and rejects with **403 Forbidden** when all are missing. For nashcode on a no-auth tailnet the pragmatic rule: extract `sentry_key` from whichever source is present (header → query → envelope `dsn` header), map it to a project, verify it matches the `project_id` in the URL, 403/404 on mismatch or unknown key.
 
 ## 3. Envelope serialization format
 
@@ -454,7 +454,7 @@ Worked example from the spec:
 
 Constraint worth knowing: SDKs MUST NOT mix telemetry types in one envelope (exceptions: attachments/sessions/client_reports/check_ins may ride along with an event). So in practice an envelope is "one event + its attachments + maybe a session + maybe a client_report", or "one log container", etc.
 
-### Size limits (Relay's, a sane menu for nashgit)
+### Size limits (Relay's, a sane menu for nashcode)
 
 200 MiB envelope after decompression; 1 MiB per event/transaction/log item; 100 KiB per check-in; 4 KiB per client report; 100 sessions per envelope.
 
@@ -502,7 +502,7 @@ Two headers:
 - `Retry-After: <seconds>` on 429 (429 with neither header ⇒ SDKs assume 60 s for all categories).
 - `X-Sentry-Rate-Limits: <retry_after>:<cat1;cat2;...>:<scope>:<reason>:<namespaces>, ...` — **may appear on ANY response, including 200**, precisely "to proactively inform SDKs that certain payload types are disabled before SDKs even try to send them." Empty category list = all categories. Scope/reason can be anything (SDKs ignore them).
 
-**Yes, nashgit can suppress categories it does not store.** Emit on every 200:
+**Yes, nashcode can suppress categories it does not store.** Emit on every 200:
 
 ```
 X-Sentry-Rate-Limits: 86400:transaction;span;profile;profile_chunk;replay;trace_metric:project:unwanted
@@ -519,7 +519,7 @@ Source: https://develop.sentry.dev/sdk/foundations/transport/rate-limiting/
 Only three attributes are required: `event_id` (32-char lowercase hex, uuid4, no dashes), `timestamp` (RFC 3339 string OR Unix-seconds number — handle both), `platform`. Everything else is optional, and the docs explicitly say the server tolerates non-canonical historical formats — so **store the raw item JSON and parse only what you index**:
 
 - For listing/grouping: `level` (fatal|error|warning|info|debug; default error), `logger`, `transaction`, `server_name`, `release`, `environment`, `timestamp`.
-- For the issue title + fingerprint: `exception.values[]` (each: `type`, `value`, `module`, `mechanism`, `stacktrace.frames[]` with `filename`/`function`/`lineno`/`context_line`/`pre_context`/`post_context`/`in_app`), or `message` / `logentry` (`formatted`, `message`, `params`) when there is no exception. Sentry's own default grouping ≈ hash of (exception type + normalized stacktrace) with `fingerprint` array as override — for nashgit, hashing `exception type + value-normalized + top in-app frames` is the Bugsink-class approach.
+- For the issue title + fingerprint: `exception.values[]` (each: `type`, `value`, `module`, `mechanism`, `stacktrace.frames[]` with `filename`/`function`/`lineno`/`context_line`/`pre_context`/`post_context`/`in_app`), or `message` / `logentry` (`formatted`, `message`, `params`) when there is no exception. Sentry's own default grouping ≈ hash of (exception type + normalized stacktrace) with `fingerprint` array as override — for nashcode, hashing `exception type + value-normalized + top in-app frames` is the Bugsink-class approach.
 - Keep as raw JSON blobs for detail view: `tags` (string→string, ≤200 chars each), `extra`, `contexts` (trace/os/runtime/device/browser/app...), `user` ({id, username, email, ip_address}), `breadcrumbs.values[]`, `sdk` ({name, version}), `request`, `modules`, `fingerprint`, `dist`, `threads`, `debug_meta`.
 - The canonical server-side schema is documented as Rust: https://getsentry.github.io/relay/relay_event_schema/protocol/ and https://github.com/getsentry/relay/tree/master/relay-event-schema/src/protocol.
 
@@ -567,13 +567,13 @@ Batching: SDKs flush at ≤100 logs per envelope or 5 s, hard cap 1000 queued. R
 | Rust | 0.42.0 | `logger_info!` etc. macros; `logs` cargo feature (in default features); `tracing`/`log` integrations forward to Sentry logs | enabled by default |
 | Swift / Cocoa | 8.55.0 (experimental) → stable in 9.0.0 | `SentrySDK.logger` | stable at 9.0.0 |
 
-This means nashgit's own server logs can go into the same store by emitting `log` envelope items to its own DSN (or by writing rows directly and skipping HTTP for itself).
+This means nashcode's own server logs can go into the same store by emitting `log` envelope items to its own DSN (or by writing rows directly and skipping HTTP for itself).
 
 ## 8. Client reports and check-ins
 
-**Client reports** (`client_report` item, spec stable v1.23.0, 2026-06-22): SDK self-reporting of dropped telemetry — `{timestamp?, discarded_events:[{reason, category, quantity}]}` with reasons like `sample_rate`, `before_send`, `ratelimit_backoff`, `queue_overflow`, `send_error`. They arrive piggybacked on normal envelopes; SDKs assume they are never rate-limited. **Store as counters or discard — never reject.** Mildly interesting for nashgit as a "how much am I dropping" dashboard, especially once you 429 transactions.
+**Client reports** (`client_report` item, spec stable v1.23.0, 2026-06-22): SDK self-reporting of dropped telemetry — `{timestamp?, discarded_events:[{reason, category, quantity}]}` with reasons like `sample_rate`, `before_send`, `ratelimit_backoff`, `queue_overflow`, `send_error`. They arrive piggybacked on normal envelopes; SDKs assume they are never rate-limited. **Store as counters or discard — never reject.** Mildly interesting for nashcode as a "how much am I dropping" dashboard, especially once you 429 transactions.
 
-**Check-ins** (`check_in` item, spec stable v1.6.0): cron monitoring. Two check-ins per job run sharing a `check_in_id` (uuid): `in_progress` then `ok`/`error` with optional `duration` (seconds) and optional `monitor_config` upsert (`schedule: {type: crontab|interval, value}`, `checkin_margin`, `max_runtime`, `timezone`, thresholds). All-zero `check_in_id` means "update the most recent in_progress for this monitor_slug". **Worth storing**: it is a tiny table and gives nashgit cron-health + missed-run Pushover alerts (a missed-run detector needs a server-side sweep comparing schedules to last check-in). If you don't want them yet, accept-and-store-raw; do not 429 the `monitor` category if you ever might.
+**Check-ins** (`check_in` item, spec stable v1.6.0): cron monitoring. Two check-ins per job run sharing a `check_in_id` (uuid): `in_progress` then `ok`/`error` with optional `duration` (seconds) and optional `monitor_config` upsert (`schedule: {type: crontab|interval, value}`, `checkin_margin`, `max_runtime`, `timezone`, thresholds). All-zero `check_in_id` means "update the most recent in_progress for this monitor_slug". **Worth storing**: it is a tiny table and gives nashcode cron-health + missed-run Pushover alerts (a missed-run detector needs a server-side sweep comparing schedules to last check-in). If you don't want them yet, accept-and-store-raw; do not 429 the `monitor` category if you ever might.
 
 ## 9. Reusable Rust parsing code
 
@@ -581,7 +581,7 @@ This means nashgit's own server logs can go into the same store by emitting `log
   - `sentry_types::Dsn` (parse/validate DSNs), `sentry_types::Auth` (parse X-Sentry-Auth / query params — `Auth::from_querystring` exists).
   - `sentry_types::protocol::v7::Envelope::from_slice(&[u8])` parses a full envelope; `Envelope::from_bytes_raw` keeps it unparsed; `serialize`/`to_writer` for re-emission.
   - `EnvelopeItem` (non-exhaustive): `Event`, `Transaction`, `SessionUpdate`, `SessionAggregates`, `Attachment`, `MonitorCheckIn`, `ClientReport`, `ItemContainer` (which covers `Vec<Log>` and `Vec<Metric>` — i.e. the `log` item), `Raw`. Full typed `Event`, `Exception`, `Stacktrace`, `Breadcrumb`, `Log`, `MonitorCheckIn` structs included.
-  - Caveats to test before committing: it is written for the SDK side, so check (a) how `from_slice` treats item types it doesn't model (whether they land in `Raw`/get skipped or error) with a captured real envelope from each SDK, and (b) that its `Event` deserialization is lenient enough for cross-SDK payloads. Fallback: write the ~100-line envelope splitter yourself (the grammar is trivial) and use `sentry-types` only for `Dsn`/`Auth`/typed payloads, keeping unknown items as raw bytes. Given nashgit already stores raw JSON, a hand-rolled splitter + serde_json::Value is arguably the most robust path, with `sentry-types` for DSN/auth parsing.
+  - Caveats to test before committing: it is written for the SDK side, so check (a) how `from_slice` treats item types it doesn't model (whether they land in `Raw`/get skipped or error) with a captured real envelope from each SDK, and (b) that its `Event` deserialization is lenient enough for cross-SDK payloads. Fallback: write the ~100-line envelope splitter yourself (the grammar is trivial) and use `sentry-types` only for `Dsn`/`Auth`/typed payloads, keeping unknown items as raw bytes. Given nashcode already stores raw JSON, a hand-rolled splitter + serde_json::Value is arguably the most robust path, with `sentry-types` for DSN/auth parsing.
 - **Relay's crates are NOT on crates.io** (`relay-event-schema`, `relay-protocol`, `relay-base-schema` — cargo search confirms no getsentry-published versions). They are usable only as git dependencies on https://github.com/getsentry/relay (heavy: relay-event-schema pulls the whole processor/annotation machinery). Best used as **reference**, not dependency: envelope/item parsing in `relay-server/src/envelope.rs`, endpoint behavior in `relay-server/src/endpoints/envelope.rs` and `common.rs`, event schema in `relay-event-schema/src/protocol/` (rustdoc published at https://getsentry.github.io/relay/relay_event_schema/protocol/), data categories in `relay-base-schema/src/data_category.rs`, size limits in `relay-config/src/config.rs`.
 
 ## 10. Prior art on custom Sentry-compatible ingest
@@ -590,7 +590,7 @@ This means nashgit's own server logs can go into the same store by emitting `log
 - **Bugsink** (Python/Django, the thing being replaced) is the best-documented independent implementation: `bugsink/ingest` views, `KEEP_ENVELOPES` debug setting, `VALIDATE_ON_DIGEST` lenient mode; instructive bugs: PR #396 (must return `{"id":...}` JSON, 2026-06), PR #435 (tolerate missing event timestamp, non-UTF-8 envelope headers, 2026-07). GlitchTip (Django) is the other mature one.
 - urgentry.com's envelope guide (https://urgentry.com/guides/fundamentals/what-is-a-sentry-envelope/) is an accurate third-party summary: "the practical compatibility claim is that the envelope endpoint parses every standard item type, returns the right status codes, and emits the right rate-limit header."
 
-## 11. Minimal conformance checklist for nashgit
+## 11. Minimal conformance checklist for nashcode
 
 1. `POST /api/<pid>/envelope/` → decompress (gzip/deflate/br/zstd by `content-encoding`) → split envelope → auth from header|query|`dsn` envelope header → map `sentry_key`→project, check `pid` → store items → `200 {"id":"<event_id>"}`.
 2. Never reject unknown item types; never require `length` (implicit-length items exist); tolerate both timestamp formats; tolerate missing envelope `event_id` by falling back to the payload's.
@@ -630,12 +630,12 @@ This means nashgit's own server logs can go into the same store by emitting `log
 - Send endpoint: POST https://api.pushover.net/1/messages.json over HTTPS; required params token, user, message; optional title, url, url_title, priority, sound, timestamp, device, html/monospace, ttl, tags, attachment; form-encoded, multipart, or JSON (Content-Type: application/json) all accepted (docs read 2026-08-18).
 - Hard size limits: message 1024 UTF-8 characters (each up to 4 bytes), title 250 chars, url 512 chars, url_title 100 chars, attachment 5 MB; Pushover rejects empty messages.
 - Priorities: -2 silent (badge only), -1 no sound/vibe, 0 default (quiet hours downgrade it to -1), 1 bypasses quiet hours and shows red, 2 emergency repeats every `retry` seconds (min 30) until acknowledged or `expire` seconds (max 10800, hard cap 50 retries) and returns a `receipt`.
-- Emergency (2) extras: optional `callback` URL must be reachable from the public Internet — useless on a tailnet-only nashgit, so poll GET /1/receipts/{receipt}.json instead; cancel early via POST /1/receipts/{receipt}/cancel.json or POST /1/receipts/cancel_by_tag/{tag}.json (send `tags` at create time).
+- Emergency (2) extras: optional `callback` URL must be reachable from the public Internet — useless on a tailnet-only nashcode, so poll GET /1/receipts/{receipt}.json instead; cancel early via POST /1/receipts/{receipt}/cancel.json or POST /1/receipts/cancel_by_tag/{tag}.json (send `tags` at create time).
 - Since May 1, 2026 quotas are per ACCOUNT, not per application: 10,000 free messages/month pooled across unlimited registered apps (Teams: 25,000), reset 00:00 Central on the 1st; when exhausted ALL the account's apps get HTTP 429 until reset or upgrade — so per-project app tokens no longer buy extra quota.
 - Extra capacity is a one-time purchase drawn down after the free pool: 10k/$25, 25k/$57.50, 50k/$100, 100k/$150, 500k/$500 USD; auto-upgrade-when-low is available; one 'message' = one successful API call to one user (a group of N users costs N).
 - Every messages call returns X-Limit-App-Limit / X-Limit-App-Remaining / X-Limit-App-Reset headers (now reflecting the account pool), and GET /1/apps/limits.json?token=... returns the same as JSON.
 - Retry etiquette from the official docs: 200 + status:1 = delivered to queue, done; any 4xx / status!=1 = your input is wrong or quota is gone — repeating the identical request will NEVER work, do not retry; 5xx or no response = retry the same request but no sooner than 5 seconds; keep at most 2 concurrent connections and reuse the TCP connection, or Pushover rate-limits your IP; sustained 4xx floods earn a temporary, escalating IP block.
-- There is NO public API to register a Pushover application — app tokens are minted manually at https://pushover.net/apps/build — so nashgit's automated per-project DSN minting cannot mint per-project Pushover tokens; use one app token for the whole tracker.
+- There is NO public API to register a Pushover application — app tokens are minted manually at https://pushover.net/apps/build — so nashcode's automated per-project DSN minting cannot mint per-project Pushover tokens; use one app token for the whole tracker.
 - Sentry's own legacy plugin (getsentry/sentry 26.6.0, src/sentry_plugins/pushover/plugin.py) sets title = "{project.name}: {group.title}"[:250], message = event title + tags[:1024], url = deep link to the issue, url_title = "Issue Details", and uses a static per-project priority setting (no per-event level mapping), retry default 30, expire default 90.
 - Healthchecks.io's transport uses ONE site-wide app token, per-channel user key + separate down/up priorities, html=1, tags = check unique key so a recovery cancels emergency retries via cancel_by_tag without storing receipts, an internal token bucket of 6 messages per user key per minute, and treats HTTP 400 with user:invalid as a permanent failure (channel disabled).
 - Grafana's notifier truncates title/message/url in runes at 250/1024/512, substitutes "(no details)" for empty messages, uses separate priority AND sound for alerting vs resolved, and only sends retry/expire when priority==2; Uptime Kuma always sends retry=30 expire=3600, html=1, and a monitor deep link with url_title "Link to Monitor".
@@ -644,18 +644,18 @@ This means nashgit's own server logs can go into the same store by emitting `log
 - ntfy alternative in one line: self-hosted ntfy has no quota, but instant iOS delivery requires relaying through ntfy.sh (upstream-base-url) and the iOS app has documented reliability issues — Pushover's mature iOS client is the better fit and the user already runs it.
 
 ### Recommendations
-- Use ONE Pushover application token for all of nashgit (register once at https://pushover.net/apps/build or reuse the existing nac-bugs app token); there is no API to create app tokens, and since May 2026 extra tokens add zero quota. Store token + user key as two config values.
-- Copy Sentry's own payload convention: title = "{project}: {issue title}" (truncate 250 chars), message = exception value/culprit + a few tags (truncate 1024 chars, counted in characters not bytes, never empty — fall back to "(no details)"), url = deep link to the nashgit issue page (tailnet URL is fine — his devices are on the tailnet), url_title = "Open in nashgit", timestamp = event occurred-at.
+- Use ONE Pushover application token for all of nashcode (register once at https://pushover.net/apps/build or reuse the existing nac-bugs app token); there is no API to create app tokens, and since May 2026 extra tokens add zero quota. Store token + user key as two config values.
+- Copy Sentry's own payload convention: title = "{project}: {issue title}" (truncate 250 chars), message = exception value/culprit + a few tags (truncate 1024 chars, counted in characters not bytes, never empty — fall back to "(no details)"), url = deep link to the nashcode issue page (tailnet URL is fine — his devices are on the tailnet), url_title = "Open in nashcode", timestamp = event occurred-at.
 - Notify on issue STATE CHANGES only (new issue, regression, unmute — Bugsink semantics), never per event, and add a local token-bucket throttle (Healthchecks uses 6/user-key/minute) plus a per-issue cooldown; Pushover has no server-side frequency cap and one runaway loop can burn the whole 10k monthly pool in minutes.
 - Priority mapping: default 0 for a new error-level issue; 1 for fatal or a per-project "critical" flag; -1 (optionally with a ttl so it self-deletes) for info/log-derived notices; make priority 2 (emergency) a per-project opt-in with retry=60 expire=1800, tags=<issue-key>, and cancel_by_tag on issue resolve — and do NOT use the callback param (Pushover can't reach a tailnet URL); poll the receipt if ack state matters.
-- Retry policy in the sender: queue outbound pushes in SQLite; on 5xx/timeout retry with backoff starting at >=5 s; on any 4xx (including 429) never retry the same payload — on 429 park the queue until the X-Limit-App-Reset timestamp and show "quota exhausted" in the nashgit UI; on 400 user-invalid mark the channel broken. Single sender task with reqwest keep-alive satisfies the 2-connection rule for free.
-- Track X-Limit-App-Remaining from every response (or poll GET /1/apps/limits.json) and surface the monthly budget in the nashgit UI; consider warning yourself via a -1 priority push at, say, 20% remaining.
+- Retry policy in the sender: queue outbound pushes in SQLite; on 5xx/timeout retry with backoff starting at >=5 s; on any 4xx (including 429) never retry the same payload — on 429 park the queue until the X-Limit-App-Reset timestamp and show "quota exhausted" in the nashcode UI; on 400 user-invalid mark the channel broken. Single sender task with reqwest keep-alive satisfies the 2-connection rule for free.
+- Track X-Limit-App-Remaining from every response (or poll GET /1/apps/limits.json) and surface the monthly budget in the nashcode UI; consider warning yourself via a -1 priority push at, say, 20% remaining.
 - Do not push for server-log ingestion at all — logs are stored and browsable; only error-tracker state changes deserve a phone buzz.
 - Use a single user key now; if Rob should get alerts later, swap in a delivery group key (Groups API is programmatic, the swap is transparent to the sending code) and accept that each member doubles quota burn.
 
 ### Detail
 
-## Pushover as the sole notification channel for nashgit's error tracker
+## Pushover as the sole notification channel for nashcode's error tracker
 
 All facts below verified against pushover.net official docs and support KB (Knowledge Base) on 2026-08-18, plus primary source code of four integrations.
 
@@ -677,7 +677,7 @@ All facts below verified against pushover.net official docs and support KB (Know
 | 1 | Bypasses quiet hours, always sounds, highlighted red. |
 | 2 | Like 1, plus repeats until acknowledged. |
 
-**Emergency (2)**: must supply `retry` (seconds between re-alerts, min 30) and `expire` (max 10,800 s = 3 h; total retries hard-capped at 50). Response includes a `receipt`. Status: `GET /1/receipts/{receipt}.json?token=...` (acknowledged, acknowledged_by, expired, etc.). Optional `callback` URL gets a POST when acknowledged — **but Pushover's servers must reach it from the public Internet, so a tailnet-only nashgit cannot use callbacks; poll the receipt instead**. Cancel early: `POST /1/receipts/{receipt}/cancel.json`, or send `tags=<issue-key>` at create time and `POST /1/receipts/cancel_by_tag/{tag}.json` — Healthchecks uses exactly this to stop the siren when a check recovers, with zero receipt storage. First group member to acknowledge cancels retries for everyone.
+**Emergency (2)**: must supply `retry` (seconds between re-alerts, min 30) and `expire` (max 10,800 s = 3 h; total retries hard-capped at 50). Response includes a `receipt`. Status: `GET /1/receipts/{receipt}.json?token=...` (acknowledged, acknowledged_by, expired, etc.). Optional `callback` URL gets a POST when acknowledged — **but Pushover's servers must reach it from the public Internet, so a tailnet-only nashcode cannot use callbacks; poll the receipt instead**. Cancel early: `POST /1/receipts/{receipt}/cancel.json`, or send `tags=<issue-key>` at create time and `POST /1/receipts/cancel_by_tag/{tag}.json` — Healthchecks uses exactly this to stop the siren when a check recovers, with zero receipt storage. First group member to acknowledge cancels retries for everyone.
 
 **When would an error tracker use 2?** Only as an explicit per-project "page me" escalation (e.g. fatal-level events in a production project), Healthchecks/Grafana style — never as the default for errors. If used: `retry=60, expire=1800` is a sane profile; `tags` = issue key; fire `cancel_by_tag` when the issue is resolved. `ttl` is ignored at priority 2.
 
@@ -694,9 +694,9 @@ All facts below verified against pushover.net official docs and support KB (Know
 
 ### 4. App registration: one token vs per-project tokens
 
-- Registration is free at https://pushover.net/apps/build: you set a name (the default message title) and an icon, and get a 30-char token. **There is no public API to register applications** — it is a manual web flow. nashgit mints DSNs (Data Source Names — the Sentry SDK's project ingest URL+key) programmatically, so it cannot mint matching Pushover tokens.
+- Registration is free at https://pushover.net/apps/build: you set a name (the default message title) and an icon, and get a 30-char token. **There is no public API to register applications** — it is a manual web flow. nashcode mints DSNs (Data Source Names — the Sentry SDK's project ingest URL+key) programmatically, so it cannot mint matching Pushover tokens.
 - Since May 2026, per-project tokens no longer add quota (all pooled). What they still buy: per-project icon/name on the phone and per-app usage graphs on the dashboard. What they cost: a manual registration step per project and N secrets instead of 1.
-- **Verdict**: one application token named "nashgit" (or reuse the existing nac-bugs one), configured once; put the project name in the `title`. This is exactly Healthchecks' model (single `PUSHOVER_API_TOKEN` site-wide, per-channel user keys).
+- **Verdict**: one application token named "nashcode" (or reuse the existing nac-bugs one), configured once; put the project name in the `title`. This is exactly Healthchecks' model (single `PUSHOVER_API_TOKEN` site-wide, per-channel user keys).
 - **User key vs delivery group**: a single user key suffices for a solo operator. A delivery group key (manageable via the Groups API, which unlike app registration IS programmatic) is drop-in compatible in the `user` param and lets you add a second person (Rob) later without config changes — but doubles quota burn per alert, and for emergency priority the first acknowledger silences everyone.
 
 ### 5. Error handling and retry etiquette (official "Being Friendly to our API")
@@ -720,7 +720,7 @@ All facts below verified against pushover.net official docs and support KB (Know
 
 **Grafana** (`grafana/alerting/receivers/pushover/v1/pushover.go`): truncates title/message/url **in runes** at 250/1024/512 and logs when it truncates; replaces an empty message with `"(no details)"` because Pushover rejects empty messages; separate priority AND sound for alerting vs resolved states; writes `retry`/`expire` only when priority == 2; multipart form; optional image attach self-capped at 2 MB.
 
-**Synthesized mapping for nashgit** (drawing on all four): notify on issue *state change* (new issue, regression, unmute — Bugsink's exact alert semantics), never per event. Map: new error-level issue → 0; fatal / prod-critical → 1 (2 only as per-project opt-in paging); regression → 0 or 1; info/log-derived → -1 with a `ttl` so noise self-deletes. Distinct `sound` per severity is a cheap UX win (`siren` for fatal). Set `timestamp` to the event time so delayed ingestion still shows honest times. `monospace=1` suits a one-line stack frame; you cannot combine it with `html=1`.
+**Synthesized mapping for nashcode** (drawing on all four): notify on issue *state change* (new issue, regression, unmute — Bugsink's exact alert semantics), never per event. Map: new error-level issue → 0; fatal / prod-critical → 1 (2 only as per-project opt-in paging); regression → 0 or 1; info/log-derived → -1 with a `ttl` so noise self-deletes. Distinct `sound` per severity is a cheap UX win (`siren` for fatal). Set `timestamp` to the event time so delayed ingestion still shows honest times. `monospace=1` suits a one-line stack frame; you cannot combine it with `html=1`.
 
 ### 7. ntfy in one line
 
@@ -747,13 +747,13 @@ Self-hosted ntfy would kill the quota and the third-party dependency, but instan
 ## Log ingestion and storage
 
 ### Key facts
-- The Sentry Logs wire protocol is stable (spec v2.2.0 at develop.sentry.dev): a `log` envelope item on the SAME /api/<id>/envelope/ endpoint nashgit already ingests, content-type application/vnd.sentry.items.log+json, with an `items` array of up to 100 logs per envelope; each log = {timestamp, trace_id, span_id, level, body, severity_number 1-24, attributes:{k:{value,type}}}.
+- The Sentry Logs wire protocol is stable (spec v2.2.0 at develop.sentry.dev): a `log` envelope item on the SAME /api/<id>/envelope/ endpoint nashcode already ingests, content-type application/vnd.sentry.items.log+json, with an `items` array of up to 100 logs per envelope; each log = {timestamp, trace_id, span_id, level, body, severity_number 1-24, attributes:{k:{value,type}}}.
 - Severity levels are OTel-aligned: six levels trace/debug/info/warn/error/fatal mapping to OpenTelemetry SeverityNumber ranges 1-24, so a Sentry-logs table and an OTLP-logs table can share one schema.
 - SDK support is broad in 2026: sentry-python >=2.35.0, sentry-javascript >=9.41.0 (enableLogs), sentry-rust >=0.42.0 (logs on by default, current 0.49.1), sentry-ruby >=5.24.0 / sentry-rails >=5.27.0 (5.28.0 auto-enables Rails structured logging).
 - Breaking change 5 days ago: sentry-python 2.68.0 (2026-08-13) made enable_logs a no-op; sentry_sdk.logger.* now always sends, and stdlib-logging/Loguru forwarding requires explicit LoggingIntegration(capture_sentry_logs=True) / LoguruIntegration(capture_sentry_logs=True) (default False).
-- For Rust projects, sentry-tracing (feature "logs") captures tokio-rs/tracing events as Sentry structured logs with tracing fields as queryable attributes — so nashgit's own tracing output can flow to nashgit over its own DSN.
+- For Rust projects, sentry-tracing (feature "logs") captures tokio-rs/tracing events as Sentry structured logs with tracing fields as queryable attributes — so nashcode's own tracing output can flow to nashcode over its own DSN.
 - Sentry Logs alone does NOT capture system-level server logs (journald, nginx, cron): there is no official journald->Sentry shipper, and Sentry's own open "Log Drain Support" issue (getsentry/sentry#91726) confirms non-SDK ingestion is unsolved on their side except via OTLP.
-- Sentry itself now ingests OTLP logs (open beta) at /api/<project_id>/integration/otlp/v1/logs authenticated by `x-sentry-auth: sentry sentry_key=<dsn-public-key>` (Relay PR #5130, merged 2025-09-15) — copying this exact path+auth shape makes nashgit both Sentry-compatible and OTLP-compatible with the DSN key as the token.
+- Sentry itself now ingests OTLP logs (open beta) at /api/<project_id>/integration/otlp/v1/logs authenticated by `x-sentry-auth: sentry sentry_key=<dsn-public-key>` (Relay PR #5130, merged 2025-09-15) — copying this exact path+auth shape makes nashcode both Sentry-compatible and OTLP-compatible with the DSN key as the token.
 - A minimal OTLP/HTTP logs receiver in Rust is small: POST /v1/logs, body ExportLogsServiceRequest, decoded with the opentelemetry-proto crate (features gen-tonic-messages+logs gives prost protobuf decode; with-serde gives spec-compliant JSON decode); Vector's own OTLP HTTP source is Rust prior art.
 - Journald shipping on one VPS is a solved agent problem: Vector's journald source -> stable `http` sink posting NDJSON to any endpoint (the documented Honeybadger recipe), or fluent-bit systemd input -> opentelemetry output; Vector's native `opentelemetry` sink is still beta (OTLP decoding support announced 2025-09-23).
 - Every small log vendor converges on bespoke HTTP JSON: Better Stack = POST one JSON object/array with Bearer token, Axiom = POST /v1/datasets/{name}/ingest with JSON/NDJSON, Seq = POST /ingest/clef with CLEF NDJSON (@t, @mt, @l reified fields, X-Seq-ApiKey header) — a ~50-line endpoint pattern proven by all three.
@@ -762,25 +762,25 @@ Self-hosted ntfy would kill the quota and the third-party dependency, but instan
 - Recommended combination: (1) accept the `log` envelope item on the existing DSN endpoint — near-free since envelope parsing exists, covers everything built with a Sentry SDK; (2) add ONE bespoke NDJSON POST /api/<project_id>/logs authenticated by the same DSN public key for journald/curl/cron/Vector — everything else (full OTLP receiver) can wait until a standard agent is genuinely needed.
 
 ### Recommendations
-- Implement Sentry `log` envelope item ingestion on the existing /api/<id>/envelope/ endpoint first: parse item type "log" (content-type application/vnd.sentry.items.log+json), insert the items array as rows in one transaction — this makes every existing nashgit DSN a log sink for official SDKs with no new auth or endpoint.
+- Implement Sentry `log` envelope item ingestion on the existing /api/<id>/envelope/ endpoint first: parse item type "log" (content-type application/vnd.sentry.items.log+json), insert the items array as rows in one transaction — this makes every existing nashcode DSN a log sink for official SDKs with no new auth or endpoint.
 - Add a single bespoke NDJSON endpoint POST /api/<project_id>/logs authenticated by the project's DSN public key, with CLEF-style fields (ts, level, message, arbitrary attributes), for journald/curl/cron/Vector traffic; document a copy-paste Vector journald->http-sink config per project the way DSNs are handed out today.
 - Store logs in a SEPARATE SQLite file from the error-events DB: table (project_id, ts, severity_number, level, body, attributes JSON, trace_id, span_id, source), WAL mode, batched inserts, FTS5 external-content table over body with triggers, nightly DELETE by per-project retention_days plus incremental_vacuum.
 - Reuse the OTel severity model (levels trace..fatal, severity_number 1-24) in the schema so a future OTLP receiver needs no migration.
 - Skip a full OTLP/HTTP receiver for now; if standard-agent compatibility is later needed, implement it at Sentry's own beta path shape /api/<project_id>/integration/otlp/v1/logs with x-sentry-auth using the opentelemetry-proto crate (features gen-tonic-messages, logs, with-serde).
 - In wiring docs/skills, use the post-2.68.0 Python API: sentry_sdk.logger.* works unconditionally, and stdlib-logging forwarding needs LoggingIntegration(capture_sentry_logs=True) — do NOT document enable_logs, it is a no-op as of 2026-08-13.
-- For nashgit's own logs and any Rust project, add the sentry-tracing subscriber layer with the `logs` feature so tracing events land as structured logs on the project DSN.
+- For nashcode's own logs and any Rust project, add the sentry-tracing subscriber layer with the `logs` feature so tracing events land as structured logs on the project DSN.
 - Keep Pushover alerts bound to error events only; at most offer per-project opt-in alerting on fatal-severity logs, never per-log notification.
 
 ### Detail
 
-# Log ingestion for nashgit — research findings (2026-08-18)
+# Log ingestion for nashcode — research findings (2026-08-18)
 
 Abbreviations used: DSN (Data Source Name — the per-project Sentry ingest URL+key), OTLP (OpenTelemetry Protocol — the vendor-neutral telemetry wire format), OTel (OpenTelemetry), NDJSON (Newline-Delimited JSON — one JSON object per line), CLEF (Compact Log Event Format — Seq's NDJSON log schema), FTS5 (Full-Text Search 5 — SQLite's search extension), WAL (Write-Ahead Logging — SQLite's concurrent-write journal mode).
 
 ## 1. Sentry Logs over the existing DSN/envelope endpoint
 
 ### Wire format (spec v2.2.0, status "stable", develop.sentry.dev)
-Logs ride the SAME envelope endpoint nashgit already implements for errors. One new item type:
+Logs ride the SAME envelope endpoint nashcode already implements for errors. One new item type:
 
 - Item header: `{"type":"log","item_count":N,"content_type":"application/vnd.sentry.items.log+json"}`
 - Payload: `{"items":[...]}` (optionally `version` + `ingest_settings` since spec 1.17.0). At most one `log` item per envelope; all logs for a flush are batched into it.
@@ -801,14 +801,14 @@ Logs ride the SAME envelope endpoint nashgit already implements for errors. One 
 ```
 - Severity: six levels `trace|debug|info|warn|error|fatal`, mapped to OTel SeverityNumber ranges 1–24 (trace 1–4 … fatal 21–24). SDKs set the lowest number of the range. This deliberate OTel alignment means one storage schema serves both Sentry Logs and OTLP logs.
 - Attribute model: flat map of `{value, type}` where type is string/integer/double/boolean. Well-known keys: `sentry.environment`, `sentry.release`, `sentry.sdk.name/version`, `sentry.message.template` / `sentry.message.parameter.X`, `server.address` (backend SDKs), `sentry.origin` (`auto.log.<lib>` for integration-forwarded logs), `user.id/name/email` (PII-gated), `sentry.timestamp.sequence` (ordering on frozen-clock runtimes like Cloudflare Workers).
-- Batching (spec-mandated): SDKs MUST buffer; typical flush at 100 items or 5 s; MUST NOT exceed 100 logs/envelope; hard cap 1000 queued. So nashgit's receiver gets nice batches, not one POST per line.
-- Rate-limit category `log_item` (and `log_byte` for client reports) — nashgit can ignore or implement later.
+- Batching (spec-mandated): SDKs MUST buffer; typical flush at 100 items or 5 s; MUST NOT exceed 100 logs/envelope; hard cap 1000 queued. So nashcode's receiver gets nice batches, not one POST per line.
+- Rate-limit category `log_item` (and `log_byte` for client reports) — nashcode can ignore or implement later.
 - There is also a legacy `otel_log` envelope item (OTLP LogRecord as JSON inside an envelope), documented as appendix-only; SDKs are required to use `log`.
 
 ### SDK support matrix (verified against docs/releases, 2026-08)
-- **Python**: logs since sentry-sdk **2.35.0**. BREAKING as of **2.68.0 (2026-08-13)**: `enable_logs` and `enable_metrics` are now **no-ops** (dropped next major). `sentry_sdk.logger.info(...)` etc. now just works, always. Forwarding stdlib `logging` or Loguru requires explicit opt-in: `LoggingIntegration(capture_sentry_logs=True)` / `LoguruIntegration(capture_sentry_logs=True)` — **default False**. So "add the Sentry SDK and all Python logs flow" needs that one flag, and nashgit's wiring docs (nac-bugs-wire successor) must use the new option, not `enable_logs`.
+- **Python**: logs since sentry-sdk **2.35.0**. BREAKING as of **2.68.0 (2026-08-13)**: `enable_logs` and `enable_metrics` are now **no-ops** (dropped next major). `sentry_sdk.logger.info(...)` etc. now just works, always. Forwarding stdlib `logging` or Loguru requires explicit opt-in: `LoggingIntegration(capture_sentry_logs=True)` / `LoguruIntegration(capture_sentry_logs=True)` — **default False**. So "add the Sentry SDK and all Python logs flow" needs that one flag, and nashcode's wiring docs (nac-bugs-wire successor) must use the new option, not `enable_logs`.
 - **JavaScript**: current docs say logs supported in **9.41.0+** (that release, 2025-07-24, promoted `enableLogs`/`beforeSendLog` out of `_experiments`). `Sentry.logger.*` API, `consoleLoggingIntegration` to forward `console.*`, Pino/Winston transports, CDN bundle variants with logs included.
-- **Rust**: logs since sentry **0.42.0**; current **0.49.1** (2026-08-03). The `logs` cargo feature is in default features ("logs are enabled by default"). Macros `logger_trace!` … `logger_fatal!` with `key = value` attribute syntax. Crucially, **sentry-tracing** (feature `logs`) captures `tracing` events as Sentry structured logs with tracing fields as searchable attributes — so any tokio/tracing app (nashgit itself included) gets its logs shipped by adding one subscriber layer.
+- **Rust**: logs since sentry **0.42.0**; current **0.49.1** (2026-08-03). The `logs` cargo feature is in default features ("logs are enabled by default"). Macros `logger_trace!` … `logger_fatal!` with `key = value` attribute syntax. Crucially, **sentry-tracing** (feature `logs`) captures `tracing` events as Sentry structured logs with tracing fields as searchable attributes — so any tokio/tracing app (nashcode itself included) gets its logs shipped by adding one subscriber layer.
 - **Ruby/Rails**: logs since sentry-ruby **5.24.0**, Rails **5.27.0**; `config.enable_logs = true` plus `Sentry.logger`; `config.enabled_patches << :logger` forwards all stdlib `Logger` instances; **5.28.0** (2025-09-26) auto-enables Rails structured logging (`Rails.logger` → Sentry) when `enable_logs` is true.
 
 ### Is Sentry Logs enough for "all my server logs"?
@@ -821,7 +821,7 @@ For **application** logs: yes — every language Matthias uses has a forwarding 
 
 ### Minimal receiver in Rust
 - The **opentelemetry-proto** crate (0.32.0) with `gen-tonic-messages` + `logs` gives the prost types; `prost::Message::decode` handles protobuf; feature `with-serde` adds spec-compliant JSON serde (verified by the crate's own `json_serde.rs` tests against ExportLogsServiceRequest). A topcoat handler that checks content-type, decodes, and flattens resource+scope attributes into rows is on the order of 100–150 lines. Vector's `src/sources/opentelemetry/http.rs` is working Rust prior art.
-- **Key convergence fact**: Sentry now ingests OTLP logs itself (open beta) at `https://oX.ingest.sentry.io/api/<project_id>/integration/otlp/v1/logs` with header `x-sentry-auth: sentry sentry_key=<dsn-public-key>` (Relay PR #5130, merged 2025-09-15). If nashgit ever implements OTLP, copying this exact path + auth shape means the existing per-project DSN key doubles as the OTLP token, and Sentry's own docs/tooling conventions apply unchanged.
+- **Key convergence fact**: Sentry now ingests OTLP logs itself (open beta) at `https://oX.ingest.sentry.io/api/<project_id>/integration/otlp/v1/logs` with header `x-sentry-auth: sentry sentry_key=<dsn-public-key>` (Relay PR #5130, merged 2025-09-15). If nashcode ever implements OTLP, copying this exact path + auth shape means the existing per-project DSN key doubles as the OTLP token, and Sentry's own docs/tooling conventions apply unchanged.
 
 ### Who can ship logs via OTLP
 - OTel Collector (heavy for one VPS), **Vector** (journald source → `opentelemetry` sink, but that sink is **beta**; OTLP decoding highlight dated 2025-09-23), **fluent-bit** (systemd input + opentelemetry output; OTLP logs since PR #5747, 2022), **Grafana Alloy** (loki.source.journal + otelcol.exporter.otlphttp), and every OTel language SDK (`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` env var).
@@ -833,7 +833,7 @@ All three small vendors do essentially the same thing:
 - **Axiom**: `POST /v1/datasets/{dataset}/ingest`, Bearer token, JSON / NDJSON / CSV.
 - **Seq**: `POST /ingest/clef`, NDJSON in CLEF — reified fields `@t` (timestamp), `@mt` (message template), `@m` (message), `@l` (level), `@x` (exception), everything else = properties; API key via `X-Seq-ApiKey` header. CLEF is a tiny public spec (clef-json.org) worth borrowing field names from.
 
-Verdict: yes — for one person's servers a bespoke `POST /logs` with a token is the pragmatic industry-standard answer, ~50 lines of handler. Its only real cost is that nothing speaks it out of the box, so every producer needs a curl/Vector/shipper snippet — which the nashgit UAT/docs pages can hand out per project, exactly like DSNs today.
+Verdict: yes — for one person's servers a bespoke `POST /logs` with a token is the pragmatic industry-standard answer, ~50 lines of handler. Its only real cost is that nothing speaks it out of the box, so every producer needs a curl/Vector/shipper snippet — which the nashcode UAT/docs pages can hand out per project, exactly like DSNs today.
 
 ## Storage: logs in SQLite
 - **Prior art says it works at this scale.** ChrisLog (Go: syslog/GELF/HTTP → SQLite, "one container, one binary, one file"), cortex (Rust: syslog + OTLP + Docker logs → SQLite with FTS), SolidLog (Rails HTTP ingestion + FTS, SQLite/PG/MySQL), loglens (multi-GB Laravel logs on a persistent FTS5 index), timeless_logs (Elixir: compressed raw blocks + SQLite index, ~12.8x compression), repartee (SQLite WAL + FTS + `retention_days` pruning). Counterpoint: **Seq** built a custom Rust storage engine because generic embedded engines didn't fit their write/query pattern — but that's at commercial multi-tenant volumes, not one tailnet.
@@ -842,14 +842,14 @@ Verdict: yes — for one person's servers a bespoke `POST /logs` with a token is
 - **Retention**, three proven strategies in ascending machinery:
   1. **DELETE + incremental vacuum**: nightly `DELETE FROM logs WHERE ts < cutoff` (per-project retention_days), with `PRAGMA auto_vacuum=INCREMENTAL` set at DB creation and `PRAGMA incremental_vacuum(N)` afterwards — or skip vacuum entirely and let SQLite reuse free pages (file size plateaus). Simplest; fine at this volume.
   2. **One DB file (or table) per period**: drop the whole file/table to expire a day/week — instant, no vacuum, no fragmentation (timeless_logs' block model is this idea). Only worth it if volume surprises.
-  3. Keep logs in a **separate DB file from the error tracker** regardless, so log churn never bloats or write-locks the events DB — Bugsink's own "vacuum files: DB timeouts" issue (#372) is a cautionary tale about mixing heavy churn with app data. (No sign in Bugsink's docs, site, or issue tracker that Bugsink ingests Sentry Logs at all, as of 2026-08 — absorbing it into nashgit loses nothing on the logs front.)
+  3. Keep logs in a **separate DB file from the error tracker** regardless, so log churn never bloats or write-locks the events DB — Bugsink's own "vacuum files: DB timeouts" issue (#372) is a cautionary tale about mixing heavy churn with app data. (No sign in Bugsink's docs, site, or issue tracker that Bugsink ingests Sentry Logs at all, as of 2026-08 — absorbing it into nashcode loses nothing on the logs front.)
 
 ## Recommendation
 **Minimal combination, two pieces:**
-1. **Accept the Sentry `log` envelope item on the existing DSN/envelope endpoint** (primary path). It is one new `match` arm in envelope parsing plus one table. Every project already holding a nashgit DSN then gets logs "for free" from unmodified official SDKs — Python (`sentry_sdk.logger` + `LoggingIntegration(capture_sentry_logs=True)`), JS (`enableLogs`), Rails (`enable_logs` + logger patch), and Rust via the sentry-tracing layer. This is the highest leverage per line of code, and it inherits trace_id correlation with the error events nashgit already stores.
+1. **Accept the Sentry `log` envelope item on the existing DSN/envelope endpoint** (primary path). It is one new `match` arm in envelope parsing plus one table. Every project already holding a nashcode DSN then gets logs "for free" from unmodified official SDKs — Python (`sentry_sdk.logger` + `LoggingIntegration(capture_sentry_logs=True)`), JS (`enableLogs`), Rails (`enable_logs` + logger patch), and Rust via the sentry-tracing layer. This is the highest leverage per line of code, and it inherits trace_id correlation with the error events nashcode already stores.
 2. **Add one bespoke NDJSON endpoint** — `POST /api/<project_id>/logs`, auth = the same DSN public key (header or query), body = NDJSON with CLEF-ish reified fields (`@t`/`ts`, `level`, `message`, rest = attributes), mapped into the same table with `source='http'`. This is the catch-all for journald (Vector journald source → stable http sink, per the Honeybadger recipe), nginx, cron jobs, and shell one-liners (`curl -d`). ~50 lines.
 
-**Defer OTLP.** A full OTLP/HTTP receiver is only worth it when a standard agent (fluent-bit/Alloy/OTel SDK) must point at nashgit unmodified. When that day comes, implement it at Sentry's own path shape `/api/<project_id>/integration/otlp/v1/logs` with `x-sentry-auth: sentry sentry_key=...`, using opentelemetry-proto (`gen-tonic-messages`,`logs`,`with-serde`) — severity numbers and attributes will drop into the same table because the Sentry log model was copied from OTel's.
+**Defer OTLP.** A full OTLP/HTTP receiver is only worth it when a standard agent (fluent-bit/Alloy/OTel SDK) must point at nashcode unmodified. When that day comes, implement it at Sentry's own path shape `/api/<project_id>/integration/otlp/v1/logs` with `x-sentry-auth: sentry sentry_key=...`, using opentelemetry-proto (`gen-tonic-messages`,`logs`,`with-serde`) — severity numbers and attributes will drop into the same table because the Sentry log model was copied from OTel's.
 
 **Notifications**: keep Pushover wired to error EVENTS only by default; optionally allow per-project opt-in alerts on `fatal`-level logs — log volume makes per-log notification untenable.
 
@@ -894,11 +894,11 @@ Verdict: yes — for one person's servers a bespoke `POST /logs` with a token is
 
 ### Key facts
 - Sentry's default grouping priority is: explicit `fingerprint` field, then stack trace (only in-app frames; per frame: module, normalized filename, normalized context line — never line numbers), then exception type+value, then message.
-- The Sentry SDK event payload's `fingerprint` field is a list of strings with a `{{ default }}` sentinel meaning 'extend the server's default grouping'; Bugsink, GlitchTip, and Sentry all implement the same substitution, so nashgit must honor it for SDK compatibility.
+- The Sentry SDK event payload's `fingerprint` field is a list of strings with a `{{ default }}` sentinel meaning 'extend the server's default grouping'; Bugsink, GlitchTip, and Sentry all implement the same substitution, so nashcode must honor it for SDK compatibility.
 - Bugsink's entire default grouper (v2, current) is: exception type + message value normalized by Sentry's vendored parameterizer (which replaces email/url/hostname/ip/uuid/sha1/md5/date/duration/hex/float/int/quoted_str/bool with placeholders, trimmed to 2 lines) — no stack-trace hashing at all; v1 additionally appended the transaction name.
 - GlitchTip's fingerprint is `md5(title + culprit + event_type)` where title = 'Type: first line of value' (last exception in chain) and culprit = culprit || transaction || last in-app frame as module.function — also no multi-frame stack hashing.
 - Both tools group on the LAST exception in the chain, trim value to 1024 / type to 128 chars, default type to 'Error', and substitute the crash-location function name for the type when `mechanism.synthetic` is set.
-- Bugsink versions its grouping mechanisms (bugsink-v1/bugsink-v2) with per-project opt-in and a 30-day transition, because changing the algorithm in place splits every open issue — nashgit should store a grouping-key string plus a mechanism-version tag per issue from day one.
+- Bugsink versions its grouping mechanisms (bugsink-v1/bugsink-v2) with per-project opt-in and a 30-day transition, because changing the algorithm in place splits every open issue — nashcode should store a grouping-key string plus a mechanism-version tag per issue from day one.
 - Regression handling is universal: an event for a resolved issue reopens it and (in Bugsink, Errbit, Honeybadger, Sentry) always notifies; release-aware resolution ('resolved in release X') only counts events from later releases as regressions.
 - Bugsink's alert policy is exactly three per-project booleans, all default true — alert_on_new_issue, alert_on_regression, alert_on_unmute — and muting supports 'for 1 day/week/month/3 months' or 'until N events per period' (presets: 5/hour, 5/24h, 100/24h); volume-based unmute doubles as the spike alert.
 - Bugsink checks unmute-after only on ingest, so muted issues that stop erroring stay muted forever — mute-until means 'notify me only if this keeps happening'.
@@ -907,10 +907,10 @@ Verdict: yes — for one person's servers a bespoke `POST /logs` with a token is
 - Bugsink's retention default is 10,000 stored events per project with count-based (not time-based) eviction; GlitchTip instead keeps events 90 days (GLITCHTIP_RETENTION_DAYS).
 - Bugsink's eviction score = nonzero_leading_bits(rand*2*issue_event_count) + log4(age_hours+1), so high-volume issues lose events first and ~oldest go next; each run evicts min(max(5% of quota, overage), 500) events, and first-seen/regression trigger events are flagged never_evict.
 - Bugsink's ingest quota defaults (checked before parsing, returns HTTP 429): 1,000 events/5 min, 5,000/hour, 1,000,000/month per project and installation-wide, plus a global MAX_EMAILS_PER_HOUR of 60 as notification flood control.
-- The simplest credible fingerprint for nashgit, matching both small-tracker implementations: hash of (exception type from last chain entry, parameterized message value, transaction-or-crash-frame culprit), with explicit-fingerprint override — top-N in-app frame hashing is the optional precision upgrade Sentry/Honeybadger/Errbit use, at the cost of minified-JS and wrapper-frame failure modes.
+- The simplest credible fingerprint for nashcode, matching both small-tracker implementations: hash of (exception type from last chain entry, parameterized message value, transaction-or-crash-frame culprit), with explicit-fingerprint override — top-N in-app frame hashing is the optional precision upgrade Sentry/Honeybadger/Errbit use, at the cost of minified-JS and wrapper-frame failure modes.
 
 ### Recommendations
-- Implement grouping as a readable key string, not just a hash: `{type}: {parameterized_value}` (Bugsink v2 style), optionally `⋄ {transaction}`; store it with a mechanism-version tag (e.g. 'nashgit-v1') on each issue so the algorithm can evolve without splitting open issues.
+- Implement grouping as a readable key string, not just a hash: `{type}: {parameterized_value}` (Bugsink v2 style), optionally `⋄ {transaction}`; store it with a mechanism-version tag (e.g. 'nashcode-v1') on each issue so the algorithm can evolve without splitting open issues.
 - Port the message parameterization step (replace uuid/hex/int/float/ip/email/url/date/duration/quoted-str/bool with placeholders, keep first 2 non-empty lines) — it is the single change that makes message-based grouping hold up, and Bugsink ships Sentry's exact regex set to crib from.
 - Honor the SDK `fingerprint` array with `{{ default }}` substitution (join parts with a separator, substitute the default key) — unmodified official SDKs send it and users expect it.
 - Group on the LAST exception in the chain; use crash-location function name when mechanism.synthetic is set; treat non-exception events as a 'Log Message' type keyed by first message line; trim value/type to 1024/128 chars.
@@ -919,12 +919,12 @@ Verdict: yes — for one person's servers a bespoke `POST /logs` with a token is
 - Implement mute with Bugsink's two forms — mute-for (time) and mute-until (N events per period) — and evaluate unmute only on ingest so dead issues stay muted; send the unmute notification with the 'more than N events per period occurred' reason.
 - Add a global Pushover budget guard modeled on Bugsink's MAX_EMAILS_PER_HOUR=60: cap messages per hour (e.g. 10-20), send one final 'notifications suppressed, N pending — see dashboard' message when the cap trips; 10k/month ≈ 333/day so the trigger policy plus this cap leaves huge headroom.
 - For retention, copy Bugsink's shape: per-project max stored events (10k default), a cheap pre-parse quota gate returning 429 (per-5-min/hour/month counters), never-evict flags on first-seen/regression trigger events, and eviction that preferentially deletes events of high-volume issues and old epochs — the full irrelevance algorithm is ~400 lines in /tmp/bugsink-src/events/retention.py and ports cleanly to rusqlite.
-- Skip stack-trace-based hashing in v1; if issues over-split later, add an optional per-project 'hash top-5 in-app frames (module+function, no line numbers)' mechanism as nashgit-v2 — the versioned-mechanism field makes that a safe, deliberate migration.
+- Skip stack-trace-based hashing in v1; if issues over-split later, add an optional per-project 'hash top-5 in-app frames (module+function, no line numbers)' mechanism as nashcode-v2 — the versioned-mechanism field makes that a safe, deliberate migration.
 - Keep the cloned reference sources (/tmp/bugsink-src, /tmp/glitchtip-src) around while implementing; the load-bearing files are issues/grouping_mechanisms/, issues/utils.py, issues/regressions.py, ingest/views.py (digest + VBC), events/retention.py in Bugsink and apps/event_ingest/utils.py + apps/alerts/ in GlitchTip.
 
 ### Detail
 
-# Issue grouping, fingerprinting, and alert policy — prior art for nashgit's error tracker
+# Issue grouping, fingerprinting, and alert policy — prior art for nashcode's error tracker
 
 Research date: 2026-08-18. Sources: live code from the Bugsink repo (cloned at `/tmp/bugsink-src`, GitHub main) and GlitchTip backend (cloned at `/tmp/glitchtip-src`, GitLab master), Errbit main branch on GitHub, Sentry docs + Sentry source (master and the 23.12.1 tag), Honeybadger docs.
 
@@ -970,7 +970,7 @@ Where (`issues/utils.py`):
 - Title = `"{type}: {first line of value}"`.
 - `normalize_message_for_grouping` is **vendored verbatim from Sentry** (`/tmp/bugsink-src/sentry/at_597d25951d00/grouping/strategies/message.py`): trim to the first 2 non-empty lines, then replace `email, url, hostname, ip, uuid, sha1, md5, date, duration, hex, float, int, quoted_str, bool` with placeholders via Sentry's `Parameterizer`. This is the whole trick that makes message-based grouping credible — IDs, timestamps, and addresses no longer split issues.
 - **Explicit fingerprint support** (`get_key_with_mechanism_for_data`): if `data["fingerprint"]` exists, join the parts with `" ⋄ "`, substituting the default grouper string for `"{{ default }}"`.
-- **Versioned grouping mechanisms** (added July 2026, issues #440/#255): the grouping key per issue is computed by a named mechanism (`bugsink-v1`, `bugsink-v2`); changing the algorithm in place would split every open issue into "frozen before / fresh after", so projects opt in per-project with a 30-day transition period (`GROUPING_TRANSITION_PERIOD = timedelta(days=30)`). Lesson for nashgit: **store the grouping-mechanism version alongside the key from day one**.
+- **Versioned grouping mechanisms** (added July 2026, issues #440/#255): the grouping key per issue is computed by a named mechanism (`bugsink-v1`, `bugsink-v2`); changing the algorithm in place would split every open issue into "frozen before / fresh after", so projects opt in per-project with a 30-day transition period (`GROUPING_TRANSITION_PERIOD = timedelta(days=30)`). Lesson for nashcode: **store the grouping-mechanism version alongside the key from day one**.
 
 Bugsink docs (https://www.bugsink.com/docs/grouping/) confirm: factors are exception type+value (last in chain) and transaction; log messages are a separate class; a "Grouping" tab shows the computed grouper string per issue.
 
@@ -1002,7 +1002,7 @@ Called as `issue_hash = generate_hash(title, culprit, event.type, event.fingerpr
 
 So GlitchTip = **md5(type-and-message title + one location string + event class)**. Again: no multi-frame stack hashing, no line numbers, but — unlike Bugsink v2 — **no message parameterization**, so `"Timeout after 1523ms"` vs `"Timeout after 1611ms"` make two GlitchTip issues where Bugsink v2 makes one.
 
-**Convergent conclusion:** both open-source SQLite/Postgres-class trackers independently landed on *exception type + message + (maybe) one location string*, plus the explicit-fingerprint override. The simplest credible approximation for nashgit is exactly that, with Bugsink's parameterization step, which is the single highest-value addition. Hashing top-N in-app frames (module+function, never line numbers) is the optional precision upgrade — it is what Sentry/Honeybadger/Errbit do — but its failure modes (minified JS, wrapper frames, missing in_app flags across SDKs) are why the small trackers skipped it.
+**Convergent conclusion:** both open-source SQLite/Postgres-class trackers independently landed on *exception type + message + (maybe) one location string*, plus the explicit-fingerprint override. The simplest credible approximation for nashcode is exactly that, with Bugsink's parameterization step, which is the single highest-value addition. Hashing top-N in-app frames (module+function, never line numbers) is the optional precision upgrade — it is what Sentry/Honeybadger/Errbit do — but its failure modes (minified JS, wrapper frames, missing in_app flags across SDKs) are why the small trackers skipped it.
 
 ## 4. Honeybadger and Errbit (fingerprint + escalation ladders)
 
@@ -1073,7 +1073,7 @@ Each factor is toggleable per app; `backtrace_lines` can be capped to top-N. `fi
 
 **Honeybadger** (SaaS): retention is a per-project setting on the plan.
 
-For nashgit-on-SQLite the Bugsink model maps 1:1: per-project max event count (10k default), pinned first-seen/regression events, a coarse quota gate returning 429 in front of the digest path, and irrelevance-based eviction (or the simpler v0: delete oldest events of the biggest issues first, which is the same idea minus the elegance).
+For nashcode-on-SQLite the Bugsink model maps 1:1: per-project max event count (10k default), pinned first-seen/regression events, a coarse quota gate returning 429 in front of the digest path, and irrelevance-based eviction (or the simpler v0: delete oldest events of the biggest issues first, which is the same idea minus the elegance).
 
 ## Notes on verification
 
@@ -1101,39 +1101,39 @@ Every code claim above was read from the cloned repos (`/tmp/bugsink-src`, `/tmp
 - https://github.com/bugsink/bugsink/issues/440
 - https://glitchtip.com/documentation/error-tracking
 
-## Gap follow-up: How do Sentry SDK clients that are NOT on the tailnet reach nashgit's ingest endpoint — and what does the cuto
+## Gap follow-up: How do Sentry SDK clients that are NOT on the tailnet reach nashcode's ingest endpoint — and what does the cuto
 
 ### Key facts
-- A public HTTPS ingest edge is unavoidable: iOS apps on end users' phones and Cloudflare Workers cannot join a tailnet, so at least those two client classes must POST to a public endpoint no matter what nashgit does.
+- A public HTTPS ingest edge is unavoidable: iOS apps on end users' phones and Cloudflare Workers cannot join a tailnet, so at least those two client classes must POST to a public endpoint no matter what nashcode does.
 - Tailscale Funnel can only use <node>.<tailnet>.ts.net hostnames, only ports 443/8443/10000, and traffic is subject to non-configurable bandwidth limits; it is still marked beta (docs validated Jan 20, 2026) — so Funnel can never preserve the nac-bugs.fly.dev hostname, forcing DSN rotation across the whole fleet including shipped iOS binaries.
 - Funnel and Serve cannot share a port: whichever command ran last wins and a funneled port is completely public — so the safe layout is UI on `tailscale serve :443` and a separate ingest-only loopback listener funneled on :8443 (path-mounting works, but `--set-path` strips the mount prefix before proxying, per merged PR tailscale/tailscale#7334).
-- Sentry DSN semantics make hostname preservation the whole ballgame: the SDK builds `{PROTOCOL}://{HOST}{PATH}/api/{PROJECT_ID}/envelope/` from the DSN, auth is just the public `sentry_key` (query param or X-Sentry-Auth header), and the secret key is deprecated — so if nashgit imports Bugsink's existing project IDs + keys and something keeps answering at nac-bugs.fly.dev, zero clients need redeploying.
-- The cheapest hostname-preserving edge is to keep the existing `nac-bugs` Fly app but replace Bugsink with a tiny forwarder that joins the tailnet: Tailscale officially documents tailscaled-in-a-Fly-container (userspace networking + SOCKS5), and tsnet lets a single Go binary join the tailnet in-process with no daemon — the forwarder then reverse-proxies envelope POSTs to nashgit over the tailnet while nashgit stays loopback-bound behind tailscale serve.
+- Sentry DSN semantics make hostname preservation the whole ballgame: the SDK builds `{PROTOCOL}://{HOST}{PATH}/api/{PROJECT_ID}/envelope/` from the DSN, auth is just the public `sentry_key` (query param or X-Sentry-Auth header), and the secret key is deprecated — so if nashcode imports Bugsink's existing project IDs + keys and something keeps answering at nac-bugs.fly.dev, zero clients need redeploying.
+- The cheapest hostname-preserving edge is to keep the existing `nac-bugs` Fly app but replace Bugsink with a tiny forwarder that joins the tailnet: Tailscale officially documents tailscaled-in-a-Fly-container (userspace networking + SOCKS5), and tsnet lets a single Go binary join the tailnet in-process with no daemon — the forwarder then reverse-proxies envelope POSTs to nashcode over the tailnet while nashcode stays loopback-bound behind tailscale serve.
 - Fly's edge injects `Fly-Client-IP` with the real client IP, enabling per-IP rate limiting at the forwarder; behind Funnel, client-IP visibility is murkier (maintainer says tailscaled injects X-Forwarded-For for HTTP proxying, but FR #12972 asking to expose the funnel requestor's IP is still open) — Fly gives strictly better DoS tooling.
-- Browser SDK CORS contract (what nashgit's ingest must return): `Access-Control-Allow-Origin: *` on POST responses, `Access-Control-Expose-Headers: x-sentry-error, x-sentry-rate-limits, retry-after` (the SDK reads the last two), and an OPTIONS handler allowing method POST plus headers x-sentry-auth, x-requested-with, x-forwarded-for, origin, referer, accept, content-type, authentication, authorization, content-encoding, transfer-encoding with max-age 3600 — this is verbatim what official Relay's cors.rs does.
+- Browser SDK CORS contract (what nashcode's ingest must return): `Access-Control-Allow-Origin: *` on POST responses, `Access-Control-Expose-Headers: x-sentry-error, x-sentry-rate-limits, retry-after` (the SDK reads the last two), and an OPTIONS handler allowing method POST plus headers x-sentry-auth, x-requested-with, x-forwarded-for, origin, referer, accept, content-type, authentication, authorization, content-encoding, transfer-encoding with max-age 3600 — this is verbatim what official Relay's cors.rs does.
 - The browser SDK deliberately avoids preflight in the common path: fetch POST with no custom headers, auth moved into the query string (`?sentry_key=...&sentry_version=7`) precisely because X-Sentry-Auth would trigger OPTIONS (getsentry/sentry-javascript#1992); but preflights still occur in edge cases (Chrome CORS quirks, relay#1809), so the OPTIONS route is required, not optional.
 - The JS SDK `tunnel` option routes browser envelopes through the app's own same-origin backend, which converts every browser-side Next.js client into a server-side client — an alternative to CORS-on-the-public-edge for the web apps Matthias controls.
-- Official Sentry Relay in proxy mode forwards envelopes with minimal processing and no project-config fetch (no upstream registration), so it could sit in front of nashgit — but it must run somewhere public anyway (i.e., on Fly), it is memory-hungry, it historically dropped non-error item types in proxy mode, and neither Bugsink nor GlitchTip document Relay support; it solves nothing a 100-line forwarder doesn't.
-- Cloudflare Workers reaching a tailnet is not production-viable: the only tailnet-native path is @ts-edge/cloudflare (experimental WASM tailscale node in a Worker, v0.3.0, ~22 weekly downloads); Cloudflare's supported answer is Workers VPC (beta) which requires running cloudflared — a second overlay network — next to nashgit.
+- Official Sentry Relay in proxy mode forwards envelopes with minimal processing and no project-config fetch (no upstream registration), so it could sit in front of nashcode — but it must run somewhere public anyway (i.e., on Fly), it is memory-hungry, it historically dropped non-error item types in proxy mode, and neither Bugsink nor GlitchTip document Relay support; it solves nothing a 100-line forwarder doesn't.
+- Cloudflare Workers reaching a tailnet is not production-viable: the only tailnet-native path is @ts-edge/cloudflare (experimental WASM tailscale node in a Worker, v0.3.0, ~22 weekly downloads); Cloudflare's supported answer is Workers VPC (beta) which requires running cloudflared — a second overlay network — next to nashcode.
 - Tailnet-joining the server-side fleet (Fly apps via tailscaled sidecar, EC2 natively) works and is officially documented, but it only covers servers — it leaves browsers, Workers, and iOS stranded, so it cannot be the primary answer, only an optional optimization.
-- Bugsink upstream acknowledges DSN-preserving migration as a real pattern (open issue bugsink/bugsink#218: update a project's DSN so a replacement server at the old domain keeps old DSNs working) — the same trick in reverse is exactly what the nashgit cutover needs.
+- Bugsink upstream acknowledges DSN-preserving migration as a real pattern (open issue bugsink/bugsink#218: update a project's DSN so a replacement server at the old domain keeps old DSNs working) — the same trick in reverse is exactly what the nashcode cutover needs.
 - Because the DSN public key ships inside browsers and iOS binaries, it is a routing identifier, not a secret; public-edge defense must be quotas per key, request-size caps, unknown-key rejection at the forwarder (before traffic enters the tailnet), and per-IP throttling at the Fly edge.
 
 ### Recommendations
-- Choose the Fly forwarder topology: keep the existing nac-bugs Fly app, replace Bugsink's image with a small tsnet-based Go forwarder that joins the tailnet and reverse-proxies /api/{id}/envelope/ to nashgit over tailscale serve — this preserves every deployed DSN (hostname + key + project id) and requires zero client redeploys, which the iOS fleet makes near-mandatory.
-- Have nashgit's DSN minting accept explicit (project_id, sentry_key) pairs so Bugsink's existing projects can be imported verbatim before cutover; new projects get freshly minted keys.
-- Implement the browser CORS contract natively in nashgit's ingest routes, copied from Relay's cors.rs: ACAO *, allow-method POST, the 11-header allow list, expose x-sentry-error/x-sentry-rate-limits/retry-after, max-age 3600, plus an OPTIONS handler; accept sentry_key via both X-Sentry-Auth header and query string, and handle gzip/deflate bodies.
+- Choose the Fly forwarder topology: keep the existing nac-bugs Fly app, replace Bugsink's image with a small tsnet-based Go forwarder that joins the tailnet and reverse-proxies /api/{id}/envelope/ to nashcode over tailscale serve — this preserves every deployed DSN (hostname + key + project id) and requires zero client redeploys, which the iOS fleet makes near-mandatory.
+- Have nashcode's DSN minting accept explicit (project_id, sentry_key) pairs so Bugsink's existing projects can be imported verbatim before cutover; new projects get freshly minted keys.
+- Implement the browser CORS contract natively in nashcode's ingest routes, copied from Relay's cors.rs: ACAO *, allow-method POST, the 11-header allow list, expose x-sentry-error/x-sentry-rate-limits/retry-after, max-age 3600, plus an OPTIONS handler; accept sentry_key via both X-Sentry-Auth header and query string, and handle gzip/deflate bodies.
 - Put all public-surface defense in the forwarder, outside the tailnet: reject unknown sentry_keys against an allowlist, cap request body size, rate-limit per Fly-Client-IP and per key, and return 429 + X-Sentry-Rate-Limits so official SDKs back off on their own.
-- Tag the forwarder's tailnet node and ACL it to reach exactly one host:port (nashgit's serve endpoint); use a reusable pre-authorized ephemeral auth key stored as a Fly secret.
-- Reject the Funnel-as-primary-edge option (ts.net-only hostnames force fleet-wide DSN rotation, beta status, non-configurable bandwidth caps, unclear client-IP visibility) and the Relay-proxy-mode option (heavyweight, must run on public infra anyway, no documented non-Sentry-upstream support) — but keep Relay's cors.rs and rate-limit headers as the reference implementation for nashgit's own ingest.
+- Tag the forwarder's tailnet node and ACL it to reach exactly one host:port (nashcode's serve endpoint); use a reusable pre-authorized ephemeral auth key stored as a Fly secret.
+- Reject the Funnel-as-primary-edge option (ts.net-only hostnames force fleet-wide DSN rotation, beta status, non-configurable bandwidth caps, unclear client-IP visibility) and the Relay-proxy-mode option (heavyweight, must run on public infra anyway, no documented non-Sentry-upstream support) — but keep Relay's cors.rs and rate-limit headers as the reference implementation for nashcode's own ingest.
 - Do not tailnet-join the app fleet as the primary answer; optionally move individual high-volume Fly/EC2 apps onto the tailnet later. Cloudflare Workers and browsers stay on the public edge; for owned Next.js apps, the SDK `tunnel` option is an optional way to route browser envelopes through their own backends.
 - Sequence the cutover for reversibility: build ingest + import keys → deploy forwarder as a NEW Fly app and verify one test project end-to-end per client class (browser CORS, server, Worker, iOS, Pushover) → fly deploy the forwarder into the nac-bugs app (instant, reversible by redeploying Bugsink) → archive the Bugsink DB.
-- Before cutover, confirm nashgit runs on an always-on tailnet node; SDKs drop events when the ingest edge can't reach it.
+- Before cutover, confirm nashcode runs on an always-on tailnet node; SDKs drop events when the ingest edge can't reach it.
 - During implementation, empirically verify two details flagged as ambiguous upstream: whether X-Forwarded-For carries the real public client IP behind Funnel (only matters if Funnel is ever used as a fallback), and exact Bugsink schema/table names for the project-key export.
 
 ### Detail
 
-# How off-tailnet Sentry clients reach nashgit, and what the nac-bugs cutover looks like
+# How off-tailnet Sentry clients reach nashcode, and what the nac-bugs cutover looks like
 
 ## The fleet, decomposed by physical reachability
 
@@ -1162,12 +1162,12 @@ What the docs (validated Jan 20, 2026; Funnel still **beta**) actually say:
 
 Path scoping *does* work in the sense that only mounted handlers exist on the funneled port — but with two catches:
 
-1. `--set-path=/api` **strips the mount prefix** before proxying (merged PR tailscale/tailscale#7334: "proxied services receive requests as if they were running at the root path"), so nashgit would see `/{project_id}/envelope/` instead of `/api/{project_id}/envelope/`. Cleanest fix: nashgit binds a **second loopback listener that serves only the ingest routes**, mounted at `/` on the funnel port. Then the funneled surface is exactly the ingest router and nothing else.
-2. Because serve and funnel can't share a port, the layout is: full UI on `tailscale serve :443` (tailnet-only, unchanged), ingest-only listener on `tailscale funnel --https=8443` → DSNs look like `https://KEY@nashgit-host.tailnet.ts.net:8443/PROJECT_ID` (DSN host may include a port; SDKs handle it).
+1. `--set-path=/api` **strips the mount prefix** before proxying (merged PR tailscale/tailscale#7334: "proxied services receive requests as if they were running at the root path"), so nashcode would see `/{project_id}/envelope/` instead of `/api/{project_id}/envelope/`. Cleanest fix: nashcode binds a **second loopback listener that serves only the ingest routes**, mounted at `/` on the funnel port. Then the funneled surface is exactly the ingest router and nothing else.
+2. Because serve and funnel can't share a port, the layout is: full UI on `tailscale serve :443` (tailnet-only, unchanged), ingest-only listener on `tailscale funnel --https=8443` → DSNs look like `https://KEY@nashcode-host.tailnet.ts.net:8443/PROJECT_ID` (DSN host may include a port; SDKs handle it).
 
 Client IP for rate limiting: contradictory signals. bradfitz commented (June 2025, #13809) that "tailscaled already injects an `X-Forwarded-For: $IPAddress` HTTP request header into the backend when it's proxying an HTTP connection," but FR #12972 ("expose Funnel requestor's IP address to backend", filed explicitly for DDoS/rate-limiting) is **still open**. Read: XFF is probably present for HTTP-proxy mode, absent for raw TCP mode — verify empirically before relying on per-IP limits behind Funnel.
 
-**Verdict:** works, zero new infra, but it forces a **DSN hostname rotation across the entire fleet** — including iOS App Store releases and every deployed Fly/EC2/Workers secret — puts a beta feature with unpublished bandwidth caps in the hot path, and gives the weakest DoS tooling. It also permanently welds ingest availability to the nashgit host being up and on the tailnet.
+**Verdict:** works, zero new infra, but it forces a **DSN hostname rotation across the entire fleet** — including iOS App Store releases and every deployed Fly/EC2/Workers secret — puts a beta feature with unpublished bandwidth caps in the hot path, and gives the weakest DoS tooling. It also permanently welds ingest availability to the nashcode host being up and on the tailnet.
 
 ## Option 2 — Tiny public forwarder on Fly, keeping the nac-bugs.fly.dev hostname (recommended)
 
@@ -1175,15 +1175,15 @@ DSN mechanics make this the killer option. Per develop.sentry.dev, the SDK build
 
 Shape:
 
-1. **nashgit imports Bugsink's project IDs and keys.** Bugsink is Django on SQLite/Postgres that Matthias self-hosts; dump the projects table, and have nashgit's DSN-minting store an arbitrary (project_id, sentry_key) pair rather than always generating fresh ones.
+1. **nashcode imports Bugsink's project IDs and keys.** Bugsink is Django on SQLite/Postgres that Matthias self-hosts; dump the projects table, and have nashcode's DSN-minting store an arbitrary (project_id, sentry_key) pair rather than always generating fresh ones.
 2. **Replace the Bugsink image in the existing `nac-bugs` Fly app with a forwarder.** Same app name → same `nac-bugs.fly.dev` hostname and automatic TLS. Nothing anywhere in the fleet changes.
-3. **The forwarder joins the tailnet and reverse-proxies to nashgit.** Two documented implementation paths:
-   - **tsnet (cleanest):** a single Go binary embeds a Tailscale node in-process (userspace gVisor stack, no daemon, no root — per the tsnet README). It listens on Fly's public port and `httputil.ReverseProxy`-es `POST /api/{id}/envelope/` to `https://nashgit-host.tailnet.ts.net/...` (nashgit stays loopback-bound; tailnet exposure stays via `tailscale serve`, exactly today's model).
-   - **tailscaled sidecar (official Tailscale-on-Fly doc, validated Dec 4, 2025):** copy tailscaled/tailscale binaries into the container, run with `--tun=userspace-networking --socks5-server=localhost:1055`, app dials tailnet through the SOCKS5 proxy. Use a reusable pre-authorized **ephemeral** auth key; tag the node so ACLs can restrict it to only reach nashgit's serve port.
-4. **DoS defense lives at the forwarder, outside the tailnet:** Fly injects `Fly-Client-IP` (documented request header) → real per-IP throttling; reject unknown `sentry_key`s against a small allowlist synced from nashgit; cap body size; drop non-ingest paths. Hostile traffic never touches the tailnet.
-5. Tailnet ACL: grant the forwarder's tag access to exactly one host:port. If the forwarder is compromised, the blast radius is "can POST envelopes to nashgit" — the same thing the public already can do.
+3. **The forwarder joins the tailnet and reverse-proxies to nashcode.** Two documented implementation paths:
+   - **tsnet (cleanest):** a single Go binary embeds a Tailscale node in-process (userspace gVisor stack, no daemon, no root — per the tsnet README). It listens on Fly's public port and `httputil.ReverseProxy`-es `POST /api/{id}/envelope/` to `https://nashcode-host.tailnet.ts.net/...` (nashcode stays loopback-bound; tailnet exposure stays via `tailscale serve`, exactly today's model).
+   - **tailscaled sidecar (official Tailscale-on-Fly doc, validated Dec 4, 2025):** copy tailscaled/tailscale binaries into the container, run with `--tun=userspace-networking --socks5-server=localhost:1055`, app dials tailnet through the SOCKS5 proxy. Use a reusable pre-authorized **ephemeral** auth key; tag the node so ACLs can restrict it to only reach nashcode's serve port.
+4. **DoS defense lives at the forwarder, outside the tailnet:** Fly injects `Fly-Client-IP` (documented request header) → real per-IP throttling; reject unknown `sentry_key`s against a small allowlist synced from nashcode; cap body size; drop non-ingest paths. Hostile traffic never touches the tailnet.
+5. Tailnet ACL: grant the forwarder's tag access to exactly one host:port. If the forwarder is compromised, the blast radius is "can POST envelopes to nashcode" — the same thing the public already can do.
 
-**Verdict: best option.** Zero client redeploys, zero DSN rotation (decisive for iOS), real IP-based rate limiting, keeps nashgit loopback-bound with Tailscale-headers identity untouched, and reuses the Fly app already being paid for. Cost: one ~100-line Go binary (tsnet) and a tailnet ephemeral-key secret on Fly. It is a long-term architecture, not a stopgap: "public ingest edge at the stable hostname, storage/UI on the tailnet" is exactly how Sentry itself separates `oXXX.ingest.sentry.io` from `sentry.io`.
+**Verdict: best option.** Zero client redeploys, zero DSN rotation (decisive for iOS), real IP-based rate limiting, keeps nashcode loopback-bound with Tailscale-headers identity untouched, and reuses the Fly app already being paid for. Cost: one ~100-line Go binary (tsnet) and a tailnet ephemeral-key secret on Fly. It is a long-term architecture, not a stopgap: "public ingest edge at the stable hostname, storage/UI on the tailnet" is exactly how Sentry itself separates `oXXX.ingest.sentry.io` from `sentry.io`.
 
 ## Option 3 — Official Sentry Relay in proxy mode as the public edge
 
@@ -1193,7 +1193,7 @@ Facts (docs.sentry.io/product/relay/modes, relay_config rustdoc):
 - Relay's stated use case includes "act as an opaque proxy for organizations that restrict all HTTP communication to a custom domain name" — pointing `upstream:` at any envelope-accepting server is mechanically fine, and community guides do it.
 - But: proxy mode historically dropped non-error item types (metrics relay#3042, replays relay#3175/#3800 — since fixed for replays/profiles); memory footprint drew complaints (#3012) and a "light proxy mode" FR (#3021); and **neither Bugsink nor GlitchTip documents Relay support** (bugsink.com has no relay page at all) — non-Sentry upstreams are untested territory owned by nobody.
 
-**Verdict: rejected.** Relay must run on public infra anyway (i.e., on Fly), so it competes directly with the tiny forwarder — and loses: heavier, less controllable, adds Sentry-internal semantics (its own buffering, its own rate-limit interpretation) between SDKs and nashgit, and its CORS/auth behavior is the part nashgit must implement natively regardless. Its one genuine value here is as a **reference implementation** (see CORS contract below).
+**Verdict: rejected.** Relay must run on public infra anyway (i.e., on Fly), so it competes directly with the tiny forwarder — and loses: heavier, less controllable, adds Sentry-internal semantics (its own buffering, its own rate-limit interpretation) between SDKs and nashcode, and its CORS/auth behavior is the part nashcode must implement natively regardless. Its one genuine value here is as a **reference implementation** (see CORS contract below).
 
 ## Option 4 — Tailnet-join the server-side clients
 
@@ -1202,10 +1202,10 @@ Officially supported for both Fly (sidecar doc above) and EC2 (normal install). 
 ## Cloudflare Workers specifically
 
 - **No production-grade tailnet path exists.** The only tailnet-native attempt is `@ts-edge/cloudflare` (npm, v0.3.0, July 2026): a WASM ephemeral Tailscale node inside a Worker/Durable Object — ~22 weekly downloads, no README, experimental.
-- Cloudflare's supported private-access mechanism is **Workers VPC (beta, 2026)**: Worker `fetch()` through a **Cloudflare Tunnel** — which means running `cloudflared` on/near the nashgit host, i.e., a second overlay network alongside Tailscale, for one client class.
+- Cloudflare's supported private-access mechanism is **Workers VPC (beta, 2026)**: Worker `fetch()` through a **Cloudflare Tunnel** — which means running `cloudflared` on/near the nashcode host, i.e., a second overlay network alongside Tailscale, for one client class.
 - Practical answer: Workers keep POSTing to the public edge. With Option 2 they need no change at all.
 
-## Browser CORS: the exact server contract nashgit must implement
+## Browser CORS: the exact server contract nashcode must implement
 
 How the browser SDK actually sends (verified in `packages/browser/src/transports/fetch.ts` and sentry-javascript#1992):
 
@@ -1225,11 +1225,11 @@ Access-Control-Expose-Headers: x-sentry-error, x-sentry-rate-limits, retry-after
 Access-Control-Max-Age: 3600
 ```
 
-(The same allow-headers list appears in develop.sentry.dev's transport docs as "permitted as per CORS policy" — the two sources agree.) Wildcard origin is correct: auth on this surface is the sentry_key, never the Origin. Note whichever tier terminates the browser request must emit these — with Option 2 either the forwarder adds them or (simpler) nashgit emits them and the forwarder passes them through.
+(The same allow-headers list appears in develop.sentry.dev's transport docs as "permitted as per CORS policy" — the two sources agree.) Wildcard origin is correct: auth on this surface is the sentry_key, never the Origin. Note whichever tier terminates the browser request must emit these — with Option 2 either the forwarder adds them or (simpler) nashcode emits them and the forwarder passes them through.
 
 **Escape hatch for owned web apps:** the JS SDK `tunnel` option posts envelopes to a same-origin path on the app's own backend, which forwards server-side. That converts the browser class into the server class (and defeats ad-blockers). Optional under Option 2, since CORS + preserved DSNs already work.
 
-## Ingest auth details nashgit must accept (all clients)
+## Ingest auth details nashcode must accept (all clients)
 
 - `X-Sentry-Auth: Sentry sentry_key=..., sentry_version=7, sentry_client=...` header (server SDKs) **and** the same fields as query params (browser SDKs). `sentry_secret` is deprecated — accept and ignore.
 - Endpoint path: `/api/{project_id}/envelope/` (project_id is a string per spec). Older SDKs may hit `/api/{id}/store/` — Bugsink supports both; cheap to add.
@@ -1238,20 +1238,20 @@ Access-Control-Max-Age: 3600
 
 ## Cutover plan (Option 2)
 
-1. **nashgit:** implement ingest (envelope parse, per-project sentry_key auth via header *and* query, CORS middleware above, gzip, 429 rate-limit responses); add a second ingest-only loopback listener if Funnel fallback is ever wanted; add "import project with explicit id+key".
-2. **Export from Bugsink** (`nac-bugs.fly.dev`): dump projects table (id, name, sentry_key) from its DB; import into nashgit so every existing DSN validates.
-3. **Build the forwarder** (tsnet Go binary): public listener → allowlist sentry_key → size cap → per-IP limit via `Fly-Client-IP` → proxy to `https://<nashgit-host>.<tailnet>.ts.net/api/...`; tag its tailnet node, ACL it to that one destination; use a reusable ephemeral auth key stored as a Fly secret.
-4. **Dry-run:** deploy forwarder as a *new* Fly app first; point one test project's DSN at it; verify a browser client (CORS), a Rust/server client, a Worker, and an iOS build end-to-end, including Pushover firing from nashgit.
+1. **nashcode:** implement ingest (envelope parse, per-project sentry_key auth via header *and* query, CORS middleware above, gzip, 429 rate-limit responses); add a second ingest-only loopback listener if Funnel fallback is ever wanted; add "import project with explicit id+key".
+2. **Export from Bugsink** (`nac-bugs.fly.dev`): dump projects table (id, name, sentry_key) from its DB; import into nashcode so every existing DSN validates.
+3. **Build the forwarder** (tsnet Go binary): public listener → allowlist sentry_key → size cap → per-IP limit via `Fly-Client-IP` → proxy to `https://<nashcode-host>.<tailnet>.ts.net/api/...`; tag its tailnet node, ACL it to that one destination; use a reusable ephemeral auth key stored as a Fly secret.
+4. **Dry-run:** deploy forwarder as a *new* Fly app first; point one test project's DSN at it; verify a browser client (CORS), a Rust/server client, a Worker, and an iOS build end-to-end, including Pushover firing from nashcode.
 5. **Cutover:** `fly deploy` the forwarder image into the existing `nac-bugs` app (hostname and cert carry over). Instant, reversible by redeploying the Bugsink image.
-6. **Verify the fleet** with the nac-bugs-wire skill's per-platform checks; keep the Bugsink DB file archived for history (nashgit doesn't need to import old events unless wanted).
+6. **Verify the fleet** with the nac-bugs-wire skill's per-platform checks; keep the Bugsink DB file archived for history (nashcode doesn't need to import old events unless wanted).
 7. **Decommission** Bugsink compute; the Fly app lives on as the ~free-tier forwarder.
 
 ## Risks / open items
 
-- **Forwarder availability:** ingest now depends on Fly + tailnet connectivity between forwarder and the nashgit host. SDKs buffer briefly and drop on failure — acceptable for error telemetry, but note the nashgit host (if it's a laptop) sleeping means dropped events; consider running nashgit on an always-on node before cutover.
+- **Forwarder availability:** ingest now depends on Fly + tailnet connectivity between forwarder and the nashcode host. SDKs buffer briefly and drop on failure — acceptable for error telemetry, but note the nashcode host (if it's a laptop) sleeping means dropped events; consider running nashcode on an always-on node before cutover.
 - **Funnel numbers unpublished:** if Funnel is chosen anyway, its bandwidth caps are non-configurable and undocumented; treat as unsuitable for bursty ingest.
 - **Client IP behind Funnel:** unresolved upstream (#12972 open); don't design per-IP limits around Funnel.
-- **`fly.dev` hostname coupling:** long-term, a custom domain on the forwarder (Fly supports certs for custom domains) would decouple DSNs from Fly — worth doing for *new* DSNs nashgit mints, while old fly.dev DSNs keep working indefinitely.
+- **`fly.dev` hostname coupling:** long-term, a custom domain on the forwarder (Fly supports certs for custom domains) would decouple DSNs from Fly — worth doing for *new* DSNs nashcode mints, while old fly.dev DSNs keep working indefinitely.
 
 ### Sources
 - https://tailscale.com/docs/features/tailscale-funnel
@@ -1296,21 +1296,21 @@ Access-Control-Max-Age: 3600
 - nac-bugs runs stock bugsink/bugsink:latest with no FEATURE_MINIDUMPS in fly.toml, so its difs/assemble endpoint returns 404 today; keeping iOS on Bugsink buys zero symbolication.
 - None of the three iOS apps (tracehealth-app, nouriche-ios, PristineAcres) links sentry-cocoa at all today — rg finds no SentrySDK/getsentry reference — so no live iOS error stream constrains the Bugsink absorption.
 - GlitchTip proves the lightweight path: it symbolicates native frames at ingest in ~500 lines of Python around the symbolic library (Archive → SymCache → lookup(instruction_addr − image_addr) → demangle), with no Symbolicator service.
-- getsentry/symbolic is a Rust-native MIT library (stable 13.9.0; 14.0.0-alpha.3, 2026-07-23): symbolic-debuginfo parses dSYMs and extracts debug_id, symbolic-symcache gives fast address→function/file/line lookup including inlinees, symbolic-demangle handles Swift/ObjC/C++ — nashgit can use the crates directly, no service, SQLite-friendly.
+- getsentry/symbolic is a Rust-native MIT library (stable 13.9.0; 14.0.0-alpha.3, 2026-07-23): symbolic-debuginfo parses dSYMs and extracts debug_id, symbolic-symcache gives fast address→function/file/line lookup including inlinees, symbolic-demangle handles Swift/ObjC/C++ — nashcode can use the crates directly, no service, SQLite-friendly.
 - Without Apple system symbols (which Sentry harvests from iOS firmware), UIKit/libsystem frames stay raw even with your dSYMs — but app frames symbolicate fully, which is what root-causing needs.
 - Bugsink groups by exception type + normalized value with hex/int/uuid scrubbed to placeholders, so memory addresses do not fragment groups — the actual failure mode is over-grouping (every EXC_BAD_ACCESS in one issue).
-- A symbolication-free stable fingerprint exists: (debug_id, instruction_addr − image_addr) of the top in-app frame is ASLR-independent and stable per build, so nashgit can group iOS crashes correctly before any dSYM is uploaded.
-- Bitcode is dead (App Store stopped accepting it in 2023), so the dSYMs in the local .xcarchive from the existing asc xcode deploy skills are authoritative — a plain multipart zip upload to nashgit suffices; sentry-cli's chunked difs/assemble protocol is not needed.
-- Symbolicator's extra scope (Apple system symbol servers, minidump processing, symbol-server proxying, caching layers) is exactly the part nashgit does not need for readable app frames.
+- A symbolication-free stable fingerprint exists: (debug_id, instruction_addr − image_addr) of the top in-app frame is ASLR-independent and stable per build, so nashcode can group iOS crashes correctly before any dSYM is uploaded.
+- Bitcode is dead (App Store stopped accepting it in 2023), so the dSYMs in the local .xcarchive from the existing asc xcode deploy skills are authoritative — a plain multipart zip upload to nashcode suffices; sentry-cli's chunked difs/assemble protocol is not needed.
+- Symbolicator's extra scope (Apple system symbol servers, minidump processing, symbol-server proxying, caching layers) is exactly the part nashcode does not need for readable app frames.
 
 ### Recommendations
 - Absorb Bugsink fully, iOS included — 'absorb except iOS' is unfounded because Bugsink offers iOS nothing today (difs 404s at nac-bugs, no cocoa-event symbolication even with the flag on) and no iOS app is wired yet.
-- In nashgit v1, store debug_meta and raw frames verbatim and group native events by (debug_id, instruction_addr − image_addr) of the top in-app frame, falling back to exception type — correct per-build grouping with zero symbolication work.
+- In nashcode v1, store debug_meta and raw frames verbatim and group native events by (debug_id, instruction_addr − image_addr) of the top in-app frame, falling back to exception type — correct per-build grouping with zero symbolication work.
 - When the first iOS app actually gets wired, add the GlitchTip-style path in Rust with the symbolic crates (13.x, features debuginfo/symcache/demangle): one authenticated multipart endpoint accepting a zip of dSYMs, extract debug_id server-side, cache symcaches keyed by debug_id in SQLite, symbolicate app frames at ingest — budget days, not a Symbolicator-scale project.
 - Make symbolication retroactive: keep raw frames stored so a late dSYM upload can re-symbolicate existing events (and optionally re-render titles) instead of only affecting future events.
 - Apply the return-address adjustment Symbolicator does and GlitchTip skips: subtract 1 from instruction_addr for every frame except the topmost before symcache lookup, to avoid off-by-one line attribution.
 - Skip permanently: sentry-cli difs/assemble protocol compatibility, Apple system symbols, and minidump ingestion — none are needed for readable app frames from sentry-cocoa; system frames showing package+address is acceptable.
-- Wire dSYM upload into the existing deploy skills (deploy-tracehealth / testflight / testflight-pristine): after asc xcode archive, zip <archive>.xcarchive/dSYMs and POST it to nashgit in the same just recipe.
+- Wire dSYM upload into the existing deploy skills (deploy-tracehealth / testflight / testflight-pristine): after asc xcode archive, zip <archive>.xcarchive/dSYMs and POST it to nashcode in the same just recipe.
 - Do not plan around on-device symbolication or unstripped release binaries — sentry-cocoa v9's crash path never resolves symbols regardless of build settings.
 
 ### Detail
@@ -1343,7 +1343,7 @@ Verified against the bugsink/bugsink source (main, Aug 2026):
 
 **Bugsink grouping** (issues/grouping_mechanisms/v2.py): issues group by exception type + value, where the value first passes through Sentry's vendored `normalize_message_for_grouping`, which replaces `hex`, `int`, `uuid`, `sha1`, dates, etc. with placeholders. Consequence for unsymbolicated iOS crashes: memory addresses in the value do **not** fragment groups (the feared failure mode) — instead everything collapses the other way: every `EXC_BAD_ACCESS` from every crash site lands in one issue. Unreadable AND over-grouped. Bugsink's UI template (issues/templates/issues/_stacktrace_frames.html) renders `instruction_addr` for such frames — raw hex on screen.
 
-Net: **staying on Bugsink for iOS buys nothing.** Bugsink's iOS story today is identical to a nashgit that stores frames verbatim — raw addresses, coarse grouping — except nashgit can group smarter (below).
+Net: **staying on Bugsink for iOS buys nothing.** Bugsink's iOS story today is identical to a nashcode that stores frames verbatim — raw addresses, coarse grouping — except nashcode can group smarter (below).
 
 ## 3. GlitchTip: existence proof of the lightweight path
 
@@ -1356,9 +1356,9 @@ GlitchTip (glitchtip-backend on GitLab, master 2026) **does** symbolicate native
 
 GlitchTip's CLI docs ("upload source maps and debug symbols") confirm this is a shipped, supported feature — so a small self-hosted tracker doing real dSYM symbolication is a solved problem, not a research project.
 
-## 4. The symbolic crate: exactly the machinery nashgit needs, Rust-native
+## 4. The symbolic crate: exactly the machinery nashcode needs, Rust-native
 
-`getsentry/symbolic` (MIT, 539 stars, actively released — stable 13.9.0, 14.0.0-alpha.3 published 2026-07-23) is the library Sentry, Bugsink's minidump PoC, and GlitchTip all sit on. For nashgit (already Rust) there is no bindings layer at all:
+`getsentry/symbolic` (MIT, 539 stars, actively released — stable 13.9.0, 14.0.0-alpha.3 published 2026-07-23) is the library Sentry, Bugsink's minidump PoC, and GlitchTip all sit on. For nashcode (already Rust) there is no bindings layer at all:
 
 - `symbolic-debuginfo`: parse a dSYM (Mach-O/DWARF) from bytes, iterate objects per architecture, read `debug_id` — this is how an upload endpoint indexes files.
 - `symbolic-symcache`: convert an object to a compact cache once, then do fast `lookup(relative_addr)` returning function name, file, line, including inlined frames. Cache blobs can live in SQLite keyed by `debug_id`.
@@ -1370,22 +1370,22 @@ Symbolication algorithm for a cocoa event (mirrors GlitchTip/Symbolicator): for 
 
 ## 5. dSYM acquisition is easy in this shop
 
-Bitcode is dead (Xcode 14 dropped it; the App Store stopped accepting it in 2023), so the App Store never recompiles the binary — **the dSYMs in the local `.xcarchive` produced by the existing `asc xcode` archive step (deploy-tracehealth, testflight, testflight-pristine skills) are authoritative** for the uploaded build. Because nashgit controls both ends, it does not need sentry-cli's chunked `chunk-upload`/`difs/assemble` protocol: a plain authenticated multipart endpoint that accepts a zip of `*.dSYM` bundles (a `just` step or Xcode post-action posts it after archive) is sufficient; nashgit extracts `debug_id`s server-side via `symbolic-debuginfo`. sentry-cli protocol compat can come later if ever wanted.
+Bitcode is dead (Xcode 14 dropped it; the App Store stopped accepting it in 2023), so the App Store never recompiles the binary — **the dSYMs in the local `.xcarchive` produced by the existing `asc xcode` archive step (deploy-tracehealth, testflight, testflight-pristine skills) are authoritative** for the uploaded build. Because nashcode controls both ends, it does not need sentry-cli's chunked `chunk-upload`/`difs/assemble` protocol: a plain authenticated multipart endpoint that accepts a zip of `*.dSYM` bundles (a `just` step or Xcode post-action posts it after archive) is sufficient; nashcode extracts `debug_id`s server-side via `symbolic-debuginfo`. sentry-cli protocol compat can come later if ever wanted.
 
 ## 6. Reality check: no iOS app is wired today
 
-`rg` over /Users/md/Projects/tracehealth-app, /Users/md/Projects/nouriche/nouriche-ios, and /Users/md/NashvilleAutomation/PristineAcres finds **zero** references to `SentrySDK`, `sentry-cocoa`, or `getsentry`. The nac-bugs-wire skill documents iOS wiring as a recipe but flags it: "Bugsink's native-crash symbolication is limited — treat iOS wiring as best-effort, don't chase perfect stack traces." So there is no live iOS error stream that the Bugsink→nashgit migration must preserve. The scope question is about the *future* wiring of TraceHealth/Nouriche/PristineConsult, not about parity with something running now.
+`rg` over /Users/md/Projects/tracehealth-app, /Users/md/Projects/nouriche/nouriche-ios, and /Users/md/NashvilleAutomation/PristineAcres finds **zero** references to `SentrySDK`, `sentry-cocoa`, or `getsentry`. The nac-bugs-wire skill documents iOS wiring as a recipe but flags it: "Bugsink's native-crash symbolication is limited — treat iOS wiring as best-effort, don't chase perfect stack traces." So there is no live iOS error stream that the Bugsink→nashcode migration must preserve. The scope question is about the *future* wiring of TraceHealth/Nouriche/PristineConsult, not about parity with something running now.
 
-## 7. Grouping without symbolication — nashgit can beat both incumbents
+## 7. Grouping without symbolication — nashcode can beat both incumbents
 
 - Type+value grouping (Bugsink's approach, with hex/int scrubbing) over-groups native crashes: one issue per exception type.
 - A symbolication-free fingerprint that works: **(debug_id, instruction_addr − image_addr) of the topmost in-app frame**. Subtracting `image_addr` removes ASLR, and `debug_id` pins the build, so the same crash site groups together across devices and launches of one release, and splits across releases. Symbolication later only improves display and cross-release grouping; it is not required for correct within-release grouping.
 
 ## 8. Decision summary
 
-- **"Scope cliff comparable to running Symbolicator" — false.** The GlitchTip-style path is a few hundred lines on crates nashgit can depend on directly: one upload endpoint, one debug_id index, one symcache cache, one address-lookup pass at ingest. Days of work, in-process, SQLite-friendly. Symbolicator only becomes relevant if you want Apple system symbols or minidumps — you don't.
+- **"Scope cliff comparable to running Symbolicator" — false.** The GlitchTip-style path is a few hundred lines on crates nashcode can depend on directly: one upload endpoint, one debug_id index, one symcache cache, one address-lookup pass at ingest. Days of work, in-process, SQLite-friendly. Symbolicator only becomes relevant if you want Apple system symbols or minidumps — you don't.
 - **"iOS stays on Bugsink" — unfounded.** Bugsink gives iOS nothing today (open issue #20; difs endpoint 404s at nac-bugs; even enabled, DIFs never touch cocoa JSON events). Absorb everything.
-- **"Unsymbolicated-but-grouped acceptable?" — as a v1, yes,** if nashgit stores `debug_meta` + raw frames verbatim and fingerprints on (debug_id, relative addr). Traces stay unreadable until a dSYM shows up, but nothing is lost: symbolication can run lazily/retroactively over stored events once the dSYM is uploaded.
+- **"Unsymbolicated-but-grouped acceptable?" — as a v1, yes,** if nashcode stores `debug_meta` + raw frames verbatim and fingerprints on (debug_id, relative addr). Traces stay unreadable until a dSYM shows up, but nothing is lost: symbolication can run lazily/retroactively over stored events once the dSYM is uploaded.
 
 ### Sources
 - https://github.com/bugsink/bugsink/issues/20
@@ -1409,7 +1409,7 @@ Bitcode is dead (Xcode 14 dropped it; the App Store stopped accepting it in 2023
 ## Gap follow-up: What are the exact server-side semantics for detecting a MISSED or TIMED-OUT cron check-in — the monitor_confi
 
 ### Key facts
-- Sentry's 'missed' and 'timed out' states are computed ONLY server-side by a once-per-minute sweep; Relay even coerces a client-sent status=missed to 'unknown', so nashgit must never accept those statuses from SDKs (getsentry/relay relay-monitors/src/lib.rs, process_check_in).
+- Sentry's 'missed' and 'timed out' states are computed ONLY server-side by a once-per-minute sweep; Relay even coerces a client-sent status=missed to 'unknown', so nashcode must never accept those statuses from SDKs (getsentry/relay relay-monitors/src/lib.rs, process_check_in).
 - monitor_config wire schema (develop.sentry.dev check-ins spec v1.6.0, 2025-09-18): required `schedule` ({type:'crontab', value:'0 * * * *'} or {type:'interval', value:N, unit:year|month|week|day|hour|minute}), optional `checkin_margin` (minutes), `max_runtime` (minutes), `timezone` (tz database string), `failure_issue_threshold`, `recovery_threshold`, `owner`.
 - Server defaults and limits (sentry/monitors/constants.py + utils.py): checkin_margin defaults to 1 minute (0 is coerced to 1), max_runtime defaults to 30 minutes, both capped at 40,320 minutes (28 days); thresholds default to 1, capped at 720; timezone defaults to UTC.
 - Crontab handling: 5-field Vixie expressions only (6/7-field rejected), whitespace normalized, @yearly/@annually/@monthly/@weekly/@daily/@hourly translated to 5-field equivalents (@reboot unsupported), validated by computing next+prev occurrences; all schedule math runs in the monitor's timezone and results are clamped to minute granularity.
@@ -1420,10 +1420,10 @@ Bitcode is dead (Xcode 14 dropped it; the App Store stopped accepting it in 2023
 - Upsert semantics (monitor_consumer.py): monitor looked up by (project, slug≤50 chars); valid monitor_config creates the monitor (name = slug) or updates only the provided keys; invalid config on an existing monitor is ignored (check-in still accepted); unknown slug with no/invalid config → check-in dropped with MONITOR_NOT_FOUND.
 - Sentry's Kafka partition-clock machinery (clock_dispatch.py, clock_pulse.py) exists solely so a check-in ingestion backlog slows the clock instead of causing false missed alerts; a single-process SQLite server has no such decoupling, so a plain 1-minute tokio interval task is the correct equivalent.
 - Healthchecks.io proves the minimal design: persist one `alert_after` datetime per check (next expected ping + grace, recomputed on every ping via cronsim in the check's timezone then converted back to UTC), poll `WHERE alert_after < now() AND status != 'down'` once per loop, flip with an optimistic-lock UPDATE, and notify on the flip.
-- Alerting semantics: mark_failed → failure_issue_threshold (default 1) consecutive non-ok check-ins opens an incident (the single choke point where nashgit fires Pushover); recovery_threshold consecutive ok check-ins resolves it; missed, timeout, and error all funnel through this one path.
+- Alerting semantics: mark_failed → failure_issue_threshold (default 1) consecutive non-ok check-ins opens an incident (the single choke point where nashcode fires Pushover); recovery_threshold consecutive ok check-ins resolves it; missed, timeout, and error all funnel through this one path.
 - Rust crate verdict (crates.io, checked 2026-08-18): `croner` 3.0.1 (2025-10-27, 7.2M downloads) is the best fit — POSIX 5-field, @aliases, chrono/chrono-tz timezone support, and both find_next_occurrence and find_previous_occurrence; the more popular `cron` 0.17.0 requires seconds-first 6/7-field syntax (wrong dialect), `saffron` is dormant since 2021 with no tz support, `cron-parser` is next-only.
 - Interval schedules need no cron parser: Sentry computes them with calendar-aware arithmetic (dateutil rrule) from the last check-in time — in Rust that is plain chrono math plus month/year add-with-clamp (e.g. chronoutil).
-- The whole sweeper is two indexed queries per minute (missed: next_checkin_latest <= now on monitors; timeout: timeout_at <= now on in_progress check-ins) — small enough that cron monitoring can ship in nashgit v1 without a scheduler framework.
+- The whole sweeper is two indexed queries per minute (missed: next_checkin_latest <= now on monitors; timeout: timeout_at <= now on in_progress check-ins) — small enough that cron monitoring can ship in nashcode v1 without a scheduler framework.
 
 ### Recommendations
 - Ship cron monitoring in v1 with the sweeper: it is two indexed SQLite queries driven by one tokio 1-minute interval task, not a scheduler framework — cutting it to status=error alerts would discard most of the feature's value for very little saved complexity.
@@ -1481,7 +1481,7 @@ Sent inside the `check_in` envelope item, ideally only on the `in_progress` chec
 3. Reject expressions with more than 5 fields ("Only 5 field crontab syntax is supported") — so the seconds-first Quartz dialect is out.
 4. Smoke-test the expression by computing one next and one prev occurrence with **cronsim** (the Python library written by the healthchecks.io author — both products use the same cron engine).
 
-Internally Sentry re-shapes this into `Monitor.config = { schedule_type: 1|2, schedule: "crontab-string" | [n, "unit"], checkin_margin, max_runtime, timezone, failure_issue_threshold, recovery_threshold }`. That internal shape leaks into the denormalized `monitor_config` snapshot stored on every check-in row. nashgit can store the wire shape directly; nothing depends on Sentry's internal encoding.
+Internally Sentry re-shapes this into `Monitor.config = { schedule_type: 1|2, schedule: "crontab-string" | [n, "unit"], checkin_margin, max_runtime, timezone, failure_issue_threshold, recovery_threshold }`. That internal shape leaks into the denormalized `monitor_config` snapshot stored on every check-in row. nashcode can store the wire shape directly; nothing depends on Sentry's internal encoding.
 
 ## 2. Upsert behavior (`monitor_consumer.py::_ensure_monitor_with_config`)
 
@@ -1489,7 +1489,7 @@ Internally Sentry re-shapes this into `Monitor.config = { schedule_type: 1|2, sc
 - **No `monitor_config` in payload**: return the existing monitor. If none exists, the check-in is **dropped** with a `MONITOR_NOT_FOUND` processing error. Auto-creation strictly requires a config.
 - **Config present and valid**: create the monitor if missing (`name = slug`, active). If it exists and the validated config differs, update — but only the keys the payload actually sent (plus `schedule`/`schedule_type`, which are always updated). Owner is updated when changed.
 - **Config present but invalid**: if the monitor already exists, log and keep the old config — the check-in is still accepted. If the monitor does not exist, drop with `MONITOR_INVALID_CONFIG`.
-- Sentry.io additionally does quota "seat" assignment on upsert (`ACCEPTED_FOR_UPSERT` → assign seat or disable the monitor); irrelevant for nashgit.
+- Sentry.io additionally does quota "seat" assignment on upsert (`ACCEPTED_FOR_UPSERT` → assign seat or disable the monitor); irrelevant for nashcode.
 - Disabled monitors: check-ins are filtered out.
 
 ## 3. Per-check-in state that arms the detector
@@ -1508,11 +1508,11 @@ Sentry tracks state per **monitor environment** (`(monitor, environment)`, env d
 
 Sentry never sets per-monitor timers. A **logical clock ticks once per minute** and each tick sweeps two indexed queries.
 
-### Sentry's clock machinery (and why nashgit doesn't need it)
+### Sentry's clock machinery (and why nashcode doesn't need it)
 
 `clock_dispatch.py`: consumers record the max Kafka message timestamp per partition in Redis; the clock is the **minimum across partitions**; when it rolls over a minute boundary, one consumer (via atomic GETSET) dispatches a tick, backfilling any skipped minutes one at a time. `tasks/clock_pulse.py` (celery, every minute) produces a pulse message into **every** partition so the clock advances even with zero check-in traffic. The entire point (per evanpurkhiser's issues #53661/#79328): if ingestion backlogs, the clock **slows down with the backlog** instead of falsely marking monitors missed, and ticks stay strictly ordered per monitor. There is also a `mark_unknown` task used during detected ingestion incidents to write `unknown` instead of `missed`.
 
-nashgit ingests over HTTP straight into SQLite in one process — there is no queue whose lag can outrun the detector. The correct equivalent is a single tokio 1-minute interval task (clamp `now` to the minute, iterate any missed minutes if the process was suspended, run both sweeps per minute processed).
+nashcode ingests over HTTP straight into SQLite in one process — there is no queue whose lag can outrun the detector. The correct equivalent is a single tokio 1-minute interval task (clamp `now` to the minute, iterate any missed minutes if the process was suspended, run both sweeps per minute processed).
 
 ### Missed sweep (`clock_tasks/check_missed.py`)
 
@@ -1532,11 +1532,11 @@ Per tick `ts`:
 
 ### Alerting path (`logic/mark_failed.py` → `logic/incidents.py`)
 
-`mark_failed` = `try_incident_threshold`: read `failure_issue_threshold` (default/falsy → 1). If the env is currently OK/ACTIVE and the last N check-ins (N = threshold) contain no `ok`, open a `MonitorIncident`, set env status to ERROR, and dispatch an issue occurrence — **this is the single choke point where nashgit fires Pushover**, and it is shared by error, missed, and timeout check-ins. `mark_ok` → `try_incident_resolution`: `recovery_threshold` (default 1) consecutive `ok` check-ins resolves the incident (optional second Pushover). Muted monitors skip occurrence creation.
+`mark_failed` = `try_incident_threshold`: read `failure_issue_threshold` (default/falsy → 1). If the env is currently OK/ACTIVE and the last N check-ins (N = threshold) contain no `ok`, open a `MonitorIncident`, set env status to ERROR, and dispatch an issue occurrence — **this is the single choke point where nashcode fires Pushover**, and it is shared by error, missed, and timeout check-ins. `mark_ok` → `try_incident_resolution`: `recovery_threshold` (default 1) consecutive `ok` check-ins resolves the incident (optional second Pushover). Muted monitors skip occurrence creation.
 
 ### Statuses are server-authoritative
 
-`CheckInStatus` on the wire is only `in_progress | ok | error`. Relay rewrites an incoming `missed` to `unknown` ("Missed status cannot be ingested, this is computed on the server"), and unknown statuses deserialize to `Unknown` rather than erroring. nashgit should reject or coerce client-sent `missed`/`timeout` the same way.
+`CheckInStatus` on the wire is only `in_progress | ok | error`. Relay rewrites an incoming `missed` to `unknown` ("Missed status cannot be ingested, this is computed on the server"), and unknown statuses deserialize to `Unknown` rather than erroring. nashcode should reject or coerce client-sent `missed`/`timeout` the same way.
 
 ## 5. Timezone rules
 
@@ -1567,7 +1567,7 @@ Note on `get_prev_schedule`: Sentry uses it (a) to validate expressions and (b) 
 
 **Interval schedules need no cron crate.** Sentry computes them with dateutil rrule from the last check-in: minute/hour/day/week are exact `chrono::Duration` adds; month/year need calendar-aware add-with-clamp (e.g. the `chronoutil` crate's `RelativeDuration`/`shift_months`, or ~15 lines by hand).
 
-## 8. What this means for the nashgit v1 decision
+## 8. What this means for the nashcode v1 decision
 
 The sweeper is **not** a heavyweight scheduler component. Concretely it is:
 
@@ -1575,7 +1575,7 @@ The sweeper is **not** a heavyweight scheduler component. Concretely it is:
 2. One tokio `interval(60s)` task: clamp to the minute, process any skipped minutes in order, run the two SELECTs, write synthetic missed rows / flip timeouts, re-anchor schedules, and call the shared `mark_failed` → Pushover path.
 3. One dependency for crontab parsing (`croner` + `chrono-tz`), plain arithmetic for intervals.
 
-Sentry's genuinely complex parts — Kafka partition clocks, clock pulses, backfill ordering, seats/quotas, ingestion-incident `unknown` marking — exist to solve distributed-ingestion problems nashgit does not have. Healthchecks.io ships the same user-visible guarantee with an indexed datetime column and a poll loop, and has for a decade. Missed-run detection is therefore shippable in v1 without over-promising, provided the semantics table above (margin default 1 min, runtime default 30 min, no missed before first check-in, minute clamping, server-authoritative missed/timeout, one missed row per gap) is followed.
+Sentry's genuinely complex parts — Kafka partition clocks, clock pulses, backfill ordering, seats/quotas, ingestion-incident `unknown` marking — exist to solve distributed-ingestion problems nashcode does not have. Healthchecks.io ships the same user-visible guarantee with an indexed datetime column and a poll loop, and has for a decade. Missed-run detection is therefore shippable in v1 without over-promising, provided the semantics table above (margin default 1 min, runtime default 30 min, no missed before first check-in, minute clamping, server-authoritative missed/timeout, one missed row per gap) is followed.
 
 ### Sources
 - https://develop.sentry.dev/sdk/telemetry/check-ins/
