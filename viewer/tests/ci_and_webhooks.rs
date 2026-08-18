@@ -82,9 +82,11 @@ async fn a_repo_without_a_ci_script_is_skipped() {
 #[tokio::test]
 async fn a_hung_script_times_out_but_keeps_its_partial_output() {
     let bed = simple_bed(|root| {
-        with_ci_script(root, "#!/bin/sh\necho progress before the hang\nsleep 30\n")
+        with_ci_script(root, "#!/bin/sh\necho progress before the hang\nsleep 60\n")
     });
-    run_tip(&bed, Webhooks::new(BTreeMap::new()), Duration::from_millis(500), "main").await;
+    // Generous enough that the echo always lands first, even under a fully
+    // parallel workspace test run.
+    run_tip(&bed, Webhooks::new(BTreeMap::new()), Duration::from_secs(3), "main").await;
     let tip = bed.mirrors.repo("demo").tip("main").await.expect("tip");
     let run = bed.db.latest_run("demo", &tip).expect("query").expect("run exists");
     assert_eq!(run.status, status::TIMEOUT);

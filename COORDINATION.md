@@ -23,17 +23,20 @@ This file is for agents that are *building* it.
 
 ## Current state
 
-- `cargo nextest run` — 98 tests, all passing.
-- Fresh clone plus `cargo build` produces a runnable server: `build.rs` runs `npm ci` and
-  esbuild, and the binary embeds both bundles. Verified from a clean clone with no
-  `node_modules`.
+- **The repo is now a workspace**: `viewer/` (package `nashgit`, binary
+  `nashgit-viewer`) and `cli/` (package `nashgit-cli`, binary `nashgit`), merged with
+  full history from both original repos.
+- `cargo nextest run --workspace` — 189 tests (105 viewer + 84 cli), all passing.
+- `cargo clippy --workspace --all-targets` — clean.
+- Fresh clone plus `cargo build` produces both runnable binaries: the viewer's
+  `build.rs` runs `npm ci` and esbuild and embeds the bundles.
 - Binds loopback only. No hostname, bucket, account, or tailnet name in tracked source.
 
 ## Claims
 
 | Area | Agent | Status |
 |---|---|---|
-| WHOLE-TREE RESTRUCTURE: workspace merge (viewer/ + cli/), per the publish task | implementation agent | in progress — please hold edits until this row disappears |
+| — | — | nothing currently claimed |
 
 ## Who has been doing what
 

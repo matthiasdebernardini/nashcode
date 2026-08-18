@@ -66,9 +66,9 @@ Steps: wait for the boot-time runs; read `/brain` and the CI pages; POST
 Accept when: `chore/bad-lint` records `failed` and green branches record `passed`
 without any per-repo config; the green log page contains the script's output
 ("all green") and the red log the compile error; rerun answers ok and a new run for
-the same tip appears; `beta` (no `.nashgit/ci`) records no runs; job env is only the
-four documented vars (asserted by the CI script itself, which fails if `HOME` leaks —
-covered by the script printing its env size).
+the same tip appears; `beta` (no `.nashgit/ci`) never executes a job — its tips
+record as `skipped`, never red or green. (The job-env allowlist and the 30-minute
+timeout are covered by the crate's own tests.)
 
 ## T5 — Raw files (auto) — stories 42
 
@@ -145,15 +145,20 @@ Visual: the confirm step gates a red/running merge; the button offers branch del
 
 ## T11 — Restack (auto + visual) — stories 29, 30, 31, 32
 
-Auto steps: push a new commit to `stackb/base` that edits the line
-`stackb/conflict` also edits; POST `/demo/stackb/base/restack` (expect conflict);
-POST `/demo/stackb/conflict/delete`; restack again.
+Restack is invoked on the branch that **moved** (here `main`, after the merge); its
+descendants are re-inferred, with detached branches falling back to the default
+branch, exactly like the crate's own restack tests.
 
-Accept when: the conflicted restack answers 409 naming `base.txt`, and **neither**
-child's tip moved (atomic abort, nothing pushed); after deleting the conflicting
-branch the restack succeeds, `stackb/child` is rebased onto the new base tip (old tip
-no longer an ancestor path, new base tip is), the audit log records the restack, and
-a `restacked` webhook fires.
+Auto steps: push a commit to `main` adding a `base.txt` whose content fights the one
+`stackb/base` introduces; POST `/demo/main/restack` (expect an add/add conflict);
+POST `/demo/stackb/conflict/delete`; push a second `main` commit making `base.txt`
+byte-identical to stackb's so the replay is clean; restack again.
+
+Accept when: the conflicted restack answers 409 naming `base.txt` and **no** branch
+tip moved (atomic abort, nothing pushed); the delete route removes the branch from
+the remote; the clean restack succeeds and every descendant, `stackb/child`
+included, is rebased so the new `main` tip is its ancestor; the audit log records
+the restack; a `restacked` webhook fires.
 
 ## T12 — Traces (auto + visual) — stories 12–21
 

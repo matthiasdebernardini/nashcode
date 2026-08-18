@@ -206,7 +206,7 @@ mod hook {
     use std::process::{Command, Stdio};
 
     fn run_hook(stdin: &str, url: &str) -> std::process::Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nashgit"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nashgit-viewer"))
             .arg("hook")
             .env("NASHGIT_URL", url)
             .env("NASHGIT_REPO", "demo")
@@ -278,7 +278,7 @@ async fn the_hook_records_an_event_against_a_live_server() {
     .to_string();
     let url = format!("http://{addr}");
     let status = tokio::task::spawn_blocking(move || {
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_nashgit"))
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_nashgit-viewer"))
             .arg("hook")
             .env("NASHGIT_URL", url)
             .env_remove("NASHGIT_REPO")

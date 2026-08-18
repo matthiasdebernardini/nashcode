@@ -243,30 +243,30 @@ any harness that reports one.
 
 ### Wiring an agent
 
-The nashgit binary is also the client. Put it on the agent's machine and let the harness
+The viewer binary is also the trace client. Put it on the agent's machine and let the harness
 hooks feed it. For Claude Code, in `.claude/settings.json`:
 
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "nashgit hook" }] }],
-    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "nashgit hook" }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "nashgit hook" }] }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "nashgit-viewer hook" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "nashgit-viewer hook" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "nashgit-viewer hook" }] }]
   }
 }
 ```
 
-`nashgit hook` reads one hook payload from stdin, records it, and exits 0 — always. A
+`nashgit-viewer hook` reads one hook payload from stdin, records it, and exits 0 — always. A
 dead server, garbage input, or a missing repo never fails the agent's turn. Set
 `NASHGIT_DEBUG=1` to see why an event was dropped.
 
 For a run that happened without the hook, backfill from the harness transcript:
 
 ```sh
-nashgit trace push ~/.claude/projects/<project>/<session>.jsonl
-nashgit trace list
-nashgit trace show <session>
-nashgit doctor        # what is configured, is the server reachable
+nashgit-viewer trace push ~/.claude/projects/<project>/<session>.jsonl
+nashgit-viewer trace list
+nashgit-viewer trace show <session>
+nashgit-viewer doctor   # what is configured, is the server reachable
 ```
 
 ## Brain
@@ -291,7 +291,7 @@ Build on a Linux box that has `cargo`, `node`, and `npm`:
 cargo build --release
 ```
 
-Ship `target/release/nashgit` on its own. The assets are inside it, and node is not needed
+Ship `target/release/nashgit-viewer` on its own. The assets are inside it, and node is not needed
 at runtime. Only `git` is.
 
 A systemd unit:
@@ -302,7 +302,7 @@ Description=nashgit
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/nashgit
+ExecStart=/usr/local/bin/nashgit-viewer
 Environment=DGIT_URL=https://git.your-tailnet.example
 Environment=NASHGIT_REPOS=alpha,beta
 Environment=NASHGIT_MIRRORS=/var/lib/nashgit/mirrors

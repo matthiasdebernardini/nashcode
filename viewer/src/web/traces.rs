@@ -155,7 +155,7 @@ async fn traces_index(cx: &Cx) -> Result<Response> {
             <div class="Box">
                 if sessions.is_empty() {
                     <div class="Box-body color-fg-muted">
-                        "No traces yet. Wire the "<code>"nashgit hook"</code>" into your agent, or backfill with "<code>"nashgit trace push"</code>"."
+                        "No traces yet. Wire the "<code>"nashgit-viewer hook"</code>" into your agent, or backfill with "<code>"nashgit-viewer trace push"</code>"."
                     </div>
                 }
                 let n = &name;
@@ -344,7 +344,7 @@ async fn prompts_index(cx: &Cx) -> Result<Response> {
                 if prompts.is_empty() {
                     <div class="Box-body color-fg-muted">
                         if search_value.is_empty() {
-                            "No prompts recorded yet. Wire the "<code>"nashgit hook"</code>" into your agent."
+                            "No prompts recorded yet. Wire the "<code>"nashgit-viewer hook"</code>" into your agent."
                         } else {
                             "No prompt matches that search."
                         }

@@ -61,3 +61,12 @@ where the implementation had to choose.
   at the queue notes where to parallelize per repo if it ever backs up.
 - **`git` is assumed on `PATH`** at runtime, not just at build time. There is no
   vendored git and there never should be.
+
+## Workspace overlap (post-publish work)
+
+The viewer's agent-side subcommands (`nashgit-viewer hook`, `trace push/list/show`,
+`doctor`) overlap conceptually with the `cli/` crate: both are client tools an agent
+machine installs, both infer the repo from the working directory, both talk HTTP to a
+server. They are deliberately NOT unified yet — the CLI talks to dgit, the viewer client
+talks to the viewer, and merging the two surfaces is post-publish work, not a publish
+blocker.

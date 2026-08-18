@@ -52,16 +52,16 @@ Personas:
     produced that commit as JSON.
 16. As a reviewer, I open `/:repo/stacks` and read the merge/restack audit log — who,
     what, when, old tip, new tip — so the write history of the repo is inspectable.
-17. As an agent, my harness's hook (`nashgit hook` on PreToolUse/PostToolUse/Stop) records
+17. As an agent, my harness's hook (`nashgit-viewer hook` on PreToolUse/PostToolUse/Stop) records
     my events with zero cooperation from me; commits made between two of my events are
     attributed to my session automatically.
-18. As an agent, `nashgit hook` NEVER fails my turn: server down, garbage on stdin, no
+18. As an agent, `nashgit-viewer hook` NEVER fails my turn: server down, garbage on stdin, no
     configured repo — all exit 0 silently.
-19. As an agent (or Matthias backfilling), `nashgit trace push <file>` uploads a full
+19. As an agent (or Matthias backfilling), `nashgit-viewer trace push <file>` uploads a full
     transcript for a run that happened without the hook installed.
 20. As an agent, posting the same event batch twice stores one copy (idempotent on
     `(session, seq)`), so retries never double-write.
-21. As Matthias in a terminal, `nashgit trace list` and `nashgit trace show <session>`
+21. As Matthias in a terminal, `nashgit-viewer trace list` and `nashgit-viewer trace show <session>`
     read traces without a browser.
 
 ## C. Stacks
@@ -174,7 +174,7 @@ Personas:
 59. As an operator, `cargo build` on a fresh clone produces one self-contained binary —
     assets embedded, only `git` needed at runtime.
 60. As an operator, startup prints one doctor line per unset thing and what I lose by it;
-    `nashgit doctor` does the same from the client side and exits nonzero when the
+    `nashgit-viewer doctor` does the same from the client side and exits nonzero when the
     server is unreachable.
 61. As an operator, the server binds loopback only; `tailscale serve` is the front door;
     anything that can reach the port can claim any identity — documented, deliberate.

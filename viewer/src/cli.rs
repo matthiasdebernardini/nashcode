@@ -1,7 +1,7 @@
 //! The agent-side client. The same binary is the server and the client, so there is
 //! one thing to install.
 //!
-//! `nashgit hook` has one hard rule: **it must never fail an agent's turn.** An
+//! `nashgit-viewer hook` has one hard rule: **it must never fail an agent's turn.** An
 //! unreachable server, a malformed payload, or no configured repo all exit 0 quietly.
 //! Errors go to stderr only when `NASHGIT_DEBUG` is set.
 
@@ -69,7 +69,7 @@ fn client(timeout: Duration) -> reqwest::Client {
         .expect("reqwest client builds")
 }
 
-/// `nashgit hook` — read one agent-harness hook payload from stdin, record it, exit 0.
+/// `nashgit-viewer hook` — read one agent-harness hook payload from stdin, record it, exit 0.
 pub async fn hook() -> i32 {
     // Nothing below may propagate a failure.
     let mut raw = String::new();
@@ -118,7 +118,7 @@ pub async fn hook() -> i32 {
     0
 }
 
-/// `nashgit trace push <file>` — backfill a whole transcript for a session.
+/// `nashgit-viewer trace push <file>` — backfill a whole transcript for a session.
 pub async fn trace_push(file: &str, session: Option<String>, repo: Option<String>) -> i32 {
     let Ok(raw) = std::fs::read_to_string(file) else {
         eprintln!("cannot read {file}");
@@ -211,7 +211,7 @@ pub async fn trace_push(file: &str, session: Option<String>, repo: Option<String
     0
 }
 
-/// `nashgit trace list` — sessions for the repo, newest first.
+/// `nashgit-viewer trace list` — sessions for the repo, newest first.
 pub async fn trace_list(repo: Option<String>) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(repo) = repo.or_else(|| infer_repo(&cwd)) else {
@@ -253,7 +253,7 @@ pub async fn trace_list(repo: Option<String>) -> i32 {
     }
 }
 
-/// `nashgit trace show <session>` — one session's events.
+/// `nashgit-viewer trace show <session>` — one session's events.
 pub async fn trace_show(session: &str, repo: Option<String>) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(repo) = repo.or_else(|| infer_repo(&cwd)) else {
@@ -346,16 +346,17 @@ pub fn flag_value(args: &[String], name: &str) -> Option<String> {
 }
 
 pub const USAGE: &str = "\
-nashgit — stacked-branch viewer and agent-trace client
+nashgit-viewer — stacked-branch viewer and agent-trace client
 
 USAGE:
-  nashgit [serve]                          run the server (the default)
-  nashgit hook                             record one hook payload from stdin; always exits 0
-  nashgit trace push <file> [--session s] [--repo r]
+  nashgit-viewer [serve]                   run the server (the default)
+  nashgit-viewer hook                      record one hook payload from stdin; always exits 0
+  nashgit-viewer trace push <file> [--session s] [--repo r]
                                            backfill a transcript (JSONL) for a session
-  nashgit trace list [--repo r]            sessions, newest first
-  nashgit trace show <session> [--repo r]  one session's events
-  nashgit doctor                           config summary + server reachability
+  nashgit-viewer trace list [--repo r]     sessions, newest first
+  nashgit-viewer trace show <session> [--repo r]
+                                           one session's events
+  nashgit-viewer doctor                    config summary + server reachability
 
 The client half reads NASHGIT_URL (default http://127.0.0.1:8090) and infers the
 repo from the git remote of the working directory, falling back to NASHGIT_REPO.";

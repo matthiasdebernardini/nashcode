@@ -187,7 +187,7 @@ Exact bytes, `text/plain`. The branch may contain slashes.
 
 ## Traces
 
-If the `nashgit hook` is wired into your harness (see the README), every commit you make
+If the `nashgit-viewer hook` is wired into your harness (see the README), every commit you make
 is linked to your session automatically — no trailer, no convention. Humans get from your
 diff to your transcript in one click; you can read sessions back too:
 
