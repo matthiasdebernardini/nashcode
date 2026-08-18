@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{get, post_json, request, simple_bed, stacked_fixture};
+use common::{get, get_json, post_json, request, simple_bed, stacked_fixture};
 use topcoat::router::Method;
 
 /// The events a real agent run produces around one commit.
@@ -87,15 +87,10 @@ async fn the_same_batch_twice_stores_one_copy() {
         "a commit is never attributed twice"
     );
 
-    // And the session still holds exactly four events.
-    let (_, body) = request(
-        &bed.router,
-        Method::GET,
-        "/demo/traces/sess-1",
-        None,
-    )
-    .await;
-    assert_eq!(body.matches("Box-row").count() > 0, true);
+    // And the session still holds exactly four events, not eight.
+    let (_, body) = get_json(&bed.router, "/demo/traces/sess-1").await;
+    let session: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(session["events"].as_array().expect("events").len(), 4);
 }
 
 #[tokio::test]
@@ -132,32 +127,14 @@ async fn traces_read_back_as_json_when_asked() {
     let after = bed.remote_tip("demo", "part-1");
     post_json(&bed.router, "/demo/traces/events", session_events(&before, &after)).await;
 
-    let json_get = |path: String| {
-        let router = bed.router.clone();
-        async move {
-            let request = topcoat::router::request::Request::builder()
-                .method(Method::GET)
-                .uri(path)
-                .header("accept", "application/json")
-                .body(topcoat::router::Body::empty())
-                .expect("request builds");
-            let response = router.handle(request).await;
-            let status = response.status().as_u16();
-            let bytes =
-                http_body_util::BodyExt::collect(response.into_body()).await.expect("body");
-            let body = String::from_utf8_lossy(&bytes.to_bytes()).into_owned();
-            (status, body)
-        }
-    };
-
-    let (status, body) = json_get("/demo/traces".to_owned()).await;
+    let (status, body) = get_json(&bed.router, "/demo/traces").await;
     assert_eq!(status, 200);
     let sessions: serde_json::Value = serde_json::from_str(&body).expect("json list");
     assert_eq!(sessions[0]["session"], "sess-1");
     assert_eq!(sessions[0]["events"], 4);
     assert_eq!(sessions[0]["commits"], 1);
 
-    let (status, body) = json_get("/demo/traces/sess-1".to_owned()).await;
+    let (status, body) = get_json(&bed.router, "/demo/traces/sess-1").await;
     assert_eq!(status, 200);
     let session: serde_json::Value = serde_json::from_str(&body).expect("json session");
     assert_eq!(session["session"], "sess-1");
@@ -268,4 +245,59 @@ mod hook {
         let output = run_hook("", "http://127.0.0.1:9");
         assert!(output.status.success(), "no input must not fail the turn");
     }
+}
+
+/// End to end over a real listener: the hook infers the repo from the clone's origin
+/// remote, attaches HEAD, and the server records the event.
+#[tokio::test]
+async fn the_hook_records_an_event_against_a_live_server() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let router = nashgit::web::router(bed.app.clone());
+    let server = tokio::spawn(async move {
+        let _ = topcoat::serve_until(listener, router, async {
+            let _ = stop_rx.await;
+        })
+        .await;
+    });
+
+    let work = common::Work::clone_from(&bed.remote_root().join("demo.git"));
+    let payload = serde_json::json!({
+        "session_id": "sess-live",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "cwd": work.dir.to_string_lossy(),
+    })
+    .to_string();
+    let url = format!("http://{addr}");
+    let status = tokio::task::spawn_blocking(move || {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_nashgit"))
+            .arg("hook")
+            .env("NASHGIT_URL", url)
+            .env_remove("NASHGIT_REPO")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("hook spawns");
+        child.stdin.as_mut().expect("stdin").write_all(payload.as_bytes()).expect("write");
+        child.wait().expect("hook exits")
+    })
+    .await
+    .expect("join");
+    assert!(status.success());
+
+    let (status, body) = get(&bed.router, "/demo/traces/sess-live").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("PostToolUse"), "the event is recorded: {body}");
+
+    let _ = stop_tx.send(());
+    let _ = server.await;
 }

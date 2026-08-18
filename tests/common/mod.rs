@@ -279,6 +279,20 @@ pub async fn get(router: &Router, path: &str) -> (u16, String) {
     request(router, Method::GET, path, None).await
 }
 
+/// GET with `Accept: application/json`, for endpoints that serve both a page and JSON.
+pub async fn get_json(router: &Router, path: &str) -> (u16, String) {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header("accept", "application/json")
+        .body(Body::empty())
+        .expect("request builds");
+    let response = router.handle(request).await;
+    let status = response.status().as_u16();
+    let bytes = to_bytes(response.into_body(), 64 * 1024 * 1024).await.expect("body reads");
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 pub async fn post_json(router: &Router, path: &str, payload: serde_json::Value) -> (u16, String) {
     request(router, Method::POST, path, Some(("application/json", payload.to_string()))).await
 }
