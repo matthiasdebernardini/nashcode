@@ -7,6 +7,7 @@
 pub mod api;
 pub mod components;
 pub mod pages;
+pub mod traces;
 
 use std::sync::Arc;
 

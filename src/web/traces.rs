@@ -1,6 +1,5 @@
 //! Trace routes and pages: record agent sessions, read them back, and render them.
 
-use serde::Deserialize;
 use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::{
@@ -12,7 +11,7 @@ use topcoat::view::view;
 
 use crate::db::{TraceEvent, TraceSession};
 use crate::traces::{self, BatchIn};
-use crate::web::components::{shell, unavailable_card};
+use crate::web::components::shell;
 use crate::web::{app, repo_ctx};
 
 path_param!(repo);
@@ -123,9 +122,6 @@ async fn commit_trace(cx: &Cx) -> Result<Response> {
         serde_json::json!({ "commit": sha, "sessions": sessions }).to_string(),
     ))
 }
-
-#[derive(Debug, Default, Deserialize)]
-struct Nothing {}
 
 /// `GET /{repo}/traces` — sessions, newest first. JSON for `Accept: application/json`.
 #[route(GET "/{repo}/traces")]

@@ -703,6 +703,21 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
         None => repo.commits(&format!("{}~20", node.tip), &node.tip).await.unwrap_or_default(),
     };
 
+    // A commit whose trace is known links straight to the conversation that wrote it.
+    let commits: Vec<(crate::git::Commit, Option<String>)> = {
+        let mut out = Vec::new();
+        for commit in commits {
+            let session = app(cx)
+                .db
+                .trace_sessions_for_commit(&name, &commit.id)
+                .unwrap_or_default()
+                .into_iter()
+                .next();
+            out.push((commit, session));
+        }
+        out
+    };
+
     // Per-file three-dot diffs against the merge base with the parent.
     let mut files: Vec<(String, String, String)> = Vec::new(); // (path, status, patch)
     if let Some(parent) = &node.parent {
@@ -857,10 +872,16 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
                 if commits.is_empty() {
                     <div class="Box-row color-fg-muted">"No commits beyond the parent."</div>
                 }
-                for commit in commits {
+                let n = &name;
+                for (commit, trace_session) in commits {
                     <div key=(commit.id.clone()) class="Box-row d-flex flex-items-center gap-2">
                         <code class="commit-sha">(commit.short.clone())</code>
                         <span>(commit.subject.clone())</span>
+                        if let Some(session) = &trace_session {
+                            <a class="Link--secondary text-small" href=(format!("/{n}/traces/{session}"))>
+                                <i class="ph ph-robot"></i>" trace"
+                            </a>
+                        }
                         <span class="ml-auto color-fg-muted text-small">
                             (format!("{} · {}", commit.author, commit.date))
                         </span>

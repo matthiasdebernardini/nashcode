@@ -74,12 +74,13 @@ pub async fn shell(
 /// GitHub-style tab nav for a repo: Code / Stacks / Plans / Board / CI.
 #[component]
 pub async fn repo_tabs(#[into] repo: String, active: &'static str) -> Result {
-    let tabs: [(&str, &str, &str, String); 5] = [
+    let tabs: [(&str, &str, &str, String); 6] = [
         ("code", "Code", "ph-code", format!("/{repo}")),
         ("stacks", "Stacks", "ph-stack", format!("/{repo}/stacks")),
         ("plans", "Plans", "ph-file-text", format!("/{repo}/plans")),
         ("board", "Board", "ph-kanban", format!("/{repo}/board")),
         ("ci", "CI", "ph-play", format!("/{repo}/ci")),
+        ("traces", "Traces", "ph-robot", format!("/{repo}/traces")),
     ];
     view! {
         <nav class="UnderlineNav container-lg px-3" aria-label="Repository">

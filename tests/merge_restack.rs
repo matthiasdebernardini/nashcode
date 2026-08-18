@@ -198,3 +198,52 @@ async fn merging_flips_the_branchs_card_to_done_in_the_same_push() {
     let audit = bed.db.audit("demo", 5).expect("audit");
     assert!(audit.iter().any(|e| e.detail.contains("tasks/ship-part-1.md")));
 }
+
+/// The bug this guards: pushes that rewrite or delete a ref used to go out with a bare
+/// `--force`, so work pushed after the viewer last looked was silently destroyed. Every
+/// such push now carries `--force-with-lease` against the tip we actually read, so a
+/// branch that moved under us is rejected instead of thrown away.
+#[tokio::test]
+async fn deleting_a_branch_that_moved_under_us_is_rejected_not_forced() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+
+    // Someone pushes to part-2 without the viewer noticing: the mirror still holds the
+    // old tip, which is exactly the stale-read window a lease exists to catch.
+    let other = Work::clone_from(&bed.remote_root().join("demo.git"));
+    other.checkout("part-2");
+    other.write("part-2-extra.txt", "written by someone else\n");
+    let racing_commit = other.commit_all("concurrent work on part-2");
+    other.push("part-2");
+
+    let outcome = bed.app.ops.delete_branch("demo", "part-2", &bed.actor()).await;
+
+    assert!(outcome.is_err(), "the delete must not discard the concurrent push");
+    assert_eq!(
+        bed.remote_tip("demo", "part-2"),
+        racing_commit,
+        "the branch and its new commit survived"
+    );
+}
+
+/// The same guard, from the other side: when nothing raced us, the delete goes through.
+#[tokio::test]
+async fn deleting_an_unmoved_branch_still_works() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+
+    bed.app
+        .ops
+        .delete_branch("demo", "part-2", &bed.actor())
+        .await
+        .expect("delete succeeds when the lease matches");
+
+    let bare = bed.remote_root().join("demo.git");
+    let still_there = std::process::Command::new("git")
+        .current_dir(&bare)
+        .args(["rev-parse", "--verify", "refs/heads/part-2"])
+        .status()
+        .expect("git runs")
+        .success();
+    assert!(!still_there, "the branch is gone from the remote");
+}

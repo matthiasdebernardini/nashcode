@@ -12,4 +12,5 @@ pub mod mirror;
 pub mod ops;
 pub mod render;
 pub mod stack;
+pub mod traces;
 pub mod web;
