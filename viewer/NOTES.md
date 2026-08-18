@@ -70,3 +70,23 @@ machine installs, both infer the repo from the working directory, both talk HTTP
 server. They are deliberately NOT unified yet — the CLI talks to dgit, the viewer client
 talks to the viewer, and merging the two surfaces is post-publish work, not a publish
 blocker.
+
+## Code intelligence choices (2026-08-19, from the research pass)
+
+- **Graph: codanna + SCIP, hybrid.** codanna (Apache-2.0, `lib` crate, tree-sitter,
+  covers our three languages) builds the graph on every push — fast and incremental,
+  but name resolution is heuristic. SCIP is regenerated on merge as the accurate
+  overlay (`rust-analyzer scip`, `scip-typescript`, `scip-python`) and read in-process
+  with the first-party `scip` crate. Rejected: stack-graphs (archived 2025-09), Kythe
+  (frozen since the 2024 layoffs), Glean (consumes SCIP anyway; heavy ops), GitLab gkg
+  (maintenance mode, successor is EE-licensed).
+- **Known costs:** rust-analyzer's SCIP pass is single-threaded
+  (rust-analyzer#18140) — shard by crate and cache by blob SHA. `scip-python` is the
+  worst-maintained of the three indexers; where it fails, that repo keeps codanna
+  edges only. SCIP occurrences don't name the enclosing function; the range→symbol
+  interval map is ours to build (~200 lines) and is what impact queries hang off.
+- **Embeddings: `JinaEmbeddingsV2BaseCode`** — the one code-trained model fastembed
+  ships (768-dim, Apache-2.0), and it beats the general-text models on code retrieval
+  by a wide margin. Upgrade order when quality pinches: add fastembed's `TextRerank`
+  over the top ~50 hits first; only then swap the encoder via
+  `UserDefinedEmbeddingModel` (nomic-embed-code or CodeSage, local ONNX).
