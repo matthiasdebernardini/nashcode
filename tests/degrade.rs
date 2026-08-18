@@ -34,6 +34,7 @@ async fn every_page_survives_a_dead_git_server_on_an_existing_mirror() {
         bind: "127.0.0.1:0".to_owned(),
         db_path: live.root.path().join("nashgit-dead.db"),
         ci_logs: live.root.path().join("ci-logs"),
+        traces: live.root.path().join("traces"),
         webhooks: BTreeMap::new(),
         anthropic_key: None,
         anthropic_url: "http://127.0.0.1:9".to_owned(),

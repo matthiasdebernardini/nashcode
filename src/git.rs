@@ -162,7 +162,8 @@ impl Repo {
             command.args(self.auth.config_args(remote));
         }
         command.args(args);
-        run_command(command).await
+        let limit = if remote.is_some() { REMOTE_TIMEOUT } else { LOCAL_TIMEOUT };
+        run_command_within(command, limit).await
     }
 
     /// Run git against a remote with credentials applied.
@@ -187,6 +188,27 @@ impl Repo {
         Ok(names)
     }
 
+    /// Every branch and its tip, read in one command.
+    ///
+    /// Reading branches and then asking for each tip separately can straddle a fetch and
+    /// return a mix of old and new tips, which yields wrong merge bases and wrong stack
+    /// parents. One `for-each-ref` is a single consistent view, and one process instead
+    /// of N.
+    pub async fn tips(&self) -> GitResult<std::collections::BTreeMap<String, String>> {
+        let out = self
+            .run(&[
+                "for-each-ref",
+                "--format=%(refname:short)%09%(objectname)",
+                "refs/heads/",
+            ])
+            .await?;
+        Ok(out
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .map(|(name, id)| (name.trim().to_owned(), id.trim().to_owned()))
+            .collect())
+    }
+
     /// The commit a branch points at.
     pub async fn tip(&self, branch: &str) -> GitResult<String> {
         let out = self.run(&["rev-parse", &format!("refs/heads/{branch}")]).await?;
@@ -195,7 +217,7 @@ impl Repo {
 
     /// Resolve any revision to a commit id.
     pub async fn rev_parse(&self, rev: &str) -> GitResult<String> {
-        Ok(self.run(&["rev-parse", rev]).await?.trim().to_owned())
+        Ok(self.run(&["rev-parse", "--end-of-options", rev]).await?.trim().to_owned())
     }
 
     /// The repo's default branch, as recorded in `HEAD`. Falls back to whichever of
@@ -303,7 +325,9 @@ impl Repo {
     pub async fn show_file(&self, rev: &str, path: &str) -> GitResult<Option<Vec<u8>>> {
         let mut command = tokio::process::Command::new("git");
         command.args(self.base_args());
-        command.args(["show", &format!("{rev}:{path}")]);
+        // `--end-of-options` stops a revision that starts with `-` from being parsed
+        // as a flag: these strings arrive from URL segments.
+        command.args(["show", "--end-of-options", &format!("{rev}:{path}")]);
         let output = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -413,7 +437,26 @@ fn parse_name_status(raw: &str) -> Vec<ChangedFile> {
     files
 }
 
-async fn run_command(mut command: tokio::process::Command) -> GitResult<GitOutput> {
+/// How long a local git command may run before it is treated as wedged.
+pub const LOCAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long a command that talks to the network may run. Longer, because a first
+/// clone of a real repo is not fast.
+pub const REMOTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+async fn run_command(command: tokio::process::Command) -> GitResult<GitOutput> {
+    run_command_within(command, LOCAL_TIMEOUT).await
+}
+
+/// Run git, killing it if it outlives `limit`.
+///
+/// Without this a blackholed peer hangs the fetch forever, and because the caller holds
+/// the repo's lock across the call, every later request for that repo queues behind it.
+/// A hang is worse than an error: the error path already degrades gracefully.
+async fn run_command_within(
+    mut command: tokio::process::Command,
+    limit: std::time::Duration,
+) -> GitResult<GitOutput> {
     // A hung credential or editor prompt would wedge the request forever.
     command
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -421,13 +464,24 @@ async fn run_command(mut command: tokio::process::Command) -> GitResult<GitOutpu
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = command.output().await?;
-    Ok(GitOutput {
-        code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    match tokio::time::timeout(limit, command.output()).await {
+        Ok(output) => {
+            let output = output?;
+            Ok(GitOutput {
+                code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            })
+        }
+        Err(_) => Err(GitError::Failed {
+            args: vec!["<timed out>".to_owned()],
+            code: None,
+            stderr: format!("git did not finish within {}s", limit.as_secs()),
+        }),
+    }
 }
 
 /// `git clone --mirror <remote> <dir>`.
@@ -439,7 +493,7 @@ pub async fn clone_mirror(remote: &str, dir: &Path, auth: &Auth) -> GitResult<()
     command.args(auth.config_args(remote));
     command.args(["clone", "--mirror", remote]);
     command.arg(dir);
-    let output = run_command(command).await?;
+    let output = run_command_within(command, REMOTE_TIMEOUT).await?;
     if output.ok() {
         Ok(())
     } else {

@@ -145,11 +145,19 @@ impl Scratch {
     }
 
     /// Push refspecs to the real remote, atomically, with auth.
-    async fn push(&self, remote: &str, force: bool, refspecs: &[String]) -> OpResult<()> {
+    ///
+    /// `leases` carry `<ref>:<expected sha>` pairs. Every rewrite goes out as
+    /// `--force-with-lease`, never a bare `--force`: if anyone moved the branch since we
+    /// read it, the push is rejected instead of overwriting their work. Combined with
+    /// `--atomic`, a stale mirror or a racing agent turns into a clean error rather than
+    /// lost commits.
+    async fn push(&self, remote: &str, leases: &[String], refspecs: &[String]) -> OpResult<()> {
+        let lease_args: Vec<String> = leases
+            .iter()
+            .map(|lease| format!("--force-with-lease={lease}"))
+            .collect();
         let mut args = vec!["push", "--atomic"];
-        if force {
-            args.push("--force");
-        }
+        args.extend(lease_args.iter().map(String::as_str));
         args.push(remote);
         args.extend(refspecs.iter().map(String::as_str));
         let with_identity: Vec<&str> =
@@ -252,10 +260,14 @@ impl Ops {
         if !cards_done.is_empty() && default_branch != parent {
             refspecs.push(format!("refs/heads/{default_branch}:refs/heads/{default_branch}"));
         }
+        let mut leases: Vec<String> = Vec::new();
         if delete_branch && branch != default_branch {
             refspecs.push(format!(":refs/heads/{branch}"));
+            // Delete only the tip we just merged. A commit pushed to the branch since
+            // then makes this fail instead of throwing that work away.
+            leases.push(format!("refs/heads/{branch}:{branch_tip}"));
         }
-        scratch.push(&self.remote(repo_name), false, &refspecs).await?;
+        scratch.push(&self.remote(repo_name), &leases, &refspecs).await?;
         self.mirrors.refresh_now(repo_name).await;
 
         let mut detail = if ff {
@@ -428,7 +440,11 @@ impl Ops {
             .iter()
             .map(|(name, _, _)| format!("refs/heads/{name}:refs/heads/{name}"))
             .collect();
-        scratch.push(&self.remote(repo_name), true, &refspecs).await?;
+        let leases: Vec<String> = rebased
+            .iter()
+            .map(|(name, old_tip, _)| format!("refs/heads/{name}:{old_tip}"))
+            .collect();
+        scratch.push(&self.remote(repo_name), &leases, &refspecs).await?;
         self.mirrors.refresh_now(repo_name).await;
 
         for (name, old_tip, new_tip) in &rebased {
@@ -466,7 +482,18 @@ impl Ops {
             OpError::NotFound(format!("branch {branch}"))
         })?;
         let remote = self.remote(repo_name);
-        let out = mirror.run_remote(&remote, &["push", &remote, &format!(":refs/heads/{branch}")]).await?;
+        let out = mirror
+            .run_remote(
+                &remote,
+                &[
+                    "push",
+                    "--atomic",
+                    &format!("--force-with-lease=refs/heads/{branch}:{old_tip}"),
+                    &remote,
+                    &format!(":refs/heads/{branch}"),
+                ],
+            )
+            .await?;
         if !out.ok() {
             return Err(OpError::Git(format!("delete rejected: {}", out.stderr.trim())));
         }
@@ -474,7 +501,7 @@ impl Ops {
         let _ = self.db.record_audit(NewAudit {
             repo: repo_name.to_owned(),
             actor: actor.login.clone(),
-            action: "merge".to_owned(),
+            action: "delete".to_owned(),
             branch: branch.to_owned(),
             old_tip,
             new_tip: String::new(),
@@ -511,7 +538,7 @@ impl Ops {
         let new_tip = scratch.git(&["rev-parse", "HEAD"]).await?.trim().to_owned();
 
         let refspec = format!("refs/heads/{default_branch}:refs/heads/{default_branch}");
-        scratch.push(&self.remote(repo_name), false, &[refspec]).await?;
+        scratch.push(&self.remote(repo_name), &[], &[refspec]).await?;
         self.mirrors.refresh_now(repo_name).await;
         Ok(new_tip)
     }

@@ -73,6 +73,7 @@ fn asking_bed(root: tempfile::TempDir, stub_url: &str, key: Option<&str>) -> com
         bind: "127.0.0.1:0".to_owned(),
         db_path: root.path().join("nashgit.db"),
         ci_logs: root.path().join("ci-logs"),
+        traces: root.path().join("traces"),
         webhooks: BTreeMap::new(),
         anthropic_key: key.map(str::to_owned),
         anthropic_url: stub_url.to_owned(),

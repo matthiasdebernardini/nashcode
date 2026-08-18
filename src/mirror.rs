@@ -149,13 +149,28 @@ impl Mirrors {
                 .run_remote(
                     &remote,
                     &[
+                        "-c",
+                        // Never repack on the request path. Maintenance runs on its own
+                        // schedule; a gc triggered by a page load is a latency spike at
+                        // the worst moment.
+                        "gc.auto=0",
+                        "-c",
+                        // Give up on a stalled transfer instead of hanging to the
+                        // timeout: a tailnet peer that vanishes mid-fetch is common.
+                        "http.lowSpeedLimit=1000",
+                        "-c",
+                        "http.lowSpeedTime=30",
                         "fetch",
+                        // One ref transaction, so a reader never sees half a fetch.
+                        "--atomic",
                         "--prune",
                         "--prune-tags",
-                        "--tags",
                         "--no-write-fetch-head",
                         &remote,
                         "+refs/heads/*:refs/heads/*",
+                        // Forced, unlike `--tags`. A retagged ref on the server would
+                        // otherwise fail every future fetch and strand the mirror.
+                        "+refs/tags/*:refs/tags/*",
                     ],
                 )
                 .await
@@ -265,6 +280,7 @@ mod tests {
             bind: "127.0.0.1:0".to_owned(),
             db_path: dir.path().join("db.sqlite"),
             ci_logs: dir.path().join("logs"),
+            traces: dir.path().join("traces"),
             webhooks: Default::default(),
             anthropic_key: None,
             anthropic_url: "https://api.anthropic.com".to_owned(),

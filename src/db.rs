@@ -330,6 +330,147 @@ impl Db {
         })
     }
 
+    // ---- traces ----------------------------------------------------------------
+
+    /// Store one trace event. `seq: None` gets the session's next number; a duplicate
+    /// `(repo, session, seq)` is ignored, which is what makes batch retries safe.
+    /// Returns true when a row was written.
+    pub fn add_trace_event(&self, event: &NewTraceEvent) -> DbResult<bool> {
+        self.with(|conn| {
+            let seq: i64 = match event.seq {
+                Some(seq) => seq,
+                None => conn.query_row(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM trace_events
+                     WHERE repo = ?1 AND session = ?2",
+                    params![event.repo, event.session],
+                    |row| row.get(0),
+                )?,
+            };
+            let changed = conn.execute(
+                "INSERT OR IGNORE INTO trace_events
+                     (repo, session, seq, kind, payload, head, agent, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    event.repo,
+                    event.session,
+                    seq,
+                    event.kind,
+                    event.payload,
+                    event.head,
+                    event.agent,
+                    now()
+                ],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// The head recorded by the session's latest event that carried one.
+    pub fn trace_last_head(&self, repo: &str, session: &str) -> DbResult<Option<String>> {
+        self.with(|conn| {
+            conn.query_row(
+                "SELECT head FROM trace_events
+                 WHERE repo = ?1 AND session = ?2 AND head IS NOT NULL
+                 ORDER BY seq DESC LIMIT 1",
+                params![repo, session],
+                |row| row.get(0),
+            )
+            .optional()
+        })
+    }
+
+    /// Attribute commits to a session. Duplicates are ignored.
+    pub fn attribute_commits(&self, repo: &str, session: &str, shas: &[String]) -> DbResult<()> {
+        self.with(|conn| {
+            for sha in shas {
+                conn.execute(
+                    "INSERT OR IGNORE INTO trace_commits (repo, session, sha, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![repo, session, sha, now()],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Every session in a repo, newest first.
+    pub fn trace_sessions(&self, repo: &str, limit: usize) -> DbResult<Vec<TraceSession>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT e.session,
+                        COALESCE(MAX(e.agent), '') AS agent,
+                        MIN(e.created_at), MAX(e.created_at), COUNT(*),
+                        (SELECT COUNT(*) FROM trace_commits c
+                          WHERE c.repo = e.repo AND c.session = e.session)
+                 FROM trace_events e WHERE e.repo = ?1
+                 GROUP BY e.session ORDER BY MAX(e.created_at) DESC LIMIT ?2",
+            )?;
+            let rows = statement
+                .query_map(params![repo, limit as i64], |row| {
+                    Ok(TraceSession {
+                        session: row.get(0)?,
+                        agent: row.get::<_, String>(1).map(|a| (!a.is_empty()).then_some(a))?,
+                        started_at: row.get(2)?,
+                        last_event_at: row.get(3)?,
+                        events: row.get(4)?,
+                        commits: row.get(5)?,
+                    })
+                })?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// One session's events, in order.
+    pub fn trace_events(&self, repo: &str, session: &str) -> DbResult<Vec<TraceEvent>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT seq, kind, payload, head, agent, created_at FROM trace_events
+                 WHERE repo = ?1 AND session = ?2 ORDER BY seq",
+            )?;
+            let rows = statement
+                .query_map(params![repo, session], |row| {
+                    Ok(TraceEvent {
+                        seq: row.get(0)?,
+                        kind: row.get(1)?,
+                        payload: row.get(2)?,
+                        head: row.get(3)?,
+                        agent: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                })?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// The commits a session produced, oldest first.
+    pub fn trace_session_commits(&self, repo: &str, session: &str) -> DbResult<Vec<String>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT sha FROM trace_commits WHERE repo = ?1 AND session = ?2
+                 ORDER BY created_at, sha",
+            )?;
+            let rows = statement
+                .query_map(params![repo, session], |row| row.get(0))?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// The session(s) that produced a commit.
+    pub fn trace_sessions_for_commit(&self, repo: &str, sha: &str) -> DbResult<Vec<String>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT DISTINCT session FROM trace_commits WHERE repo = ?1 AND sha = ?2",
+            )?;
+            let rows = statement
+                .query_map(params![repo, sha], |row| row.get(0))?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
     // ---- audit -----------------------------------------------------------------
 
     pub fn record_audit(&self, entry: NewAudit) -> DbResult<()> {
@@ -412,6 +553,44 @@ pub struct CommentFilter {
     pub file: Option<String>,
     /// Canonical timestamp; only strictly later comments come back.
     pub since: Option<String>,
+}
+
+/// A trace event on its way in.
+#[derive(Debug, Clone)]
+pub struct NewTraceEvent {
+    pub repo: String,
+    pub session: String,
+    /// `None` assigns the session's next number (live hook events); batches carry
+    /// explicit numbers so retries are idempotent.
+    pub seq: Option<i64>,
+    pub kind: String,
+    /// The event as JSON text, stored verbatim.
+    pub payload: String,
+    /// The agent's repo `HEAD` when the event happened, if known.
+    pub head: Option<String>,
+    pub agent: Option<String>,
+}
+
+/// A stored trace event.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TraceEvent {
+    pub seq: i64,
+    pub kind: String,
+    pub payload: String,
+    pub head: Option<String>,
+    pub agent: Option<String>,
+    pub created_at: String,
+}
+
+/// One agent session, summarized.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TraceSession {
+    pub session: String,
+    pub agent: Option<String>,
+    pub started_at: String,
+    pub last_event_at: String,
+    pub events: i64,
+    pub commits: i64,
 }
 
 /// An audit line on its way in.
@@ -497,44 +676,6 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 CREATE INDEX IF NOT EXISTS audit_repo ON audit (repo, created_at);
 
--- Agent traces. A session is one agent run; its events carry the git HEAD at the
--- moment they happened, which is how commits get attributed without the agent
--- having to cooperate.
-CREATE TABLE IF NOT EXISTS trace_sessions (
-    session         TEXT PRIMARY KEY,
-    repo            TEXT NOT NULL,
-    agent           TEXT NOT NULL,
-    cwd             TEXT,
-    started_at      TEXT NOT NULL,
-    last_at         TEXT NOT NULL,
-    transcript_path TEXT
-);
-CREATE INDEX IF NOT EXISTS trace_sessions_repo ON trace_sessions (repo, last_at);
-
-CREATE TABLE IF NOT EXISTS trace_events (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    session    TEXT NOT NULL,
-    event_id   TEXT NOT NULL,
-    seq        INTEGER NOT NULL,
-    kind       TEXT NOT NULL,
-    tool       TEXT,
-    summary    TEXT NOT NULL,
-    payload    TEXT NOT NULL,
-    head       TEXT,
-    created_at TEXT NOT NULL,
-    UNIQUE (session, event_id)
-);
-CREATE INDEX IF NOT EXISTS trace_events_session ON trace_events (session, seq);
-
-CREATE TABLE IF NOT EXISTS trace_commits (
-    session     TEXT NOT NULL,
-    repo        TEXT NOT NULL,
-    commit_id   TEXT NOT NULL,
-    from_commit TEXT,
-    created_at  TEXT NOT NULL,
-    PRIMARY KEY (session, commit_id)
-);
-CREATE INDEX IF NOT EXISTS trace_commits_lookup ON trace_commits (repo, commit_id);
 "#;
 
 #[cfg(test)]

@@ -21,6 +21,16 @@ fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
     let root = Path::new(&manifest);
 
+    // A Rust-only compile without node: empty bundles, clearly marked.
+    println!("cargo:rerun-if-env-changed=NASHGIT_SKIP_ASSET_BUILD");
+    if std::env::var("NASHGIT_SKIP_ASSET_BUILD").is_ok_and(|v| !v.trim().is_empty()) {
+        let stub = "/* NASHGIT_SKIP_ASSET_BUILD was set: assets not built */\n";
+        std::fs::write(format!("{out_dir}/nashgit.js"), stub).expect("write stub js");
+        std::fs::write(format!("{out_dir}/nashgit.css"), stub).expect("write stub css");
+        println!("cargo:rustc-env=NASHGIT_ASSET_HASH=skipped");
+        return;
+    }
+
     if !root.join("node_modules").exists() {
         run(Command::new("npm").arg("ci").current_dir(root), "npm ci");
     }

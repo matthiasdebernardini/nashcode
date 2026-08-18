@@ -20,6 +20,8 @@ pub struct Config {
     pub db_path: PathBuf,
     /// Directory holding CI log files.
     pub ci_logs: PathBuf,
+    /// Directory holding raw trace transcripts.
+    pub traces: PathBuf,
     /// Event name -> webhook URLs.
     pub webhooks: BTreeMap<String, Vec<String>>,
     /// `ANTHROPIC_API_KEY`. `/brain/ask` answers 404 without it.
@@ -67,6 +69,11 @@ impl Config {
             &mirrors.join("ci-logs").to_string_lossy(),
         ));
 
+        let traces = PathBuf::from(env_or(
+            "NASHGIT_TRACES",
+            &mirrors.join("traces").to_string_lossy(),
+        ));
+
         let webhooks = match std::env::var("NASHGIT_WEBHOOKS") {
             Ok(path) if !path.trim().is_empty() => load_webhooks(Path::new(path.trim())),
             _ => BTreeMap::new(),
@@ -80,6 +87,7 @@ impl Config {
             bind: env_or("NASHGIT_BIND", "127.0.0.1:8090"),
             db_path,
             ci_logs,
+            traces,
             webhooks,
             anthropic_key: std::env::var("ANTHROPIC_API_KEY")
                 .ok()
