@@ -177,10 +177,53 @@ pub fn testbed_with(root: tempfile::TempDir, repos: &[&str], webhooks: BTreeMap<
 }
 
 pub fn testbed_from_config(root: tempfile::TempDir, config: Arc<Config>) -> TestBed {
+    testbed_build(root, config, false)
+}
+
+/// Like `testbed_from_config`, but with the tip observer wired the way `main.rs`
+/// wires it: every newly seen branch tip enqueues a CI run and fires the `push`
+/// webhook. Kept opt-in because the phantom queued runs would block merge tests.
+pub fn observed_bed(build: impl FnOnce(&Path) -> Work, webhooks: BTreeMap<String, Vec<String>>) -> TestBed {
+    let root = tempfile::tempdir().expect("tempdir");
+    let remotes = root.path().join("remotes");
+    std::fs::create_dir_all(&remotes).expect("mkdir");
+    build(&remotes);
+    let config = Arc::new(Config {
+        dgit_url: remotes.to_string_lossy().into_owned(),
+        git_token: String::new(),
+        repos: vec!["demo".to_owned()],
+        mirrors: root.path().join("mirrors"),
+        bind: "127.0.0.1:0".to_owned(),
+        db_path: root.path().join("nashgit.db"),
+        ci_logs: root.path().join("ci-logs"),
+        webhooks,
+        anthropic_key: None,
+        anthropic_url: "http://127.0.0.1:1".to_owned(),
+        brain_model: "claude-opus-5".to_owned(),
+    });
+    testbed_build(root, config, true)
+}
+
+fn testbed_build(root: tempfile::TempDir, config: Arc<Config>, observe: bool) -> TestBed {
     let db = Db::open(&config.db_path).expect("db opens");
     let hooks = Webhooks::new(config.webhooks.clone());
     let (ci, _ci_rx) = CiQueue::new(db.clone());
-    let mirrors = Mirrors::new(config.clone(), db.clone());
+    let mut mirrors = Mirrors::new(config.clone(), db.clone());
+    if observe {
+        let ci = ci.clone();
+        let hooks = hooks.clone();
+        mirrors = mirrors.with_observer(Arc::new(move |tip: nashgit::mirror::NewTip| {
+            ci.enqueue(&tip.repo, &tip.branch, &tip.commit);
+            hooks.send(
+                nashgit::hooks::PUSH,
+                serde_json::json!({
+                    "repo": tip.repo,
+                    "branch": tip.branch,
+                    "commit": tip.commit,
+                }),
+            );
+        }));
+    }
     let ops = Ops {
         config: config.clone(),
         db: db.clone(),
