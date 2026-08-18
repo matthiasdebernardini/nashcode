@@ -66,6 +66,13 @@ impl Work {
         std::fs::write(full, content).expect("write");
     }
 
+    /// Write raw bytes, for fixtures that need a file git treats as binary.
+    pub fn write_bytes(&self, path: &str, content: &[u8]) {
+        let full = self.dir.join(path);
+        std::fs::create_dir_all(full.parent().expect("has parent")).expect("mkdir");
+        std::fs::write(full, content).expect("write");
+    }
+
     pub fn commit_all(&self, message: &str) -> String {
         git(&self.dir, &["add", "-A"]);
         git(&self.dir, &["commit", "-m", message]);
