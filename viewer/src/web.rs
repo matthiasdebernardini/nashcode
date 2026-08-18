@@ -45,7 +45,13 @@ impl std::fmt::Debug for App {
 
 /// Build the router. `discover()` collects every `#[page]` and `#[route]` in the crate.
 pub fn router(app: App) -> Router {
-    Router::builder().discover().app_context(app).build()
+    // Whole agent transcripts arrive as one request on the traces endpoints;
+    // the 2 MiB default rejects any real session.
+    Router::builder()
+        .layer(topcoat::router::BodyLimit::max(64 * 1024 * 1024))
+        .discover()
+        .app_context(app)
+        .build()
 }
 
 /// The app state, from any handler.

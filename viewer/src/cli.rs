@@ -198,10 +198,27 @@ pub async fn trace_push(file: &str, session: Option<String>, repo: Option<String
     let base = base_url();
     let http = client(Duration::from_secs(60));
 
-    // Events in idempotent chunks, then the raw transcript verbatim.
+    // Events in idempotent chunks, then the raw transcript verbatim. Chunks are
+    // bounded by serialized size, not event count: a large transcript's tool
+    // results can put 2000 events far past the server's request-body limit.
+    const CHUNK_BYTES: usize = 800 * 1024;
+    let mut chunks: Vec<Vec<serde_json::Value>> = vec![Vec::new()];
+    let mut chunk_bytes = 0usize;
+    for event in events {
+        let len = event.to_string().len();
+        let last = chunks.last_mut().expect("chunks starts non-empty");
+        if !last.is_empty() && chunk_bytes + len > CHUNK_BYTES {
+            chunks.push(vec![event]);
+            chunk_bytes = len;
+        } else {
+            last.push(event);
+            chunk_bytes += len;
+        }
+    }
+
     let mut stored = 0u64;
     let mut duplicates = 0u64;
-    for chunk in events.chunks(2000) {
+    for chunk in &chunks {
         let body = serde_json::json!({ "session": session, "agent": "backfill", "events": chunk });
         let url = format!("{base}/{repo}/traces/events");
         match http.post(&url).json(&body).send().await {
