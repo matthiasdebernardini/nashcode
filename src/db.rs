@@ -147,7 +147,7 @@ impl Db {
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
-    fn with<T>(&self, f: impl FnOnce(&Connection) -> DbResult<T>) -> DbResult<T> {
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&Connection) -> DbResult<T>) -> DbResult<T> {
         // A poisoned lock means another thread panicked mid-statement. The connection
         // itself is still sound, so recover rather than cascading the panic into a 500.
         let guard = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -461,6 +461,29 @@ CREATE TABLE IF NOT EXISTS seen_tips (
     PRIMARY KEY (repo, branch)
 );
 
+CREATE TABLE IF NOT EXISTS trace_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo       TEXT NOT NULL,
+    session    TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    payload    TEXT NOT NULL,
+    head       TEXT,
+    agent      TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS trace_events_unique ON trace_events (repo, session, seq);
+CREATE INDEX IF NOT EXISTS trace_events_by_session ON trace_events (repo, session, seq);
+
+CREATE TABLE IF NOT EXISTS trace_commits (
+    repo       TEXT NOT NULL,
+    session    TEXT NOT NULL,
+    sha        TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (repo, session, sha)
+);
+CREATE INDEX IF NOT EXISTS trace_commits_by_sha ON trace_commits (repo, sha);
+
 CREATE TABLE IF NOT EXISTS audit (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     repo       TEXT NOT NULL,
@@ -473,6 +496,45 @@ CREATE TABLE IF NOT EXISTS audit (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS audit_repo ON audit (repo, created_at);
+
+-- Agent traces. A session is one agent run; its events carry the git HEAD at the
+-- moment they happened, which is how commits get attributed without the agent
+-- having to cooperate.
+CREATE TABLE IF NOT EXISTS trace_sessions (
+    session         TEXT PRIMARY KEY,
+    repo            TEXT NOT NULL,
+    agent           TEXT NOT NULL,
+    cwd             TEXT,
+    started_at      TEXT NOT NULL,
+    last_at         TEXT NOT NULL,
+    transcript_path TEXT
+);
+CREATE INDEX IF NOT EXISTS trace_sessions_repo ON trace_sessions (repo, last_at);
+
+CREATE TABLE IF NOT EXISTS trace_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session    TEXT NOT NULL,
+    event_id   TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    tool       TEXT,
+    summary    TEXT NOT NULL,
+    payload    TEXT NOT NULL,
+    head       TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (session, event_id)
+);
+CREATE INDEX IF NOT EXISTS trace_events_session ON trace_events (session, seq);
+
+CREATE TABLE IF NOT EXISTS trace_commits (
+    session     TEXT NOT NULL,
+    repo        TEXT NOT NULL,
+    commit_id   TEXT NOT NULL,
+    from_commit TEXT,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (session, commit_id)
+);
+CREATE INDEX IF NOT EXISTS trace_commits_lookup ON trace_commits (repo, commit_id);
 "#;
 
 #[cfg(test)]
