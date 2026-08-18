@@ -41,6 +41,12 @@ one marked active. `use` selects the active one; all other commands honor
 (personal, team, client) coexist.
 
 ### Repo commands (against the active profile, dgit's HTTP API)
+- `nashgit init [name]` — jj-first creation: version the current directory.
+  Create the repository on the server (PUT `/name/config`), initialise a working
+  copy if the folder has none (`jj git init --colocate` when jj is on PATH,
+  `git init -b main` otherwise; `--git`/`--jj` override), wire `origin` with the
+  token via the credential helper, commit anything uncommitted, push. Default
+  name = directory name. Re-running is safe. `--no-push` stops before the push.
 - `nashgit new <name> [--private] [--desc ...] [--section ...]` — dgit creates on first
   push, so this pushes an empty commit is WRONG — instead: PUT `/name/config` with the
   token to create/describe, then if run inside a git worktree, add `origin` with the
@@ -52,6 +58,20 @@ one marked active. `use` selects the active one; all other commands honor
   `nashgit gc <name>` (POST /gc), `nashgit desc <name> ...` (PUT /config).
 - `nashgit remote [name]` — wire `origin` in the cwd repo (default name = dir name).
 - `nashgit token` — print the push token for the active profile (for CI use).
+
+### jj (Jujutsu) awareness
+- Detect the working copy from the directory layout alone: plain git (`.git`),
+  colocated jj (`.jj` + `.git`), jj-only (`.jj`). Colocated counts as jj.
+- In a jj repository use `jj git remote add` / `set-url`, never `git remote`.
+- git-credential storage still applies: jj asks git's credential helpers, so
+  `git credential approve` covers both.
+- `--jj` on `new` and `clone` colocates jj on top of the git working copy;
+  `NASHGIT_JJ=1` makes that the default. An explicit `--jj` with no jj on PATH
+  is an error; the env-var default degrades to a warning.
+- README carries a "Using with jj" section.
+- Tests: detection via directory-layout fixtures (plain git / colocated /
+  jj-only); jj is shelled out behind a shim seam (`NASHGIT_JJ_BIN`,
+  `NASHGIT_JJ_AVAILABLE`) so no test needs jj installed.
 
 ### `nashgit doctor`
 Checks, each one line, ✓/✗: profile exists, server reachable, TLS cert valid, token
@@ -72,8 +92,9 @@ SSH if configured), bucket reachable from host, viewer up (if configured).
   celld, bucket is the store, tailnet is the perimeter).
 - Tests (`cargo nextest run`): profile store round-trip, index-page parse against a
   saved dgit HTML fixture, remote-script idempotency (run the generated install script
-  twice against a fake `ssh` shim recording invocations), doctor output shape. No test
-  may require network or a real host.
+  twice against a fake `ssh` shim recording invocations), doctor output shape, jj
+  detection via directory-layout fixtures, `comments` against a canned JSON fixture on
+  a loopback listener. No test may require network or a real host.
 
 ## Plans + plannotator
 
@@ -85,6 +106,11 @@ renders them). CLI support:
 - `nashgit annotate <plans/file.md>` — shell out to a locally installed `plannotator`
   binary against the file if present (`which plannotator`), else print install pointer.
   When the active profile has a viewer URL configured, print the plan's viewer URL too.
+- `nashgit comments <file> [--branch ...] [--since RFC3339] [--repo ...]` — GET
+  the viewer's `/:repo/comments` JSON endpoint (`viewer_url` from the active
+  profile; a clear error when it is unset). `--repo` defaults to the name
+  `origin` points at. `--json` passes the viewer's answer through untouched.
+  Tested against a canned JSON fixture served by a local test listener.
 - Nothing else: annotation feedback flows through the viewer's comment API, not the CLI.
 
 ## Non-goals

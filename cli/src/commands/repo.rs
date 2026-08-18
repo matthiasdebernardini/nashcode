@@ -76,16 +76,16 @@ pub fn new(ctx: &Ctx, args: &NewArgs) -> Result<()> {
 
     let mut remote = None;
     let mut colocated = false;
-    if !args.no_remote {
-        if let Some(ws) = vcs::detect_cwd()? {
-            remote = Some(wire_remote(ctx, &p, &ws, &args.name)?);
-            if vcs::jj_requested(args.jj) && !ws.kind.is_jj() {
-                require_jj(args.jj, &ctx.out)?;
-                if vcs::jj_available() {
-                    vcs::jj_init_colocate(&ws.root)?;
-                    colocated = true;
-                    ctx.out.step("jj git init --colocate");
-                }
+    if !args.no_remote
+        && let Some(ws) = vcs::detect_cwd()?
+    {
+        remote = Some(wire_remote(ctx, &p, &ws, &args.name)?);
+        if vcs::jj_requested(args.jj) && !ws.kind.is_jj() {
+            require_jj(args.jj, &ctx.out)?;
+            if vcs::jj_available() {
+                vcs::jj_init_colocate(&ws.root)?;
+                colocated = true;
+                ctx.out.step("jj git init --colocate");
             }
         }
     }

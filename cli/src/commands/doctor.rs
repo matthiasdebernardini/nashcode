@@ -235,7 +235,7 @@ fn host_checks(p: &Profile) -> Vec<Check> {
     let mut checks = Vec::new();
     checks.push(match get("NASHGIT_SERVICE") {
         "active" => Check::ok("celld", "celld service", "active"),
-        other if other.is_empty() => Check::fail("celld", "celld service", "no answer from the host"),
+        "" => Check::fail("celld", "celld service", "no answer from the host"),
         other => Check::fail("celld", "celld service", format!("systemd says `{other}`")),
     });
     checks.push(match get("NASHGIT_LOOPBACK") {
