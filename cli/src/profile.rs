@@ -36,6 +36,10 @@ pub struct Profile {
     /// [`Profile::listen_port`], which falls back to 8080.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_port: Option<u16>,
+    /// Where dgit's checkout lives on the host, from setup. Absent in older
+    /// profiles; consumers fall back to `~/dgit`, which setup always used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dgit_dir: Option<String>,
 
     // --- celld facts, kept so `doctor` can check the fleet without re-asking ---
     #[serde(default, skip_serializing_if = "Option::is_none")]

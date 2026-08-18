@@ -476,9 +476,11 @@ pub fn tailscale_up_script(auth_key: Option<&str>) -> String {
         Some(k) => format!(
             r#"KEYFILE="$(mktemp)"
 chmod 600 "$KEYFILE"
+trap 'rm -f "$KEYFILE"' EXIT
 printf '%s' {key} >"$KEYFILE"
 as_root tailscale up --auth-key="file:$KEYFILE" --timeout=120s
 rm -f "$KEYFILE"
+trap - EXIT
 echo "NASHGIT_AUTH_URL="
 "#,
             key = sq(k)
@@ -640,17 +642,24 @@ fn profile_celld_flags(p: &Profile) -> String {
 /// Bucket credentials come from the 0600 EnvironmentFile the service already
 /// reads; nothing secret travels for the deploy itself.
 fn regen_git_tokens(p: &Profile) -> String {
+    let dgit_dir = match &p.dgit_dir {
+        Some(d) => sq(d),
+        // Older profiles predate the field; setup has always used ~/dgit.
+        None => r#""$HOME/dgit""#.to_string(),
+    };
     format!(
-        r#"DGIT_DIR="$HOME/dgit"
+        r#"DGIT_DIR={dgit_dir}
 TOKENS="$(sed -n 's/^[^=]* = "\(.*\)"$/\1/p' "$INVITES" | paste -sd, -)"
 cd "$DGIT_DIR"
 VARS_FILE="$(mktemp "$DGIT_DIR/.nashgit-vars.XXXXXX")"
+trap 'rm -f "$VARS_FILE"' EXIT
 printf '{{"GIT_TOKENS": "%s"}}' "$TOKENS" >"$VARS_FILE"
 node - "$DGIT_DIR/wrangler.celld.jsonc" "$VARS_FILE" <<'NASHGIT_PATCH_EOF'
 {patch}
 NASHGIT_PATCH_EOF
 chmod 600 "$DGIT_DIR/wrangler.celld.jsonc"
 rm -f "$VARS_FILE"
+trap - EXIT
 log "celld deploy"
 if as_root test -r /etc/celld/celld.env 2>/dev/null; then
   as_root sh -c 'set -a; . /etc/celld/celld.env; set +a; exec "$0" deploy wrangler.celld.jsonc "$@"' \
@@ -671,18 +680,26 @@ log "celld restarted"
 /// The probe is dgit's usual read-only one: a PUT with a body that is not
 /// JSON. 400 means the token was accepted (and nothing changed), 401 means it
 /// was rejected. The token reaches curl through a 0600 config file, not argv.
-fn probe_block(listen: &str) -> String {
+///
+/// `break_on` is the answer the caller hopes for: the loop returns early only
+/// on that, because the first responses after a service restart can be stale
+/// (an invite probe can see 401 from the old Worker for a moment, a revoke
+/// probe can see 400). The wrong answer is only believed once the loop has
+/// given the restart time to settle.
+fn probe_block(listen: &str, break_on: &str) -> String {
     format!(
         r#"CURLRC="$(mktemp)"
 chmod 600 "$CURLRC"
+trap 'rm -f "$CURLRC"' EXIT
 printf 'user = "x:%s"\n' "$NASHGIT_PROBE_TOKEN" >"$CURLRC"
 code=000
-for i in $(seq 1 30); do
+for i in $(seq 1 20); do
   code="$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 -K "$CURLRC" -X PUT --data '~' "http://{listen}/nashgit-invite-probe/config" || true)"
-  case "$code" in 400|401|403) break ;; esac
+  case "$code" in {break_on}) break ;; esac
   sleep 1
 done
 rm -f "$CURLRC"
+trap - EXIT
 "#
     )
 }
@@ -711,7 +728,7 @@ echo "NASHGIT_INVITE=ok"
         name = sq(name),
         token = sq(token),
         regen = regen_git_tokens(p),
-        probe = probe_block(listen),
+        probe = probe_block(listen, "400|403"),
     )
 }
 
@@ -737,7 +754,7 @@ echo "NASHGIT_REVOKE=ok"
 "#,
         name = sq(name),
         regen = regen_git_tokens(p),
-        probe = probe_block(listen),
+        probe = probe_block(listen, "401|403"),
     )
 }
 
@@ -909,6 +926,12 @@ mod tests {
         let r = revoke_script("alice", &p, "127.0.0.1:8080");
         assert!(!r.contains("tok3n"));
         assert!(r.contains("NASHGIT_REVOKE_PROBE"));
+
+        // The probe only trusts the hoped-for answer early: right after the
+        // restart the old Worker can still answer, so the wrong code is
+        // retried, not believed (invite hopes for 400, revoke for 401).
+        assert!(s.contains(r#"case "$code" in 400|403) break ;; esac"#), "{s}");
+        assert!(r.contains(r#"case "$code" in 401|403) break ;; esac"#), "{r}");
 
         // The list script touches only the name column.
         let l = invites_list_script();

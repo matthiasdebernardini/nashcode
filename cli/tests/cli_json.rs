@@ -115,6 +115,33 @@ fn profiles_use_and_token_round_trip_through_the_store() {
 }
 
 #[test]
+fn a_bad_repo_name_dies_before_it_can_become_a_url_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "active = \"a\"\n\n[profiles.a]\nurl = \"https://a.example\"\ntoken = \"t\"\n",
+    )
+    .unwrap();
+
+    // `x/config` would address dgit's admin endpoint, not a repository.
+    for args in [
+        vec!["--json", "rm", "x/config", "--yes"],
+        vec!["--json", "gc", "x/config"],
+        vec!["--json", "desc", "x/config", "--desc", "d"],
+        vec!["--json", "clone", "../evil"],
+    ] {
+        let out = nashgit(&config, &args);
+        assert!(!out.status.success(), "{args:?} should fail");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            v["error"].as_str().unwrap().contains("not a valid"),
+            "{args:?}: {v}"
+        );
+    }
+}
+
+#[test]
 fn plan_new_writes_the_template_inside_a_repo() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("proj");

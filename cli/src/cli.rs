@@ -141,6 +141,10 @@ out of the remote URL and out of your shell history.")]
     #[command(long_about = "\
 List the repositories on the server.
 
+Public repositories only: dgit's index page filters private ones out before
+rendering, even for an authenticated request, and the index page is the only
+list dgit has. A private repository is still there — clone it by name.
+
 dgit publishes no JSON list endpoint, so this reads the index page and parses
 the listing table. The parse is deliberately forgiving of markup changes; if a
 future dgit breaks it, `--json` will return an empty list rather than wrong

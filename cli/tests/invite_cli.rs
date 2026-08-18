@@ -46,6 +46,9 @@ impl Host {
         write_bin("celld", "exit 0\n");
         write_bin("systemctl", "exit 0\n");
         write_bin("curl", &format!("printf '{curl_code}'\n"));
+        // The probe retries a wrong answer with a 1s sleep between tries;
+        // stub it so the failed-probe tests stay fast.
+        write_bin("sleep", "exit 0\n");
 
         // The ssh shim: record argv, then run the piped script here.
         let shim = d.join("fake-ssh");

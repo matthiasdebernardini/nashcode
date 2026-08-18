@@ -55,12 +55,7 @@ fn require_jj(explicit_flag: bool, out: &crate::output::Out) -> Result<()> {
 }
 
 fn create(client: &Client, name: &str, cfg: &RepoConfig) -> Result<crate::api::ConfigEcho> {
-    if !valid_repo_name(name) {
-        bail!(
-            "`{name}` is not a valid repository name. dgit allows letters, digits, dot, dash, \
-             and underscore, starting with a letter or digit."
-        );
-    }
+    require_valid_name(name)?;
     client.put_config(name, cfg)
 }
 
@@ -280,7 +275,20 @@ pub fn ls(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Repository names go straight into URL paths, so a bad one must die here:
+/// `x/config` would otherwise address dgit's admin endpoint, not a repository.
+fn require_valid_name(name: &str) -> Result<()> {
+    if !valid_repo_name(name) {
+        bail!(
+            "`{name}` is not a valid repository name. dgit allows letters, digits, dot, \
+             dash, and underscore, starting with a letter or digit."
+        );
+    }
+    Ok(())
+}
+
 pub fn clone(ctx: &Ctx, args: &CloneArgs) -> Result<()> {
+    require_valid_name(&args.name)?;
     let (_, p, _) = ctx.client()?;
     let url = p.repo_url(&args.name);
     let dir = args.dir.clone().unwrap_or_else(|| args.name.clone());
@@ -316,6 +324,7 @@ pub fn clone(ctx: &Ctx, args: &CloneArgs) -> Result<()> {
 }
 
 pub fn rm(ctx: &Ctx, args: &RmArgs) -> Result<()> {
+    require_valid_name(&args.name)?;
     let (_, p, client) = ctx.client()?;
     if !args.yes {
         if !ctx.out.interactive() {
@@ -346,6 +355,7 @@ pub fn rm(ctx: &Ctx, args: &RmArgs) -> Result<()> {
 }
 
 pub fn gc(ctx: &Ctx, args: &GcArgs) -> Result<()> {
+    require_valid_name(&args.name)?;
     let (_, _, client) = ctx.client()?;
     let r = client.gc(&args.name)?;
     ctx.out.emit(
@@ -368,6 +378,7 @@ pub fn gc(ctx: &Ctx, args: &GcArgs) -> Result<()> {
 }
 
 pub fn desc(ctx: &Ctx, args: &DescArgs) -> Result<()> {
+    require_valid_name(&args.name)?;
     let (_, _, client) = ctx.client()?;
     let cfg = RepoConfig {
         description: args.desc.clone(),

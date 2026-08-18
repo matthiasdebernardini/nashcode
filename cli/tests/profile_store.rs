@@ -10,6 +10,7 @@ fn sample() -> Profile {
         token: "deadbeef".into(),
         viewer_url: Some("https://box.example.ts.net:8443".into()),
         listen_port: Some(9944),
+        dgit_dir: Some("/home/me/dgit".into()),
         provider: Some("tigris".into()),
         bucket: Some("s3://example-cells".into()),
         endpoint: Some("https://t3.storage.dev".into()),

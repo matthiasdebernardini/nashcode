@@ -74,6 +74,13 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
         Some(provider.default_region().to_string()),
     )?;
     let endpoint = resolve_endpoint(out, args, provider)?;
+    // These three land raw in the systemd unit, the EnvironmentFile, and the
+    // celld command line; reject anything those places cannot carry.
+    reject_unsafe_value("bucket", &bucket)?;
+    reject_unsafe_value("region", &region)?;
+    if let Some(e) = &endpoint {
+        reject_unsafe_value("endpoint", e)?;
+    }
     let (access_key_id, secret_access_key) = resolve_credentials(out, args)?;
 
     // ---- 3. install ------------------------------------------------------
@@ -203,6 +210,7 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
         token: token.clone(),
         viewer_url: viewer_url.clone(),
         listen_port: Some(args.listen_port),
+        dgit_dir: Some(deploy.dgit_dir.clone()),
         provider: Some(provider.id().to_string()),
         bucket: Some(bucket.clone()),
         endpoint: endpoint.clone(),
@@ -474,6 +482,29 @@ fn resolve_credentials(out: &Out, args: &SetupArgs) -> Result<(Option<String>, O
     Ok((Some(id), Some(secret)))
 }
 
+/// Bucket, region, and endpoint go into the systemd unit's ExecStart (no
+/// shell, split on whitespace), the EnvironmentFile (one KEY=value per line),
+/// and systemd's `%` specifier expansion. None of those can carry whitespace,
+/// a newline, or a percent sign, so refuse them up front.
+pub fn reject_unsafe_value(what: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("the {what} is empty");
+    }
+    if let Some(c) = value.chars().find(|c| c.is_whitespace() || *c == '%') {
+        let shown = if c.is_whitespace() {
+            "whitespace".to_string()
+        } else {
+            format!("`{c}`")
+        };
+        bail!(
+            "the {what} `{}` contains {shown}, which the systemd unit and its \
+             EnvironmentFile cannot carry safely",
+            value.escape_default()
+        );
+    }
+    Ok(())
+}
+
 /// Accept `my-bucket`, `s3://my-bucket`, or `s3://my-bucket/prefix`.
 pub fn normalise_bucket(input: &str) -> String {
     let s = input.trim();
@@ -528,6 +559,18 @@ mod tests {
         assert_eq!(a.len(), 48);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, generate_token());
+    }
+
+    #[test]
+    fn unsafe_config_values_are_refused_before_they_reach_systemd() {
+        assert!(reject_unsafe_value("bucket", "s3://my-cells/prefix").is_ok());
+        assert!(reject_unsafe_value("region", "us-east-1").is_ok());
+        assert!(reject_unsafe_value("endpoint", "https://t3.storage.dev").is_ok());
+
+        assert!(reject_unsafe_value("bucket", "s3://has space").is_err());
+        assert!(reject_unsafe_value("bucket", "s3://has\nnewline").is_err());
+        assert!(reject_unsafe_value("region", "us%E").is_err());
+        assert!(reject_unsafe_value("endpoint", "").is_err());
     }
 
     #[test]

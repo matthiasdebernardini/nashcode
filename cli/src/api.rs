@@ -176,9 +176,13 @@ impl Client {
     }
 
     /// `GET /` — the index page, as HTML.
+    ///
+    /// Note dgit's index filters private repositories out before rendering,
+    /// with or without credentials, so this can never list them. Auth is
+    /// still sent: it costs nothing and keeps the call correct if upstream
+    /// ever starts honouring it here.
     pub fn index_html(&self) -> Result<Reply> {
         let mut req = self.agent.get(self.url("/"));
-        // Send auth so a server with every repository private still lists.
         if let Some(a) = &self.auth {
             req = req.header("authorization", a);
         }
