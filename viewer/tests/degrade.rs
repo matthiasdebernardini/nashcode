@@ -42,6 +42,12 @@ async fn every_page_survives_a_dead_git_server_on_an_existing_mirror() {
     });
     let dead = testbed_from_config(tempfile::tempdir().expect("tempdir"), dead_config);
 
+    // Fetches run behind the page now, so a page only knows the server is down once an
+    // attempt has failed. Drive that first failed attempt the way a background fetch
+    // would, then ask for the pages a person would see next.
+    let failed = dead.mirrors.refresh_now("demo").await;
+    assert!(failed.stale && failed.available, "a dead server leaves the mirror readable");
+
     for path in [
         "/",
         "/demo",
