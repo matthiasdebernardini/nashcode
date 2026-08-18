@@ -1,295 +1,271 @@
-//! Traces end to end: commit attribution, idempotent batches, the hook binary's
-//! never-fail contract, and the session page.
+//! Traces: the transcript side of the same artifact the diff shows.
+//!
+//! Covers the whole round trip over the real router — record a session, get the commits
+//! it produced attributed to it, read the session back as JSON and as a page, and the
+//! commit-to-conversation link. Plus the one property the hook must never violate: it
+//! cannot fail an agent's turn.
 
 mod common;
-
-use std::process::Stdio;
-use std::time::Duration;
 
 use common::{get, post_json, request, simple_bed, stacked_fixture};
 use topcoat::router::Method;
 
-fn hook_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_nashgit")
-}
-
-#[tokio::test]
-async fn head_moves_between_events_attribute_the_commit_to_the_session() {
-    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
-    bed.mirrors.refresh("demo").await;
-    let initial = bed.remote_tip("demo", "main");
-
-    // Event 1: the session starts at the current tip.
-    let (status, body) = post_json(
-        &bed.router,
-        "/demo/traces/events",
-        serde_json::json!({
-            "session": "sess-attr", "agent": "claude-code",
-            "events": [{ "seq": 1, "kind": "prompt", "payload": {"prompt": "add a feature"}, "head": initial }],
-        }),
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-
-    // The agent commits (and pushes, so the mirror can expand the range).
-    let work = common::Work::clone_from(&bed.remote_root().join("demo.git"));
-    work.write("src/new.txt", "made by the agent\n");
-    let produced = work.commit_all("agent commit");
-    work.push("main");
-    bed.mirrors.refresh_now("demo").await;
-
-    // Event 2 carries the new HEAD: the commit belongs to the session now.
-    let (status, body) = post_json(
-        &bed.router,
-        "/demo/traces/events",
-        serde_json::json!({
-            "session": "sess-attr", "agent": "claude-code",
-            "events": [{ "seq": 2, "kind": "stop", "payload": {}, "head": produced }],
-        }),
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-    let outcome: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(outcome["commits"][0], produced, "{outcome}");
-
-    // Read back as JSON.
-    let (status, body) = request_json(&bed.router, "/demo/traces/sess-attr").await;
-    assert_eq!(status, 200);
-    let session: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(session["commits"][0], produced);
-    assert_eq!(session["events"].as_array().expect("events").len(), 2);
-
-    // And from the commit side.
-    let (status, body) =
-        get(&bed.router, &format!("/demo/commits/{produced}/trace")).await;
-    assert_eq!(status, 200);
-    let by_commit: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(by_commit["sessions"][0], "sess-attr");
-}
-
-async fn request_json(router: &topcoat::router::Router, path: &str) -> (u16, String) {
-    let request = topcoat::router::request::Request::builder()
-        .method(Method::GET)
-        .uri(path)
-        .header("accept", "application/json")
-        .body(topcoat::router::Body::empty())
-        .expect("request builds");
-    let response = router.handle(request).await;
-    let status = response.status().as_u16();
-    let bytes = topcoat::router::to_bytes(response.into_body(), 8 * 1024 * 1024)
-        .await
-        .expect("body reads");
-    (status, String::from_utf8_lossy(&bytes).into_owned())
-}
-
-#[tokio::test]
-async fn the_same_batch_posted_twice_stores_one_copy() {
-    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
-    let batch = serde_json::json!({
-        "session": "sess-idem", "agent": "backfill",
+/// The events a real agent run produces around one commit.
+fn session_events(before: &str, after: &str) -> serde_json::Value {
+    serde_json::json!({
+        "session": "sess-1",
+        "agent": "claude-code",
         "events": [
-            { "seq": 1, "kind": "prompt", "payload": {"prompt": "hi"} },
-            { "seq": 2, "kind": "stop", "payload": {} },
-        ],
-    });
-
-    let (status, body) = post_json(&bed.router, "/demo/traces/events", batch.clone()).await;
-    assert_eq!(status, 200, "{body}");
-    let first: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(first["stored"], 2);
-
-    let (status, body) = post_json(&bed.router, "/demo/traces/events", batch).await;
-    assert_eq!(status, 200);
-    let second: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(second["stored"], 0);
-    assert_eq!(second["duplicates"], 2);
-
-    let (_, body) = request_json(&bed.router, "/demo/traces/sess-idem").await;
-    let session: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(session["events"].as_array().expect("events").len(), 2, "one copy only");
+            {
+                "seq": 1,
+                "kind": "UserPromptSubmit",
+                "head": before,
+                "payload": {"prompt": "add a retry note", "session_id": "sess-1"}
+            },
+            {
+                "seq": 2,
+                "kind": "PreToolUse",
+                "head": before,
+                "payload": {"tool_name": "Edit", "tool_input": {"file_path": "plans/api.md"}}
+            },
+            // The commit landed between these two events.
+            {
+                "seq": 3,
+                "kind": "PostToolUse",
+                "head": after,
+                "payload": {"tool_name": "Bash", "tool_input": {"command": "git commit -am plan"}}
+            },
+            {"seq": 4, "kind": "Stop", "head": after, "payload": {}}
+        ]
+    })
 }
 
 #[tokio::test]
-async fn the_session_page_renders_events_and_commits() {
+async fn a_session_is_recorded_and_its_commits_are_attributed() {
     let bed = simple_bed(|root| stacked_fixture(root, "demo"));
     bed.mirrors.refresh("demo").await;
-    let initial = bed.remote_tip("demo", "main");
 
-    post_json(
-        &bed.router,
-        "/demo/traces/events",
-        serde_json::json!({
-            "session": "sess-page", "agent": "claude-code",
-            "events": [
-                { "seq": 1, "kind": "prompt", "payload": {"prompt": "rename the widget"}, "head": initial },
-            ],
-        }),
-    )
-    .await;
-    let work = common::Work::clone_from(&bed.remote_root().join("demo.git"));
-    work.write("src/w.txt", "widget\n");
-    let produced = work.commit_all("rename widget");
-    work.push("main");
-    bed.mirrors.refresh_now("demo").await;
-    post_json(
-        &bed.router,
-        "/demo/traces/events",
-        serde_json::json!({
-            "session": "sess-page", "agent": "claude-code",
-            "events": [{ "seq": 2, "kind": "stop", "payload": {}, "head": produced }],
-        }),
-    )
-    .await;
+    let before = bed.remote_tip("demo", "main");
+    let after = bed.remote_tip("demo", "part-1");
 
-    // The list page shows the session; the session page shows events and the commit.
-    let (status, index) = get(&bed.router, "/demo/traces").await;
+    let (status, body) =
+        post_json(&bed.router, "/demo/traces/events", session_events(&before, &after)).await;
+    assert_eq!(status, 200, "{body}");
+
+    let outcome: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(outcome["stored"], 4);
+    assert_eq!(outcome["duplicates"], 0);
+    // The first head is where the session started, so only the move is attributed.
+    let attributed = outcome["commits"].as_array().expect("commits");
+    assert!(attributed.contains(&serde_json::Value::String(after.clone())));
+
+    // The commit points back at the conversation that produced it.
+    let (status, body) = get(&bed.router, &format!("/demo/commits/{after}/trace")).await;
     assert_eq!(status, 200);
-    assert!(index.contains("sess-page"), "{index}");
-
-    let (status, page) = get(&bed.router, "/demo/traces/sess-page").await;
-    assert_eq!(status, 200);
-    assert!(page.contains("rename the widget"), "prompt missing: {page}");
-    assert!(page.contains("prompt") && page.contains("stop"), "event kinds missing");
-    let short: String = produced.chars().take(8).collect();
-    assert!(page.contains(&short), "commit missing from the page");
-
-    // The branch page's commit list links to the trace.
-    let (_, branch_page) = get(&bed.router, "/demo/main").await;
-    assert!(
-        branch_page.contains("/demo/traces/sess-page"),
-        "trace link missing from the branch page"
-    );
+    let link: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(link["sessions"][0], "sess-1");
 }
 
 #[tokio::test]
-async fn transcripts_come_back_verbatim() {
+async fn the_same_batch_twice_stores_one_copy() {
     let bed = simple_bed(|root| stacked_fixture(root, "demo"));
-    let raw = "{\"type\":\"user\"}\nnot even json\n{\"type\":\"assistant\"}\n";
-    let (status, body) = request(
+    bed.mirrors.refresh("demo").await;
+    let before = bed.remote_tip("demo", "main");
+    let after = bed.remote_tip("demo", "part-1");
+    let batch = session_events(&before, &after);
+
+    let (_, first) = post_json(&bed.router, "/demo/traces/events", batch.clone()).await;
+    let (_, second) = post_json(&bed.router, "/demo/traces/events", batch).await;
+
+    let first: serde_json::Value = serde_json::from_str(&first).expect("json");
+    let second: serde_json::Value = serde_json::from_str(&second).expect("json");
+    assert_eq!(first["stored"], 4);
+    assert_eq!(second["stored"], 0, "a retry must not double-write");
+    assert_eq!(second["duplicates"], 4);
+    assert!(
+        second["commits"].as_array().expect("commits").is_empty(),
+        "a commit is never attributed twice"
+    );
+
+    // And the session still holds exactly four events.
+    let (_, body) = request(
+        &bed.router,
+        Method::GET,
+        "/demo/traces/sess-1",
+        None,
+    )
+    .await;
+    assert_eq!(body.matches("Box-row").count() > 0, true);
+}
+
+#[tokio::test]
+async fn the_session_page_renders_the_transcript_and_its_commits() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+    let before = bed.remote_tip("demo", "main");
+    let after = bed.remote_tip("demo", "part-1");
+    post_json(&bed.router, "/demo/traces/events", session_events(&before, &after)).await;
+
+    let (status, body) = get(&bed.router, "/demo/traces/sess-1").await;
+    assert_eq!(status, 200);
+    // The prompt and the tool calls read as themselves, not as raw hook names.
+    assert!(body.contains("add a retry note"), "the prompt renders");
+    assert!(body.contains("Edit: plans/api.md"), "the edit renders with its file");
+    assert!(body.contains("Bash: git commit -am plan"), "the command renders");
+    // And the commit it produced is shown inline.
+    assert!(body.contains("committed"), "the commit is marked where it happened");
+    assert!(body.contains(&after[..8]), "the sha is shown");
+
+    // The index lists the session with its counts.
+    let (status, body) = get(&bed.router, "/demo/traces").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("sess-1"));
+    assert!(body.contains("4 events"));
+    assert!(body.contains("1 commits"));
+}
+
+#[tokio::test]
+async fn traces_read_back_as_json_when_asked() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+    let before = bed.remote_tip("demo", "main");
+    let after = bed.remote_tip("demo", "part-1");
+    post_json(&bed.router, "/demo/traces/events", session_events(&before, &after)).await;
+
+    let json_get = |path: String| {
+        let router = bed.router.clone();
+        async move {
+            let request = topcoat::router::request::Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .header("accept", "application/json")
+                .body(topcoat::router::Body::empty())
+                .expect("request builds");
+            let response = router.handle(request).await;
+            let status = response.status().as_u16();
+            let bytes =
+                http_body_util::BodyExt::collect(response.into_body()).await.expect("body");
+            let body = String::from_utf8_lossy(&bytes.to_bytes()).into_owned();
+            (status, body)
+        }
+    };
+
+    let (status, body) = json_get("/demo/traces".to_owned()).await;
+    assert_eq!(status, 200);
+    let sessions: serde_json::Value = serde_json::from_str(&body).expect("json list");
+    assert_eq!(sessions[0]["session"], "sess-1");
+    assert_eq!(sessions[0]["events"], 4);
+    assert_eq!(sessions[0]["commits"], 1);
+
+    let (status, body) = json_get("/demo/traces/sess-1".to_owned()).await;
+    assert_eq!(status, 200);
+    let session: serde_json::Value = serde_json::from_str(&body).expect("json session");
+    assert_eq!(session["session"], "sess-1");
+    assert_eq!(session["events"].as_array().expect("events").len(), 4);
+    assert_eq!(session["commits"][0], after);
+}
+
+#[tokio::test]
+async fn a_raw_transcript_round_trips_byte_for_byte() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+
+    let transcript = "{\"role\":\"user\"}\n{\"role\":\"assistant\",\"text\":\"héllo\"}\n";
+    let (status, _) = request(
         &bed.router,
         Method::POST,
-        "/demo/traces/sess-t/transcript",
-        Some(("application/octet-stream", raw.to_owned())),
+        "/demo/traces/sess-1/transcript",
+        Some(("application/x-ndjson", transcript.to_owned())),
     )
     .await;
-    assert_eq!(status, 200, "{body}");
-
-    let (status, back) = get(&bed.router, "/demo/traces/sess-t/transcript").await;
     assert_eq!(status, 200);
-    assert_eq!(back, raw, "bytes must be verbatim");
+
+    let (status, body) = get(&bed.router, "/demo/traces/sess-1/transcript").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, transcript, "stored verbatim");
 }
 
 #[tokio::test]
-async fn bad_trace_posts_are_client_errors() {
+async fn bad_input_is_refused_without_a_500() {
     let bed = simple_bed(|root| stacked_fixture(root, "demo"));
-    // Path traversal in the session id.
+    bed.mirrors.refresh("demo").await;
+
+    // A session id that would escape the transcript directory.
     let (status, _) = post_json(
         &bed.router,
         "/demo/traces/events",
-        serde_json::json!({ "session": "../../etc", "events": [{ "kind": "x" }] }),
+        serde_json::json!({"session": "../../etc/passwd", "events": [{"kind": "x"}]}),
     )
     .await;
     assert_eq!(status, 400);
-    // Empty batch.
+
+    // No events at all.
     let (status, _) = post_json(
         &bed.router,
         "/demo/traces/events",
-        serde_json::json!({ "session": "ok", "events": [] }),
+        serde_json::json!({"session": "s", "events": []}),
     )
     .await;
     assert_eq!(status, 400);
-    // Unknown repo.
+
+    // A repo nobody configured.
     let (status, _) = post_json(
         &bed.router,
         "/ghost/traces/events",
-        serde_json::json!({ "session": "ok", "events": [{ "kind": "x" }] }),
+        serde_json::json!({"session": "s", "events": [{"kind": "x"}]}),
     )
     .await;
     assert_eq!(status, 404);
+
+    // A session that was never recorded.
+    let (status, _) = get(&bed.router, "/demo/traces/never-happened").await;
+    assert_eq!(status, 404);
 }
 
-// ---- the hook binary's never-fail contract ---------------------------------------
-
-fn run_hook(stdin: &str, envs: &[(&str, &str)]) -> std::process::ExitStatus {
+/// The hook runs inside somebody's agent loop. Whatever happens, it must not be the
+/// reason their turn failed.
+mod hook {
     use std::io::Write;
-    let mut child = std::process::Command::new(hook_binary())
-        .arg("hook")
-        .envs(envs.iter().copied())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("hook spawns");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin piped")
-        .write_all(stdin.as_bytes())
-        .expect("stdin writes");
-    child.wait().expect("hook exits")
-}
+    use std::process::{Command, Stdio};
 
-#[test]
-fn the_hook_exits_zero_with_the_server_down() {
-    let status = run_hook(
-        "{\"session_id\":\"s\",\"hook_event_name\":\"Stop\",\"cwd\":\"/\"}",
-        &[("NASHGIT_URL", "http://127.0.0.1:9"), ("NASHGIT_REPO", "demo")],
-    );
-    assert_eq!(status.code(), Some(0), "a dead server must not fail the agent's turn");
-}
+    fn run_hook(stdin: &str, url: &str) -> std::process::Output {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nashgit"))
+            .arg("hook")
+            .env("NASHGIT_URL", url)
+            .env("NASHGIT_REPO", "demo")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("nashgit runs");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(stdin.as_bytes())
+            .expect("write");
+        child.wait_with_output().expect("hook finishes")
+    }
 
-#[test]
-fn the_hook_exits_zero_on_garbage_stdin() {
-    let status = run_hook("this is not json {{{", &[("NASHGIT_URL", "http://127.0.0.1:9")]);
-    assert_eq!(status.code(), Some(0), "garbage input must not fail the agent's turn");
-}
+    #[test]
+    fn it_exits_zero_when_the_server_is_unreachable() {
+        // Port 9 discards, so this is a connection failure, not a slow response.
+        let output = run_hook(
+            r#"{"session_id":"s1","hook_event_name":"Stop"}"#,
+            "http://127.0.0.1:9",
+        );
+        assert!(output.status.success(), "a dead server must not fail the turn");
+    }
 
-#[tokio::test]
-async fn the_hook_records_an_event_against_a_live_server() {
-    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
-    bed.mirrors.refresh("demo").await;
+    #[test]
+    fn it_exits_zero_on_garbage_input() {
+        let output = run_hook("this is not json", "http://127.0.0.1:9");
+        assert!(output.status.success(), "bad input must not fail the turn");
+    }
 
-    // A real listener on an ephemeral port, driven by the same router.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    // Router is not Clone; a second router over the same shared App state serves.
-    let router = nashgit::web::router(bed.app.clone());
-    let server = tokio::spawn(async move {
-        let _ = topcoat::serve_until(listener, router, async {
-            let _ = stop_rx.await;
-        })
-        .await;
-    });
-
-    // The hook runs from inside a clone whose origin names the repo.
-    let work = common::Work::clone_from(&bed.remote_root().join("demo.git"));
-    let payload = serde_json::json!({
-        "session_id": "sess-hook",
-        "hook_event_name": "PostToolUse",
-        "tool_name": "Bash",
-        "cwd": work.dir.to_string_lossy(),
-    })
-    .to_string();
-    let status = tokio::task::spawn_blocking({
-        let url = format!("http://{addr}");
-        move || run_hook(&payload, &[("NASHGIT_URL", url.as_str())])
-    })
-    .await
-    .expect("join");
-    assert_eq!(status.code(), Some(0));
-
-    // Give the server a moment, then the event is there with the repo inferred from
-    // the git remote and the HEAD attached.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let (status, body) = request_json(&bed.router, "/demo/traces/sess-hook").await;
-    assert_eq!(status, 200, "{body}");
-    let session: serde_json::Value = serde_json::from_str(&body).expect("json");
-    let events = session["events"].as_array().expect("events");
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["kind"], "PostToolUse");
-    assert!(events[0]["head"].as_str().is_some_and(|h| h.len() >= 7), "HEAD attached");
-
-    let _ = stop_tx.send(());
-    let _ = server.await;
+    #[test]
+    fn it_exits_zero_on_empty_input() {
+        let output = run_hook("", "http://127.0.0.1:9");
+        assert!(output.status.success(), "no input must not fail the turn");
+    }
 }

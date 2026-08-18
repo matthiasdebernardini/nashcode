@@ -279,6 +279,16 @@ impl Repo {
         Ok(parse_commits(&out))
     }
 
+    /// The `count` most recent commits reachable from a revision, newest first.
+    /// Works on histories shorter than `count`.
+    pub async fn recent_commits(&self, rev: &str, count: usize) -> GitResult<Vec<Commit>> {
+        let format = "--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1e";
+        let out = self
+            .run(&["log", &format!("--max-count={count}"), format, "--end-of-options", rev])
+            .await?;
+        Ok(parse_commits(&out))
+    }
+
     /// The most recent commit reachable from a revision.
     pub async fn last_commit(&self, rev: &str) -> GitResult<Option<Commit>> {
         let format = "--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1e";

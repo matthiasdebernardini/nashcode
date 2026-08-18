@@ -700,7 +700,7 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
             let parent_tip = graph.get(parent).map(|p| p.tip.clone()).unwrap_or_default();
             repo.commits(&parent_tip, &node.tip).await?
         }
-        None => repo.commits(&format!("{}~20", node.tip), &node.tip).await.unwrap_or_default(),
+        None => repo.recent_commits(&node.tip, 20).await.unwrap_or_default(),
     };
 
     // A commit whose trace is known links straight to the conversation that wrote it.
