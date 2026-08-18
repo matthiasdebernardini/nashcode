@@ -293,6 +293,23 @@ pub async fn get_json(router: &Router, path: &str) -> (u16, String) {
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// GET without following the answer: the status and wherever it points.
+pub async fn redirect(router: &Router, path: &str) -> (u16, Option<String>) {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .body(Body::empty())
+        .expect("request builds");
+    let response = router.handle(request).await;
+    let status = response.status().as_u16();
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    (status, location)
+}
+
 pub async fn post_json(router: &Router, path: &str, payload: serde_json::Value) -> (u16, String) {
     request(router, Method::POST, path, Some(("application/json", payload.to_string()))).await
 }
