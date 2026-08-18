@@ -439,6 +439,34 @@ impl Ops {
         Ok(RestackOutcome { branch: branch.to_owned(), rebased })
     }
 
+    /// Delete a branch on dgit (the post-merge offer). The default branch is refused.
+    pub async fn delete_branch(&self, repo_name: &str, branch: &str, actor: &Actor) -> OpResult<()> {
+        let mirror = self.mirrors.repo(repo_name);
+        let default_branch = mirror.default_branch().await?;
+        if branch == default_branch {
+            return Err(OpError::Blocked("refusing to delete the default branch".into()));
+        }
+        let old_tip = mirror.tip(branch).await.map_err(|_| {
+            OpError::NotFound(format!("branch {branch}"))
+        })?;
+        let remote = self.remote(repo_name);
+        let out = mirror.run_remote(&remote, &["push", &remote, &format!(":refs/heads/{branch}")]).await?;
+        if !out.ok() {
+            return Err(OpError::Git(format!("delete rejected: {}", out.stderr.trim())));
+        }
+        self.mirrors.refresh_now(repo_name).await;
+        let _ = self.db.record_audit(NewAudit {
+            repo: repo_name.to_owned(),
+            actor: actor.login.clone(),
+            action: "merge".to_owned(),
+            branch: branch.to_owned(),
+            old_tip,
+            new_tip: String::new(),
+            detail: format!("deleted {branch}"),
+        });
+        Ok(())
+    }
+
     /// Commit one file's new content to the default branch and push. The board's move
     /// endpoint sits on this; the push must succeed before the caller reports success.
     pub async fn commit_file(

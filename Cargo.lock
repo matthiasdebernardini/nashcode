@@ -1051,6 +1051,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "serde_yaml_bw",
  "sha2 0.10.9",
  "tempfile",

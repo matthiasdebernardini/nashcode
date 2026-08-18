@@ -317,6 +317,14 @@ impl Repo {
         }
     }
 
+    /// When the last commit reachable from `rev` touched `path` (author date,
+    /// RFC3339). `None` when no commit touched it.
+    pub async fn last_touched(&self, rev: &str, path: &str) -> GitResult<Option<String>> {
+        let out = self.run(&["log", "-1", "--format=%aI", rev, "--", path]).await?;
+        let when = out.trim();
+        Ok((!when.is_empty()).then(|| when.to_owned()))
+    }
+
     /// List files under a directory prefix at a revision.
     pub async fn list_files(&self, rev: &str, prefix: &str) -> GitResult<Vec<String>> {
         let out = self

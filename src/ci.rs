@@ -101,7 +101,7 @@ impl CiWorker {
             job.run_id,
             outcome,
             duration_ms,
-            log_path.as_deref().and_then(|p: &PathBuf| p.to_str()),
+            log_path.as_deref().and_then(std::path::Path::to_str),
         );
 
         if outcome != status::SKIPPED {
