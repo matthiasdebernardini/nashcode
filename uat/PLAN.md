@@ -111,6 +111,18 @@ Additions (landed with this plan):
 Five short recordings against the self-hosted instance from Part 1. Each has a shot
 list; the recording fails if a shot can't be produced.
 
+Delivered (2026-08-18, driven via browser-harness CDP, window-scoped cap capture):
+
+1. Review — https://cap.so/s/f49xcsxk2a3e2cd
+2. Evolution — https://cap.so/s/7t88hndt8djawtx
+3. Board — https://cap.so/s/0zkjqv6zyrpm065
+4. Merge — https://cap.so/s/t1ar5esqadh38gp
+5. Degradation — https://cap.so/s/dzze698w9kam82g
+
+One shot fell short: the red-merge `confirm()` dialog is a native OS window, which
+window-scoped capture cannot see. Clip 4 shows the red "Merge into main despite CI"
+gate and the branch staying put; the dialog itself is not in frame.
+
 1. **Review** — open `/nashgit/<branch>`: Pierre-rendered syntax-highlighted diffs (not
    a plain `<pre>`), IBM Plex Mono in code, click a line, post an inline comment, see it
    in the annotation slot. Toggle dark mode; both legible.
@@ -144,3 +156,6 @@ The catalog went stale once already (prompts page, lease semantics). Standing ru
   attribution is the proven path.
 - **Job-env allowlist, 30-min CI timeout, webhook retry timing**: crate tests own these;
   UAT does not repeat them.
+- **The deploy CLI (`cli/`, binary `nashgit`) is out of UAT scope.** This plan covers
+  the viewer. The CLI's setup/invite/doctor surface is covered by its own 84 crate
+  tests. The marketing site under `docs/` is content, not product; no row.
