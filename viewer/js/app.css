@@ -392,6 +392,11 @@ h6,
   padding: 6px 12px;
 }
 
+/* The template's text-node space collapses in the pixel font; force a real gap. */
+.UnderlineNav-item .ph {
+  margin-right: 6px;
+}
+
 .UnderlineNav-item[aria-current],
 .UnderlineNav-item.selected {
   background-color: var(--bgColor-neutral-muted);
