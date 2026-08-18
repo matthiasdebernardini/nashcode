@@ -262,8 +262,18 @@ pub fn jj_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Should a new working copy be jj? `--jj` and `--git` decide it outright;
-/// otherwise jj wins when it is installed, or when `$NASHGIT_JJ=1`.
+/// Did the user ask for jj here? `--jj` or `$NASHGIT_JJ=1`, nothing else.
+///
+/// This is the rule for `new` and `clone`, which act on repositories that
+/// already have (or will get) a git working copy: colocating jj on top is
+/// opt-in, so having jj installed does not change what `clone` produces.
+pub fn jj_requested(force_jj: bool) -> bool {
+    force_jj || std::env::var("NASHGIT_JJ").as_deref() == Ok("1")
+}
+
+/// Should a brand-new working copy be jj? `--jj` and `--git` decide it
+/// outright; otherwise jj wins when it is installed, or when `$NASHGIT_JJ=1`.
+/// This is the rule for `init`, which creates a working copy from nothing.
 pub fn prefer_jj(force_jj: bool, force_git: bool) -> bool {
     if force_git {
         return false;

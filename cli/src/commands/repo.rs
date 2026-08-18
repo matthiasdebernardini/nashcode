@@ -41,6 +41,19 @@ fn wire_remote(ctx: &Ctx, p: &Profile, ws: &Workspace, name: &str) -> Result<Str
     Ok(url)
 }
 
+/// jj was asked for. An explicit `--jj` with no jj installed is an error; the
+/// `$NASHGIT_JJ=1` ambient default degrades to a warning and plain git.
+fn require_jj(explicit_flag: bool, out: &crate::output::Out) -> Result<()> {
+    if vcs::jj_available() {
+        return Ok(());
+    }
+    if explicit_flag {
+        bail!("--jj was given but jj is not on PATH. Install Jujutsu: https://jj-vcs.github.io/jj/");
+    }
+    out.warn("NASHGIT_JJ=1 is set but jj is not on PATH; continuing with git only");
+    Ok(())
+}
+
 fn create(client: &Client, name: &str, cfg: &RepoConfig) -> Result<crate::api::ConfigEcho> {
     if !valid_repo_name(name) {
         bail!(
@@ -66,10 +79,13 @@ pub fn new(ctx: &Ctx, args: &NewArgs) -> Result<()> {
     if !args.no_remote {
         if let Some(ws) = vcs::detect_cwd()? {
             remote = Some(wire_remote(ctx, &p, &ws, &args.name)?);
-            if vcs::prefer_jj(args.jj, false) && !ws.kind.is_jj() {
-                vcs::jj_init_colocate(&ws.root)?;
-                colocated = true;
-                ctx.out.step("jj git init --colocate");
+            if vcs::jj_requested(args.jj) && !ws.kind.is_jj() {
+                require_jj(args.jj, &ctx.out)?;
+                if vcs::jj_available() {
+                    vcs::jj_init_colocate(&ws.root)?;
+                    colocated = true;
+                    ctx.out.step("jj git init --colocate");
+                }
             }
         }
     }
@@ -283,10 +299,13 @@ pub fn clone(ctx: &Ctx, args: &CloneArgs) -> Result<()> {
     }
 
     let mut colocated = false;
-    if vcs::prefer_jj(args.jj, false) {
-        vcs::jj_init_colocate(&cwd.join(&dir))?;
-        colocated = true;
-        ctx.out.step("jj git init --colocate");
+    if vcs::jj_requested(args.jj) {
+        require_jj(args.jj, &ctx.out)?;
+        if vcs::jj_available() {
+            vcs::jj_init_colocate(&cwd.join(&dir))?;
+            colocated = true;
+            ctx.out.step("jj git init --colocate");
+        }
     }
 
     ctx.out.emit(
