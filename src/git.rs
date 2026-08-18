@@ -325,11 +325,15 @@ impl Repo {
         Ok((!when.is_empty()).then(|| when.to_owned()))
     }
 
-    /// List files under a directory prefix at a revision.
+    /// List files under a directory prefix at a revision. An empty prefix lists the
+    /// whole tree (git rejects an empty pathspec, so it is simply omitted).
     pub async fn list_files(&self, rev: &str, prefix: &str) -> GitResult<Vec<String>> {
-        let out = self
-            .try_run(&["ls-tree", "-r", "--name-only", "-z", rev, "--", prefix])
-            .await?;
+        let mut args = vec!["ls-tree", "-r", "--name-only", "-z", rev];
+        if !prefix.is_empty() {
+            args.push("--");
+            args.push(prefix);
+        }
+        let out = self.try_run(&args).await?;
         if !out.ok() {
             return Ok(Vec::new());
         }
