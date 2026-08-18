@@ -196,5 +196,5 @@ Personas:
   feature, not a test.
 - **Traces and the CLI are implemented and committed** (`src/traces.rs`, `src/cli.rs`,
   `src/web/traces.rs`), with integration tests covering stories 12–21.
-- **nashgit is not deployed.** `nashauto-git.exe.xyz` runs dgit only. UAT needs a local
-  run or a deploy first.
+- **nashgit is not deployed.** The dgit box runs dgit only. UAT needs a local run or a
+  deploy first.
