@@ -188,6 +188,32 @@ way it moves anything else: edit the file, push.
   UI shows a toast and the card snaps back.
 - `board` joins the reserved branch-name words.
 
+## Code browser parity
+
+The tree/blob pages grow toward GitHub's file browser. Order of value: read well first,
+then navigate, then write.
+
+- **Syntax highlighting, client-side, with the shiki already shipped.** The diff
+  renderer's shiki is in the bundle and code-split; the blob page tags its `<pre>` with
+  the language (by extension) and `app.js` highlights it with that same shiki, loading
+  only that grammar's chunk. Theme follows Primer's color mode. No language match, or
+  JS off — the plain `<pre>` stands.
+- **Line numbers and anchors.** Every line gets a numbered gutter cell and an `L{n}`
+  id. Clicking a number sets `#L10`; shift-click extends to `#L10-L20`; loading a URL
+  with a hash highlights the range and scrolls to it. Files above ~5000 lines skip
+  highlighting, never numbering.
+- **Edit in the browser, one commit.** A pencil on the blob header opens
+  `/:repo/edit/:path` — a textarea with the file, a commit-message field. Submitting
+  commits to the default branch as the Tailscale user and pushes through the same
+  write path as the board (push succeeds before the page says so; on failure an error
+  card, mirror and dgit never diverge). "New file" on the tree page is the same form,
+  empty. No deletes, no renames — git is there for those.
+- **Symbol jump arrives with code intelligence**, not before: once `/code/def` and
+  `/code/refs` answer, blob identifiers become clickable (forward to the definition,
+  a references panel backward). No interim heuristic — a jump that lands wrong
+  teaches distrust.
+- Raw stays a link on every blob header (already true).
+
 ## Docs (wiki)
 
 Every repo's markdown is its wiki. There is no separate wiki store: the pages are the
