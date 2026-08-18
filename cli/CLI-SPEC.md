@@ -59,6 +59,29 @@ one marked active. `use` selects the active one; all other commands honor
 - `nashgit remote [name]` — wire `origin` in the cwd repo (default name = dir name).
 - `nashgit token` — print the push token for the active profile (for CI use).
 
+### `nashgit invite` — per-person push access
+dgit reads extra comma-separated push tokens from its GIT_TOKENS var, alongside
+GIT_TOKEN. dgit only sees the flat list, so the CLI owns a name → token mapping
+on the host (`~/git-invites.toml`, 0600) and regenerates GIT_TOKENS from it on
+every change, applied the same way `setup` deploys: patch wrangler.celld.jsonc
+vars, `celld deploy`, restart the service.
+
+- `nashgit invite <name>` — generate a fresh token, update the mapping over SSH
+  (profile's ssh dest), regenerate + redeploy, verify with an auth probe using
+  the new token. Print a ready-to-send snippet: remote URL, the token, and the
+  one-liner to store it via `git credential approve` — plus a reminder that
+  network access is Tailscale's job (add to tailnet or share the node); the CLI
+  does not touch Tailscale ACLs.
+- `nashgit invite --list` — names only, never tokens.
+- `nashgit invite --revoke <name>` — remove from the mapping, regenerate,
+  redeploy, verify the revoked token now fails the auth probe.
+- Idempotent: re-inviting an existing name rotates that person's token.
+- Secrets discipline unchanged: token to the host via stdin, never argv; only
+  `invite <name>` prints a token, once.
+- Tests through the fake-ssh shim: invite writes the mapping + regenerates the
+  var, revoke removes it, list never prints token material, and a `--json`
+  shape test for each. No network, no real host.
+
 ### jj (Jujutsu) awareness
 - Detect the working copy from the directory layout alone: plain git (`.git`),
   colocated jj (`.jj` + `.git`), jj-only (`.jj`). Colocated counts as jj.

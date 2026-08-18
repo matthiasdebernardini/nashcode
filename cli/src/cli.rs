@@ -174,6 +174,27 @@ token goes to git's credential helper, never into the remote URL, so `git
 remote -v` and any file you commit stay free of secrets.")]
     Remote(RemoteArgs),
 
+    /// Give someone their own push token, list them, or take one back.
+    #[command(long_about = "\
+Give someone their own push token, list the invited, or take a token back.
+
+dgit accepts extra push tokens from its GIT_TOKENS var, comma-separated,
+alongside the main GIT_TOKEN. dgit only sees that flat list, so nashgit keeps
+a name → token mapping on the host (~/git-invites.toml, mode 0600) and
+regenerates GIT_TOKENS from it on every change, then redeploys the Worker and
+restarts celld — the same mechanism `setup` uses. Each change ends with an
+auth probe: an invite proves the new token is accepted, a revoke proves the
+old one no longer is.
+
+`nashgit invite <name>` prints the token once, with the remote URL and the
+one-liner that stores it via `git credential approve`. Re-inviting a name
+rotates that person's token. `--list` prints names only, never tokens.
+
+A token is push access, not network access. Reaching the server at all is
+Tailscale's job: add the person to your tailnet or share the node with them.
+nashgit does not touch Tailscale ACLs.")]
+    Invite(InviteArgs),
+
     /// Check that the deployment still works, one line per check.
     #[command(long_about = "\
 Check a deployment, one line per check.
@@ -507,6 +528,22 @@ pub struct DescArgs {
 pub struct RemoteArgs {
     /// Repository name on the server. Defaults to the directory's name.
     pub name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct InviteArgs {
+    /// Person to invite. Letters, digits, dash, underscore.
+    /// Re-inviting a name rotates their token.
+    #[arg(conflicts_with_all = ["list", "revoke"])]
+    pub name: Option<String>,
+
+    /// List the invited names. Never prints tokens.
+    #[arg(long, conflicts_with = "revoke")]
+    pub list: bool,
+
+    /// Remove this person's token, redeploy, and verify it now fails.
+    #[arg(long, value_name = "NAME")]
+    pub revoke: Option<String>,
 }
 
 #[derive(Debug, Args)]

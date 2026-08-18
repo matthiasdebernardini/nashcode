@@ -596,6 +596,149 @@ echo "NASHGIT_VERIFY_REPO=$NAME"
     )
 }
 
+// --- invites ----------------------------------------------------------------
+//
+// dgit reads extra push tokens, comma-separated, from the GIT_TOKENS var,
+// alongside the main GIT_TOKEN. dgit only sees that flat list, so the CLI owns
+// a name → token mapping on the host (`~/git-invites.toml`, 0600) and
+// regenerates GIT_TOKENS from it on every change. The redeploy is the same
+// mechanism `setup` uses: patch the vars into wrangler.celld.jsonc, `celld
+// deploy`, restart the service.
+
+/// `celld deploy` flags rebuilt from the saved profile.
+fn profile_celld_flags(p: &Profile) -> String {
+    let mut s = String::new();
+    if let Some(b) = &p.bucket {
+        s.push_str(&format!("--bucket {}", sq(b)));
+    }
+    if let Some(e) = &p.endpoint {
+        s.push_str(&format!(" --endpoint {}", sq(e)));
+    }
+    if let Some(r) = &p.region {
+        s.push_str(&format!(" --region {}", sq(r)));
+    }
+    s
+}
+
+/// Regenerate GIT_TOKENS from the mapping file and push it live.
+///
+/// Bucket credentials come from the 0600 EnvironmentFile the service already
+/// reads; nothing secret travels for the deploy itself.
+fn regen_git_tokens(p: &Profile) -> String {
+    format!(
+        r#"DGIT_DIR="$HOME/dgit"
+TOKENS="$(sed -n 's/^[^=]* = "\(.*\)"$/\1/p' "$INVITES" | paste -sd, -)"
+cd "$DGIT_DIR"
+VARS_FILE="$(mktemp "$DGIT_DIR/.nashgit-vars.XXXXXX")"
+printf '{{"GIT_TOKENS": "%s"}}' "$TOKENS" >"$VARS_FILE"
+node - "$DGIT_DIR/wrangler.celld.jsonc" "$VARS_FILE" <<'NASHGIT_PATCH_EOF'
+{patch}
+NASHGIT_PATCH_EOF
+chmod 600 "$DGIT_DIR/wrangler.celld.jsonc"
+rm -f "$VARS_FILE"
+log "celld deploy"
+if as_root test -r /etc/celld/celld.env 2>/dev/null; then
+  as_root sh -c 'set -a; . /etc/celld/celld.env; set +a; exec "$0" deploy wrangler.celld.jsonc "$@"' \
+    "$(command -v celld || echo celld)" {flags}
+else
+  celld deploy wrangler.celld.jsonc {flags}
+fi
+as_root systemctl restart celld
+log "celld restarted"
+"#,
+        patch = PATCH_WRANGLER_JS,
+        flags = profile_celld_flags(p),
+    )
+}
+
+/// Probe the loopback listener with `$NASHGIT_PROBE_TOKEN` until it answers.
+///
+/// The probe is dgit's usual read-only one: a PUT with a body that is not
+/// JSON. 400 means the token was accepted (and nothing changed), 401 means it
+/// was rejected. The token reaches curl through a 0600 config file, not argv.
+fn probe_block(listen: &str) -> String {
+    format!(
+        r#"CURLRC="$(mktemp)"
+chmod 600 "$CURLRC"
+printf 'user = "x:%s"\n' "$NASHGIT_PROBE_TOKEN" >"$CURLRC"
+code=000
+for i in $(seq 1 30); do
+  code="$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 -K "$CURLRC" -X PUT --data '~' "http://{listen}/nashgit-invite-probe/config" || true)"
+  case "$code" in 400|401|403) break ;; esac
+  sleep 1
+done
+rm -f "$CURLRC"
+"#
+    )
+}
+
+/// Add (or rotate) one person's push token and put it live.
+pub fn invite_script(name: &str, token: &str, p: &Profile, listen: &str) -> String {
+    format!(
+        r#"{PRELUDE}
+umask 077
+INVITES="$HOME/git-invites.toml"
+NAME={name}
+export NASHGIT_PROBE_TOKEN={token}
+touch "$INVITES"
+chmod 600 "$INVITES"
+TMP="$(mktemp)"
+grep -v "^$NAME = " "$INVITES" >"$TMP" || true
+printf '%s = "%s"\n' "$NAME" "$NASHGIT_PROBE_TOKEN" >>"$TMP"
+install -m 0600 "$TMP" "$INVITES"
+rm -f "$TMP"
+log "recorded $NAME in $INVITES"
+{regen}
+{probe}echo "NASHGIT_INVITE_PROBE=$code"
+if [ "$code" != 400 ]; then log "the new token was not accepted (HTTP $code)"; exit 1; fi
+echo "NASHGIT_INVITE=ok"
+"#,
+        name = sq(name),
+        token = sq(token),
+        regen = regen_git_tokens(p),
+        probe = probe_block(listen),
+    )
+}
+
+/// Remove one person's token, put the shrunken set live, and prove the old
+/// token no longer authenticates.
+pub fn revoke_script(name: &str, p: &Profile, listen: &str) -> String {
+    format!(
+        r#"{PRELUDE}
+umask 077
+INVITES="$HOME/git-invites.toml"
+NAME={name}
+grep -q "^$NAME = " "$INVITES" 2>/dev/null || {{ log "no invite named $NAME"; exit 1; }}
+export NASHGIT_PROBE_TOKEN="$(sed -n "s/^$NAME = \"\(.*\)\"$/\1/p" "$INVITES")"
+TMP="$(mktemp)"
+grep -v "^$NAME = " "$INVITES" >"$TMP" || true
+install -m 0600 "$TMP" "$INVITES"
+rm -f "$TMP"
+log "removed $NAME from $INVITES"
+{regen}
+{probe}echo "NASHGIT_REVOKE_PROBE=$code"
+if [ "$code" = 400 ]; then log "the revoked token is still accepted"; exit 1; fi
+echo "NASHGIT_REVOKE=ok"
+"#,
+        name = sq(name),
+        regen = regen_git_tokens(p),
+        probe = probe_block(listen),
+    )
+}
+
+/// The invited names, one `NASHGIT_INVITE_NAME=` line each. Never the tokens.
+pub fn invites_list_script() -> String {
+    format!(
+        r#"{PRELUDE}
+INVITES="$HOME/git-invites.toml"
+if [ -f "$INVITES" ]; then
+  sed -n 's/^\([^ =]*\) = .*/NASHGIT_INVITE_NAME=\1/p' "$INVITES"
+fi
+echo "NASHGIT_LIST=ok"
+"#
+    )
+}
+
 /// The host-side half of `nashgit doctor`, as one round trip.
 pub fn doctor_script(p: &Profile, listen: &str) -> String {
     let diagnose = match (&p.bucket, &p.region) {
@@ -684,6 +827,9 @@ mod tests {
             tailscale_up_script(None),
             tailscale_status_script(),
             verify_script("t", "127.0.0.1:8080"),
+            invite_script("alice", "tok3n", &Profile::default(), "127.0.0.1:8080"),
+            revoke_script("alice", &Profile::default(), "127.0.0.1:8080"),
+            invites_list_script(),
         ] {
             assert!(s.starts_with("set -eu\n"), "missing strict mode: {}", &s[..40]);
         }
@@ -713,6 +859,28 @@ mod tests {
         let d = deploy_script(&sample());
         assert!(!d.contains("celld deploy wrangler.celld.jsonc --token"));
         assert!(d.contains("export AWS_SECRET_ACCESS_KEY='s3cr3t'"));
+    }
+
+    #[test]
+    fn invite_scripts_keep_the_token_off_command_lines_and_off_list_output() {
+        let p = Profile::default();
+        let s = invite_script("alice", "tok3n", &p, "127.0.0.1:8080");
+        // The token lands in the script body (stdin) as a variable, and curl
+        // reads it from a 0600 config file, never argv.
+        assert!(s.contains("export NASHGIT_PROBE_TOKEN='tok3n'"));
+        assert!(s.contains("-K \"$CURLRC\""));
+        assert!(!s.contains("-u x:"));
+        assert!(s.contains("install -m 0600"));
+
+        // Revoke reads the token from the mapping; the CLI never sends it.
+        let r = revoke_script("alice", &p, "127.0.0.1:8080");
+        assert!(!r.contains("tok3n"));
+        assert!(r.contains("NASHGIT_REVOKE_PROBE"));
+
+        // The list script touches only the name column.
+        let l = invites_list_script();
+        assert!(l.contains("NASHGIT_INVITE_NAME=\\1"));
+        assert!(!l.contains("NASHGIT_PROBE_TOKEN"));
     }
 
     #[test]

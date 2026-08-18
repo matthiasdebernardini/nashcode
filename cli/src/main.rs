@@ -1,6 +1,6 @@
 use clap::Parser;
 use nashgit_cli::cli::{Cli, Command, PlanCommand};
-use nashgit_cli::commands::{Ctx, doctor, plan, profiles, repo, setup};
+use nashgit_cli::commands::{Ctx, doctor, invite, plan, profiles, repo, setup};
 use nashgit_cli::output::Out;
 
 fn main() {
@@ -24,6 +24,7 @@ fn main() {
         Command::Gc(a) => repo::gc(&ctx, a),
         Command::Desc(a) => repo::desc(&ctx, a),
         Command::Remote(a) => repo::remote(&ctx, a),
+        Command::Invite(a) => invite::run(&ctx, a),
         Command::Doctor => doctor::run(&ctx),
         Command::Plan(PlanCommand::New(a)) => plan::new(&ctx, a),
         Command::Annotate(a) => plan::annotate(&ctx, a),

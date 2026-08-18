@@ -72,6 +72,20 @@ nashgit token            # print the push token, for CI
 nashgit doctor           # one line per check, ✓/✗/-
 ```
 
+### Invite someone
+
+```sh
+nashgit invite alice     # their own push token; prints a ready-to-send snippet
+nashgit invite --list    # names only
+nashgit invite --revoke alice
+```
+
+Each person gets their own token (dgit's GIT_TOKENS mechanism), so access is
+revocable per person and re-inviting a name rotates that person's token. Every
+change is applied to the server over SSH and verified with an auth probe. A
+token is push access, not network access — reaching the server at all is
+Tailscale's job: add the person to your tailnet or share the node with them.
+
 The push token never goes into a remote URL. `nashgit` hands it to git's
 credential helper (`git credential approve`), so `git remote -v`, your config
 files, and your shell history stay clean.
