@@ -129,6 +129,82 @@ h6,
   margin-bottom: 0;
 }
 
+/* ---- blob: gutter, anchors, highlighting ------------------------------------- */
+
+/*
+ * The server ships one block per line, each holding a gutter link and the code. The
+ * number is a ::before so it never lands in a copied selection, and the block is what
+ * `#L10` highlights — with or without shiki.
+ */
+.nashcode-blob {
+  padding: 8px 0;
+  line-height: 1.5;
+  overflow-x: auto;
+}
+
+.nashcode-line {
+  display: block;
+  padding-right: 16px;
+}
+
+.nashcode-line.is-highlighted {
+  background-color: var(--bgColor-attention-muted, rgba(255, 212, 0, 0.15));
+}
+
+.nashcode-lineno {
+  display: inline-block;
+  width: 4.5em;
+  padding-right: 1.5em;
+  text-align: right;
+  color: var(--fgColor-muted);
+  text-decoration: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.nashcode-lineno::before {
+  content: attr(data-line);
+}
+
+.nashcode-lineno:hover {
+  color: var(--fgColor-default);
+}
+
+/*
+ * shiki writes every theme's colors onto the <pre> and each token as CSS variables.
+ * Primer's color mode picks one: `auto` follows the system, `light`/`dark` do not.
+ * Only the code half is repainted — the gutter is chrome and keeps Primer's color
+ * through every theme.
+ */
+.nashcode-blob.is-highlighted-code .nashcode-line-code,
+.nashcode-blob.is-highlighted-code .nashcode-line-code span {
+  color: var(--shiki-light);
+}
+
+[data-color-mode="dark"] .nashcode-blob.is-highlighted-code .nashcode-line-code,
+[data-color-mode="dark"] .nashcode-blob.is-highlighted-code .nashcode-line-code span {
+  color: var(--shiki-dark);
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-color-mode="auto"] .nashcode-blob.is-highlighted-code .nashcode-line-code,
+  [data-color-mode="auto"] .nashcode-blob.is-highlighted-code .nashcode-line-code span {
+    color: var(--shiki-dark);
+  }
+}
+
+/* The in-browser editor: a code surface, tall enough to work in. */
+.nashcode-editor {
+  font-family: var(--nashcode-font-code);
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 60vh;
+  resize: vertical;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+
 /* ---- stack graph ------------------------------------------------------------ */
 
 /*

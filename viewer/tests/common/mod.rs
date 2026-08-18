@@ -321,6 +321,30 @@ pub async fn post_json(router: &Router, path: &str, payload: serde_json::Value) 
     request(router, Method::POST, path, Some(("application/json", payload.to_string()))).await
 }
 
+/// POST a browser form, without following the redirect: the status and where it points.
+pub async fn post_form(
+    router: &Router,
+    path: &str,
+    fields: &[(&str, &str)],
+) -> (u16, Option<String>, String) {
+    let payload = serde_urlencoded::to_string(fields).expect("form encodes");
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(payload))
+        .expect("request builds");
+    let response = router.handle(request).await;
+    let status = response.status().as_u16();
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let bytes = to_bytes(response.into_body(), 64 * 1024 * 1024).await.expect("body reads");
+    (status, location, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// A tiny HTTP listener that records every request body and answers with a canned
 /// (status, body) pair. Enough HTTP for webhooks and the Anthropic stub.
 pub struct StubServer {

@@ -5,7 +5,7 @@ mod common;
 
 use std::path::Path;
 
-use common::{Work, get, make_remote, simple_bed};
+use common::{Work, get, make_remote, post_form, simple_bed};
 
 /// A repo with something of every kind in it: nested directories, a README at two
 /// levels, a markdown file, a plain-text file, and one file that is not UTF-8.
@@ -114,6 +114,70 @@ async fn a_text_blob_renders_as_code_and_a_markdown_blob_renders_as_markdown() {
 }
 
 #[tokio::test]
+async fn a_text_blob_tags_its_language_and_numbers_every_line() {
+    let bed = simple_bed(code_fixture);
+    let (status, body) = get(&bed.router, "/demo/blob/src/lib.rs").await;
+    assert_eq!(status, 200, "{body}");
+
+    // The server names the grammar; the browser fetches only that chunk.
+    assert!(body.contains("data-lang=\"rust\""), "no language tag:\n{body}");
+    assert!(body.contains("data-lines=\"1\""), "no line count:\n{body}");
+    // Every line is anchorable whether or not highlighting ever runs.
+    assert!(body.contains("id=\"L1\""), "no line id:\n{body}");
+    assert!(body.contains("href=\"#L1\""), "no gutter link:\n{body}");
+    assert!(body.contains("data-line=\"1\""), "no gutter number:\n{body}");
+    assert!(body.contains("nashcode-line-code"), "no code cell:\n{body}");
+}
+
+#[tokio::test]
+async fn a_file_with_no_known_grammar_is_numbered_but_not_tagged() {
+    let bed = simple_bed(|root| {
+        let work = code_fixture(root);
+        work.write("notes.whatever", "one\ntwo\nthree\n");
+        work.commit_all("odd extension");
+        work.push("main");
+        work
+    });
+    let (status, body) = get(&bed.router, "/demo/blob/notes.whatever").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains("data-lang="), "an unknown extension got a grammar:\n{body}");
+    assert!(body.contains("data-lines=\"3\""), "not numbered:\n{body}");
+    assert!(body.contains("id=\"L3\""), "the last line has no anchor:\n{body}");
+}
+
+#[tokio::test]
+async fn a_huge_file_is_numbered_but_never_highlighted() {
+    let bed = simple_bed(|root| {
+        let work = code_fixture(root);
+        let big: String = (0..5001).map(|n| format!("let x{n} = {n};\n")).collect();
+        work.write("src/big.rs", &big);
+        work.commit_all("a file nobody reads end to end");
+        work.push("main");
+        work
+    });
+    let (status, body) = get(&bed.router, "/demo/blob/src/big.rs").await;
+    assert_eq!(status, 200);
+    assert!(!body.contains("data-lang="), "a 5001-line file was tagged for shiki");
+    assert!(body.contains("data-lines=\"5001\""), "numbering was skipped too");
+    assert!(body.contains("id=\"L5001\""), "the last line has no anchor");
+}
+
+#[tokio::test]
+async fn code_in_a_blob_is_escaped_not_executed() {
+    let bed = simple_bed(|root| {
+        let work = code_fixture(root);
+        work.write("src/evil.js", "const a = \"<script>alert(1)</script>\";\n");
+        work.commit_all("markup in a string");
+        work.push("main");
+        work
+    });
+    let (status, body) = get(&bed.router, "/demo/blob/src/evil.js").await;
+    assert_eq!(status, 200);
+    assert!(!body.contains("<script>alert(1)</script>"), "raw script tag survived:\n{body}");
+    assert!(body.contains("&lt;script&gt;"), "not escaped:\n{body}");
+}
+
+#[tokio::test]
 async fn a_binary_blob_is_offered_as_a_download_not_as_text() {
     let bed = simple_bed(code_fixture);
     let (status, body) = get(&bed.router, "/demo/blob/assets/logo.png").await;
@@ -157,6 +221,119 @@ async fn missing_and_mistyped_paths_are_404_not_500() {
         let (status, body) = get(&bed.router, path).await;
         assert_eq!(status, 404, "{path} -> {status}: {body}");
     }
+}
+
+// ---- edit in the browser ----------------------------------------------------------
+
+#[tokio::test]
+async fn the_blob_header_offers_a_pencil_for_text_and_none_for_binaries() {
+    let bed = simple_bed(code_fixture);
+
+    let (status, body) = get(&bed.router, "/demo/blob/src/lib.rs").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("/demo/edit/src/lib.rs"), "no pencil on a text file:\n{body}");
+    assert!(body.contains("ph-pencil-simple"), "no pencil icon:\n{body}");
+    // Raw is still there, exactly as before.
+    assert!(body.contains("/demo/raw/main/src/lib.rs"), "raw link lost:\n{body}");
+
+    let (status, body) = get(&bed.router, "/demo/blob/assets/logo.png").await;
+    assert_eq!(status, 200);
+    assert!(!body.contains("/demo/edit/"), "a binary offered a pencil:\n{body}");
+}
+
+#[tokio::test]
+async fn the_edit_form_holds_the_file_and_the_tree_page_offers_a_new_one() {
+    let bed = simple_bed(code_fixture);
+
+    let (status, body) = get(&bed.router, "/demo/edit/src/lib.rs").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("fn main() { let x = 1; }"), "file not prefilled:\n{body}");
+    assert!(body.contains("name=\"message\""), "no commit message field:\n{body}");
+    assert!(body.contains("action=\"/demo/edit\""), "form posts somewhere else:\n{body}");
+    assert!(body.contains("Commit to main"), "the button does not name the branch:\n{body}");
+
+    // "New file" on the tree page is the same form, empty, with the directory filled in.
+    let (status, tree) = get(&bed.router, "/demo/tree/src").await;
+    assert_eq!(status, 200);
+    assert!(tree.contains("/demo/edit?dir=src"), "no new-file button:\n{tree}");
+    let (status, new) = get(&bed.router, "/demo/edit?dir=src").await;
+    assert_eq!(status, 200, "{new}");
+    assert!(new.contains("value=\"src/\""), "the directory was not prefilled:\n{new}");
+    assert!(new.contains("New file"), "not the empty form:\n{new}");
+}
+
+#[tokio::test]
+async fn editing_commits_pushes_and_redirects_to_the_file() {
+    let bed = simple_bed(code_fixture);
+    let before = bed.remote_tip("demo", "main");
+
+    let (status, location, _) = post_form(
+        &bed.router,
+        "/demo/edit",
+        &[
+            ("path", "src/lib.rs"),
+            ("content", "fn main() { let x = 42; }\r\n"),
+            ("message", "answer the question"),
+        ],
+    )
+    .await;
+    assert_eq!(status, 303, "not a redirect after POST");
+    assert_eq!(location.as_deref(), Some("/demo/blob/src/lib.rs"));
+
+    // The push landed on the remote, not only in the mirror.
+    let after = bed.remote_tip("demo", "main");
+    assert_ne!(before, after, "nothing was pushed");
+    let log = common::git(
+        &bed.remote_root().join("demo.git"),
+        &["log", "-1", "--format=%s%n%an", "main"],
+    );
+    assert!(log.contains("answer the question"), "commit message lost: {log}");
+    assert!(log.contains("local"), "the actor was not stamped: {log}");
+
+    // And the page serves the new bytes, with the CRLF the textarea added removed.
+    let (status, body) = get(&bed.router, "/demo/blob/src/lib.rs").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("let x = 42"), "the edit is not visible:\n{body}");
+    assert!(body.contains("data-lines=\"1\""), "a stray blank line survived:\n{body}");
+}
+
+#[tokio::test]
+async fn a_new_file_is_created_by_the_same_form() {
+    let bed = simple_bed(code_fixture);
+    let (status, location, _) = post_form(
+        &bed.router,
+        "/demo/edit",
+        &[("path", "docs/new-note.md"), ("content", "# fresh\n"), ("message", "")],
+    )
+    .await;
+    assert_eq!(status, 303);
+    assert_eq!(location.as_deref(), Some("/demo/blob/docs/new-note.md"));
+
+    let (status, body) = get(&bed.router, "/demo/blob/docs/new-note.md").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("<h1>fresh</h1>"), "the new file is not there:\n{body}");
+    // An empty message field still writes a readable commit.
+    let log = common::git(&bed.remote_root().join("demo.git"), &["log", "-1", "--format=%s", "main"]);
+    assert!(log.contains("Create docs/new-note.md"), "no default message: {log}");
+}
+
+#[tokio::test]
+async fn a_path_that_escapes_the_repo_is_refused_and_the_text_comes_back() {
+    let bed = simple_bed(code_fixture);
+    let before = bed.remote_tip("demo", "main");
+    for bad in ["../outside.md", "src/../../etc/passwd", ".git/config", ""] {
+        let (status, location, body) = post_form(
+            &bed.router,
+            "/demo/edit",
+            &[("path", bad), ("content", "keep me\n"), ("message", "nope")],
+        )
+        .await;
+        assert_eq!(status, 200, "{bad} was not refused with a page");
+        assert!(location.is_none(), "{bad} redirected as if it had committed");
+        assert!(body.contains("Nothing was committed"), "no error card for {bad}:\n{body}");
+        assert!(body.contains("keep me"), "the typed text was thrown away for {bad}");
+    }
+    assert_eq!(before, bed.remote_tip("demo", "main"), "a refused path still pushed");
 }
 
 #[tokio::test]

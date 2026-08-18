@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use topcoat::Result;
 use topcoat::context::Cx;
+use topcoat::router::response::{IntoResponse, Response};
 use topcoat::router::{page, path_param, query_params};
 use topcoat::view::{View, component, view};
 
@@ -11,6 +12,7 @@ use crate::ci::strip_ansi;
 use crate::db::{CiRun, Comment, CommentFilter, status};
 use crate::docs::{self, DocIndex, Document};
 use crate::git::{EntryKind, TreeEntry};
+use crate::mirror::MirrorStatus;
 use crate::render;
 use crate::stack::StackGraph;
 use crate::web::components::{
@@ -175,6 +177,7 @@ async fn tree_page(cx: &Cx, dir: String) -> Result {
 
     let title =
         if dir.is_empty() { name.clone() } else { format!("{name} · {dir}") };
+    let new_file_url = new_file_url(&name, &dir);
     view! { cx =>
         shell(title: title, repo: name.clone(), active: "code", status: Some(ctx.status.clone()),
             path_crumbs(repo: name.clone(), path: dir.clone())
@@ -183,6 +186,9 @@ async fn tree_page(cx: &Cx, dir: String) -> Result {
                     <i class="ph ph-git-branch"></i>
                     branch_label(repo: name.clone(), branch: branch.clone())
                     <span class="Counter">(entries.len())</span>
+                    <a class="ml-auto btn btn-sm" href=(new_file_url)>
+                        <i class="ph ph-file-plus"></i>" New file"
+                    </a>
                 </div>
                 if entries.is_empty() {
                     <div class="Box-row color-fg-muted">"This directory is empty."</div>
@@ -216,8 +222,9 @@ async fn tree_page(cx: &Cx, dir: String) -> Result {
 
 // ---- /{repo}/blob/{*path} --------------------------------------------------------
 
-/// What a blob page has to show. Markdown renders, other text goes in a `<pre>`,
-/// and anything that is not UTF-8 is offered as a download instead.
+/// What a blob page has to show. Markdown renders, other text goes in a numbered
+/// `<pre>`, and anything that is not UTF-8 is offered as a download instead. Both text
+/// arms carry ready-made HTML.
 enum Blob {
     Markdown(String),
     Text(String),
@@ -270,10 +277,14 @@ async fn repo_blob(cx: &Cx) -> Result {
         Ok(text) if is_markdown(&file_name) => Blob::Markdown(
             render_markdown_source(cx, &name, &repo, &tip, &text).await,
         ),
-        Ok(text) => Blob::Text(text),
+        Ok(text) => Blob::Text(numbered_code(&text, shiki_lang(&file_name))),
         Err(_) => Blob::Binary,
     };
     let raw_url = format!("/{name}/raw/{branch}/{path}");
+    // Binaries have no pencil: a textarea cannot hold them, and git is the tool for
+    // replacing one.
+    let edit_url = (!matches!(body, Blob::Binary)).then(|| format!("/{name}/edit/{path}"));
+    let wiki_url = is_markdown(&file_name).then(|| render::docs_url(&name, &path));
 
     view! { cx =>
         shell(title: format!("{name} · {path}"), repo: name.clone(), active: "code", status: Some(ctx.status.clone()),
@@ -283,11 +294,24 @@ async fn repo_blob(cx: &Cx) -> Result {
                     <i class=(entry_icon(&entry))></i>
                     <strong>(file_name.clone())</strong>
                     <span class="color-fg-muted text-small">(human_size(size))</span>
-                    <a class="ml-auto Link--secondary text-small" href=(raw_url.clone())>"raw"</a>
+                    <span class="ml-auto d-flex flex-items-center gap-2 text-small">
+                        if let Some(url) = &wiki_url {
+                            <a class="Link--secondary" href=(url.clone())>
+                                <i class="ph ph-book-open"></i>"wiki"
+                            </a>
+                        }
+                        if let Some(url) = &edit_url {
+                            <a class="Link--secondary" href=(url.clone())
+                               aria-label="Edit this file" title="Edit this file">
+                                <i class="ph ph-pencil-simple"></i>"edit"
+                            </a>
+                        }
+                        <a class="Link--secondary" href=(raw_url.clone())>"raw"</a>
+                    </span>
                 </div>
                 match &body {
                     Blob::Markdown(html) => <div class="Box-body markdown-body">(Raw(html.clone()))</div>,
-                    Blob::Text(text) => <pre class="Box-body nashcode-code text-small">(text.clone())</pre>,
+                    Blob::Text(html) => (Raw(html.clone())),
                     Blob::Binary => <div class="Box-body color-fg-muted">
                         <i class="ph ph-file-x"></i>
                         (format!(" Binary file, {size} bytes. "))
@@ -370,6 +394,125 @@ fn is_markdown(name: &str) -> bool {
     matches!(extension(name).as_deref(), Some("md" | "markdown"))
 }
 
+/// A file above this many lines is served without a language tag: shiki would spend
+/// longer tokenizing it than a person will spend reading it. Numbering still happens —
+/// that is the part a link depends on.
+const HIGHLIGHT_LINE_LIMIT: usize = 5000;
+
+/// The shiki grammar for a file, by extension first and whole name second.
+///
+/// The name is what the server knows; the browser turns it into one dynamic
+/// `import()`, so an id nobody's repo uses costs nothing. `None` means the plain
+/// `<pre>` stands, which is also what happens with JS off.
+fn shiki_lang(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    let by_name = match lower.rsplit('/').next().unwrap_or(&lower) {
+        "dockerfile" | "containerfile" => Some("dockerfile"),
+        "makefile" | "gnumakefile" => Some("make"),
+        "justfile" | ".justfile" => Some("just"),
+        "cmakelists.txt" => Some("cmake"),
+        ".gitignore" | ".dockerignore" | ".npmignore" => Some("ignore"),
+        ".env" | ".editorconfig" => Some("ini"),
+        _ => None,
+    };
+    if by_name.is_some() {
+        return by_name;
+    }
+    Some(match extension(&lower)?.as_str() {
+        "rs" => "rust",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "jsx",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "tsx",
+        "py" | "pyi" => "python",
+        "go" => "go",
+        "rb" | "rake" | "gemspec" => "ruby",
+        "sh" | "bash" | "zsh" | "ksh" => "shellscript",
+        "fish" => "fish",
+        "ps1" | "psm1" => "powershell",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" => "cpp",
+        "m" | "mm" => "objective-c",
+        "cs" => "csharp",
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "swift" => "swift",
+        "scala" | "sbt" => "scala",
+        "php" => "php",
+        "pl" | "pm" => "perl",
+        "lua" => "lua",
+        "r" => "r",
+        "dart" => "dart",
+        "ex" | "exs" => "elixir",
+        "erl" | "hrl" => "erlang",
+        "hs" => "haskell",
+        "clj" | "cljs" | "edn" => "clojure",
+        "ml" | "mli" => "ocaml",
+        "zig" => "zig",
+        "nix" => "nix",
+        "vim" => "viml",
+        "awk" => "awk",
+        "groovy" | "gradle" => "groovy",
+        "toml" => "toml",
+        "json" => "json",
+        "jsonc" => "jsonc",
+        "json5" => "json5",
+        "yaml" | "yml" => "yaml",
+        "xml" | "plist" | "svg" | "xsd" => "xml",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "scss" => "scss",
+        "sass" => "sass",
+        "less" => "less",
+        "vue" => "vue",
+        "svelte" => "svelte",
+        "astro" => "astro",
+        "sql" => "sql",
+        "graphql" | "gql" => "graphql",
+        "proto" => "proto",
+        "tf" | "tfvars" => "terraform",
+        "hcl" => "hcl",
+        "ini" | "cfg" | "conf" | "properties" => "ini",
+        "diff" | "patch" => "diff",
+        "tex" | "sty" => "latex",
+        "md" | "markdown" => "markdown",
+        "bat" | "cmd" => "bat",
+        _ => return None,
+    })
+}
+
+/// A file's text as a `<pre>` with a numbered gutter.
+///
+/// Every line is its own block carrying an `L{n}` id and a clickable number, so
+/// `#L10` and `#L10-L20` work with JS off and survive highlighting: `app.js` swaps the
+/// *contents* of each line, never the gutter around it. `data-lang`, when present,
+/// names the shiki grammar the browser should fetch.
+fn numbered_code(text: &str, lang: Option<&str>) -> String {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    // A trailing newline ends the last line; it does not start another one.
+    if lines.len() > 1 && lines.last() == Some(&"") {
+        lines.pop();
+    }
+    let mut html = String::with_capacity(text.len() + lines.len() * 96);
+    html.push_str("<pre class=\"Box-body nashcode-code nashcode-blob text-small\"");
+    if let Some(lang) = lang.filter(|_| lines.len() <= HIGHLIGHT_LINE_LIMIT) {
+        html.push_str(&format!(" data-lang=\"{}\"", render::escape_attr(lang)));
+    }
+    html.push_str(&format!(" data-lines=\"{}\">", lines.len()));
+    for (index, line) in lines.iter().enumerate() {
+        let number = index + 1;
+        html.push_str(&format!(
+            "<span class=\"nashcode-line\" id=\"L{number}\">\
+             <a class=\"nashcode-lineno\" href=\"#L{number}\" data-line=\"{number}\" \
+             aria-label=\"Line {number}\"></a>\
+             <span class=\"nashcode-line-code\">{}</span></span>",
+            render::escape_text(line.trim_end_matches('\r'))
+        ));
+    }
+    html.push_str("</pre>");
+    html
+}
+
 fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut size = bytes as f64;
@@ -407,6 +550,319 @@ async fn render_markdown_source(
     let index = app(cx).docs.get(name, repo, tip).await;
     let branches = repo.branches().await.unwrap_or_default();
     render::markdown(source, name, Some(&index), &branches)
+}
+
+// ---- /{repo}/edit and /{repo}/edit/{*path} — one file, one commit -----------------
+
+/// A repo-relative path the write path may touch, or `None`.
+///
+/// Paths arrive from a URL and from a text field, so both are normalized here and
+/// nowhere else: no empty or dotted segments, no `.git`, no backslashes, no control
+/// characters. Refusing beats sanitizing — a path that had to be repaired is a path
+/// the person did not mean.
+fn safe_repo_path(path: &str) -> Option<String> {
+    let trimmed = path.trim().trim_matches('/');
+    if trimmed.is_empty() || trimmed.len() > 512 {
+        return None;
+    }
+    for segment in trimmed.split('/') {
+        let bad = segment.is_empty()
+            || segment == "."
+            || segment == ".."
+            || segment.eq_ignore_ascii_case(".git")
+            || segment.contains('\\')
+            || segment.chars().any(char::is_control);
+        if bad {
+            return None;
+        }
+    }
+    Some(trimmed.to_owned())
+}
+
+/// The "New file" button's target: the empty form, with the directory prefilled.
+fn new_file_url(repo: &str, dir: &str) -> String {
+    if dir.is_empty() {
+        return format!("/{repo}/edit");
+    }
+    let query = serde_urlencoded::to_string([("dir", dir)]).unwrap_or_default();
+    format!("/{repo}/edit?{query}")
+}
+
+/// What the edit form is showing right now — the file as typed, not as stored, so a
+/// rejected commit comes back with the person's own text still in it.
+struct EditState {
+    path: String,
+    content: String,
+    message: String,
+    /// A path the repo does not have yet: the field is editable and the form says "Create".
+    creating: bool,
+    error: Option<String>,
+}
+
+#[topcoat::router::query_params(error = bad_request)]
+struct NewFileQuery {
+    dir: Option<String>,
+}
+
+/// `GET /{repo}/edit` — the empty form. `?dir=` prefills the directory the person
+/// pressed "New file" in.
+#[page("/{repo}/edit")]
+async fn edit_new(cx: &Cx) -> Result {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    if !ctx.status.available {
+        return view! { cx =>
+            shell(title: name.clone(), repo: name.clone(), active: "code",
+                unavailable_card(repo: name.clone(), status: ctx.status.clone()))
+        };
+    }
+    let dir = query_params::<NewFileQuery>(cx)?
+        .dir
+        .clone()
+        .and_then(|dir| safe_repo_path(&dir))
+        .map(|dir| format!("{dir}/"))
+        .unwrap_or_default();
+    edit_view(
+        cx,
+        &name,
+        &ctx.status,
+        EditState {
+            path: dir,
+            content: String::new(),
+            message: String::new(),
+            creating: true,
+            error: None,
+        },
+    )
+    .await
+}
+
+/// `GET /{repo}/edit/{*path}` — the same form, holding the file as the default branch
+/// has it.
+#[page("/{repo}/edit/{*rest}")]
+async fn edit_existing(cx: &Cx) -> Result {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    if !ctx.status.available {
+        return view! { cx =>
+            shell(title: name.clone(), repo: name.clone(), active: "code",
+                unavailable_card(repo: name.clone(), status: ctx.status.clone()))
+        };
+    }
+    let Some(path) = safe_repo_path(&join_rest(cx)) else {
+        return Err(topcoat::router::error::not_found().into());
+    };
+
+    let repo = app(cx).mirrors.repo(&name);
+    let Ok(branch) = repo.default_branch().await else {
+        return Err(topcoat::router::error::not_found().into());
+    };
+    let tip = repo.tip(&branch).await?;
+    let Some(bytes) = repo.show_file(&tip, &path).await? else {
+        return Err(topcoat::router::error::not_found().into());
+    };
+    // A textarea holds text. Anything else keeps its download link and its pencil-less
+    // header; arriving here by hand gets the reason, not a 404.
+    let Ok(content) = String::from_utf8(bytes) else {
+        return view! { cx =>
+            shell(title: format!("{name} · {path}"), repo: name.clone(), active: "code", status: Some(ctx.status.clone()),
+                <div class="Box color-border-danger-emphasis">
+                    <div class="Box-body">
+                        <h3 class="mb-1"><i class="ph ph-warning"></i>" Not a text file"</h3>
+                        <p class="color-fg-muted mb-0">
+                            (path.clone()) " is not UTF-8, so there is nothing a textarea can hold. "
+                            "Push a replacement with git."
+                        </p>
+                    </div>
+                </div>)
+        };
+    };
+
+    edit_view(
+        cx,
+        &name,
+        &ctx.status,
+        EditState {
+            path,
+            content,
+            message: String::new(),
+            creating: false,
+            error: None,
+        },
+    )
+    .await
+}
+
+/// The form itself. One textarea, one commit message, one button — the shape the board
+/// already writes through, with a path field only when the file does not exist yet.
+async fn edit_view(cx: &Cx, name: &str, status: &MirrorStatus, state: EditState) -> Result {
+    let repo = app(cx).mirrors.repo(name);
+    let branch = repo.default_branch().await.unwrap_or_else(|_| "the default branch".to_owned());
+    let title = if state.creating {
+        format!("{name} · new file")
+    } else {
+        format!("{name} · edit {}", state.path)
+    };
+    let heading = if state.creating { "New file" } else { "Edit file" };
+    let cancel_url = if state.creating {
+        format!("/{name}")
+    } else {
+        format!("/{name}/blob/{}", state.path)
+    };
+    let placeholder = if state.creating {
+        format!("Create {}", if state.path.is_empty() { "a file".to_owned() } else { state.path.clone() })
+    } else {
+        format!("Update {}", state.path)
+    };
+    let name = name.to_owned();
+    view! { cx =>
+        shell(title: title, repo: name.clone(), active: "code", status: Some(status.clone()),
+            <h3 class="mb-2">
+                <i class=(if state.creating { "ph ph-file-plus" } else { "ph ph-pencil-simple" })></i>
+                " " (heading)
+            </h3>
+            if let Some(error) = &state.error {
+                <div class="flash flash-error mb-3">
+                    <i class="ph ph-warning"></i>" Nothing was committed: " (error.clone())
+                </div>
+            }
+            <form method="post" action=(format!("/{name}/edit")) class="Box">
+                <div class="Box-header d-flex flex-items-center gap-2">
+                    <i class="ph ph-file"></i>
+                    if state.creating {
+                        <input
+                            type="text"
+                            name="path"
+                            class="form-control input-block"
+                            placeholder="path/to/file.md"
+                            value=(state.path.clone())
+                            required=""
+                            autofocus=""
+                        >
+                    } else {
+                        <strong>(state.path.clone())</strong>
+                        <input type="hidden" name="path" value=(state.path.clone())>
+                    }
+                </div>
+                <div class="Box-body">
+                    <textarea
+                        name="content"
+                        class="form-control input-block nashcode-editor"
+                        rows="24"
+                        spellcheck="false"
+                        aria-label="File contents"
+                    >(state.content.clone())</textarea>
+                </div>
+                <div class="Box-footer d-flex flex-items-center gap-2">
+                    <input
+                        type="text"
+                        name="message"
+                        class="form-control input-block"
+                        placeholder=(placeholder)
+                        value=(state.message.clone())
+                        aria-label="Commit message"
+                    >
+                    <a class="btn" href=(cancel_url)>"Cancel"</a>
+                    <button type="submit" class="btn btn-primary">
+                        (format!("Commit to {branch}"))
+                    </button>
+                </div>
+            </form>
+        )
+    }
+}
+
+/// The form's body. `path` travels in the body, not the URL, so one endpoint serves
+/// both a new file and an edit.
+#[derive(Debug, Default, serde::Deserialize)]
+struct EditIn {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    message: String,
+}
+
+/// `POST /{repo}/edit` — one commit on the default branch, pushed through the same
+/// write path the board uses. The push must succeed before this redirects; a failure
+/// re-renders the form with the person's text and the reason.
+#[topcoat::router::route(POST "/{repo}/edit")]
+async fn edit_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    if !ctx.status.available {
+        let page = view! { cx =>
+            shell(title: name.clone(), repo: name.clone(), active: "code",
+                unavailable_card(repo: name.clone(), status: ctx.status.clone()))
+        }?;
+        return page.into_response(cx);
+    }
+    let input: EditIn = serde_urlencoded::from_bytes(&body)
+        .or_else(|_| serde_json::from_slice(&body))
+        .unwrap_or_default();
+
+    // A textarea posts CRLF whatever the file held; a repo does not want that. The
+    // trailing newline is added back because every tool downstream expects one.
+    let mut content = input.content.replace("\r\n", "\n");
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+
+    let Some(path) = safe_repo_path(&input.path) else {
+        let page = edit_view(
+            cx,
+            &name,
+            &ctx.status,
+            EditState {
+                path: input.path.clone(),
+                content,
+                message: input.message.clone(),
+                creating: true,
+                error: Some(
+                    "a path must be repo-relative, with no empty, dotted, or .git segments"
+                        .to_owned(),
+                ),
+            },
+        )
+        .await?;
+        return page.into_response(cx);
+    };
+
+    let repo = app(cx).mirrors.repo(&name);
+    let existed = match repo.default_branch().await {
+        Ok(branch) => match repo.tip(&branch).await {
+            Ok(tip) => repo.show_file(&tip, &path).await?.is_some(),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    };
+    let message = match input.message.trim() {
+        "" if existed => format!("Update {path}"),
+        "" => format!("Create {path}"),
+        typed => typed.to_owned(),
+    };
+
+    let who = crate::web::actor(cx);
+    match app(cx).ops.commit_file(&name, &path, &content, &message, &who).await {
+        Ok(_) => crate::web::see_other(&format!("/{name}/blob/{path}")),
+        Err(error) => {
+            let page = edit_view(
+                cx,
+                &name,
+                &ctx.status,
+                EditState {
+                    path,
+                    content,
+                    message: input.message.clone(),
+                    creating: !existed,
+                    error: Some(error.to_string()),
+                },
+            )
+            .await?;
+            page.into_response(cx)
+        }
+    }
 }
 
 // ---- /{repo}/stacks --------------------------------------------------------------

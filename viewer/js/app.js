@@ -1,11 +1,13 @@
 /*
  * The browser entry, bundled by esbuild into OUT_DIR/nashcode.js.
  *
- * Three jobs, all progressive enhancement over server-rendered HTML:
+ * Four jobs, all progressive enhancement over server-rendered HTML:
  *  1. render each embedded unified diff with @pierre/diffs (the real FileDiff
  *     component), attaching line-anchored comments through its annotation slots;
- *  2. native drag-and-drop on the board, POSTing moves to the server;
- *  3. small conveniences: toasts, comment-line pickers.
+ *  2. blob pages: line anchors (always) and shiki highlighting (when the server
+ *     named a language), loading one grammar chunk on demand;
+ *  3. native drag-and-drop on the board, POSTing moves to the server;
+ *  4. small conveniences: toasts, comment-line pickers.
  */
 import { FileDiff, parsePatchFiles } from "@pierre/diffs";
 
@@ -65,6 +67,106 @@ function mountDiffs() {
       // A diff that will not parse still has its <pre> fallback in the DOM.
       console.warn("nashcode: diff render failed for", data.file, error);
     }
+  }
+}
+
+/* ---- blob: line anchors and highlighting ------------------------------------- */
+
+/*
+ * Two independent enhancements over the server's numbered <pre>.
+ *
+ * Anchors run first and never depend on shiki: the gutter, the ids, and the hash are
+ * all in the HTML already. Highlighting then swaps the *contents* of each line, so a
+ * failed or skipped highlight leaves a working, linkable file behind.
+ */
+
+/** `#L10` / `#L10-L20` -> [10, 20]; anything else -> null. */
+function parseLineRange(hash) {
+  const match = /^#L(\d+)(?:-L?(\d+))?$/.exec(hash || "");
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = match[2] ? Number(match[2]) : start;
+  return start <= end ? [start, end] : [end, start];
+}
+
+function mountBlob() {
+  const pre = document.querySelector(".nashcode-blob");
+  if (!pre) return;
+  const lines = [...pre.querySelectorAll(".nashcode-line")];
+  if (!lines.length) return;
+
+  // Where a shift-click extends from: the last line clicked plainly, or the start of
+  // the range the URL arrived with.
+  let anchor = null;
+
+  function paint(scroll) {
+    const range = parseLineRange(window.location.hash);
+    for (const line of lines) line.classList.remove("is-highlighted");
+    if (!range) return null;
+    const [start, end] = range;
+    for (let n = start; n <= end && n <= lines.length; n += 1) {
+      lines[n - 1].classList.add("is-highlighted");
+    }
+    if (scroll && lines[start - 1]) {
+      lines[start - 1].scrollIntoView({ block: "center" });
+    }
+    return range;
+  }
+
+  function follow(scroll) {
+    const range = paint(scroll);
+    anchor = range ? range[0] : null;
+  }
+
+  pre.addEventListener("click", (event) => {
+    const gutter = event.target.closest(".nashcode-lineno");
+    if (!gutter) return;
+    event.preventDefault();
+    const line = Number(gutter.dataset.line);
+    if (event.shiftKey && anchor && anchor !== line) {
+      history.replaceState(null, "", `#L${Math.min(anchor, line)}-L${Math.max(anchor, line)}`);
+    } else {
+      history.replaceState(null, "", `#L${line}`);
+      anchor = line;
+    }
+    paint(false);
+  });
+
+  window.addEventListener("hashchange", () => follow(true));
+  follow(true);
+
+  highlightBlob(pre, lines).catch((error) => {
+    // The plain <pre> is already correct; highlighting is the part that was optional.
+    console.warn("nashcode: highlight failed", error);
+  });
+}
+
+async function highlightBlob(pre, lines) {
+  const lang = pre.dataset.lang;
+  if (!lang) return;
+  // Dynamic, so esbuild's splitting keeps shiki — and each grammar — out of the entry
+  // chunk. Only the grammar this file needs is ever fetched.
+  const { bundledLanguages, codeToHtml } = await import("shiki");
+  if (!bundledLanguages[lang]) return;
+
+  const bodies = lines.map((line) => line.querySelector(".nashcode-line-code"));
+  const code = bodies.map((body) => (body ? body.textContent : "")).join("\n");
+  const html = await codeToHtml(code, { lang, themes: THEME, defaultColor: false });
+
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+  const shiki = parsed.querySelector("pre.shiki");
+  if (!shiki) return;
+  const highlighted = shiki.querySelectorAll("code > .line");
+  // A line count that disagrees means shiki read the file differently than we split
+  // it; the plain text is the one that is certainly right.
+  if (highlighted.length !== bodies.length) return;
+
+  // shiki puts every theme's colors on the root as CSS variables; the stylesheet
+  // picks one by color mode.
+  pre.setAttribute("style", shiki.getAttribute("style") || "");
+  pre.classList.add("is-highlighted-code");
+  for (let i = 0; i < bodies.length; i += 1) {
+    if (bodies[i]) bodies[i].innerHTML = highlighted[i].innerHTML;
   }
 }
 
@@ -146,6 +248,7 @@ function mountBoard() {
 
 function mountAll() {
   mountDiffs();
+  mountBlob();
   mountBoard();
 }
 
