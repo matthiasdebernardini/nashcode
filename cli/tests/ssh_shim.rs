@@ -83,7 +83,7 @@ fn the_install_script_runs_twice_and_sends_the_same_idempotent_script() {
             "no skip path for {tool}"
         );
     }
-    assert!(first.starts_with("set -eu\n"));
+    assert!(first.starts_with("set -euo pipefail\n"));
 }
 
 #[test]

@@ -135,6 +135,11 @@ impl Store {
     }
 
     /// Write the store with 0600 on the file and 0700 on its directory.
+    ///
+    /// The write is atomic: the content goes to a locked-down temp file in
+    /// the same directory, which then renames over the real one. A crash
+    /// mid-write leaves the old store intact, never a truncated one — and the
+    /// token never exists on disk under a wider mode, even briefly.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
@@ -142,13 +147,23 @@ impl Store {
             set_mode(dir, 0o700)?;
         }
         let text = toml::to_string_pretty(self).context("serialize profile store")?;
-        // Write the file empty-and-locked-down first, so the token never exists
-        // on disk under a wider mode, even briefly.
-        std::fs::write(path, "").with_context(|| format!("create {}", path.display()))?;
-        set_mode(path, 0o600)?;
-        std::fs::write(path, text).with_context(|| format!("write {}", path.display()))?;
-        set_mode(path, 0o600)?;
-        Ok(())
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| anyhow!("`{}` has no file name", path.display()))?
+            .to_string_lossy();
+        let tmp = path.with_file_name(format!(".{file_name}.tmp.{}", std::process::id()));
+        let write = || -> Result<()> {
+            std::fs::write(&tmp, "").with_context(|| format!("create {}", tmp.display()))?;
+            set_mode(&tmp, 0o600)?;
+            std::fs::write(&tmp, text.as_bytes())
+                .with_context(|| format!("write {}", tmp.display()))?;
+            std::fs::rename(&tmp, path)
+                .with_context(|| format!("rename {} into place", tmp.display()))?;
+            Ok(())
+        };
+        write().inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
     }
 }
 

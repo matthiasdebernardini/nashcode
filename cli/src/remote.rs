@@ -26,7 +26,7 @@ pub fn sq(s: &str) -> String {
 
 /// Prelude shared by every script: strict mode, celld's install path, and a
 /// root-runner that works whether we are root already or must use sudo.
-const PRELUDE: &str = r#"set -eu
+const PRELUDE: &str = r#"set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 export DEBIAN_FRONTEND=noninteractive
 if [ "$(id -u)" = 0 ]; then
@@ -338,7 +338,10 @@ DGIT_DIR={dir}
 if [ -d "$DGIT_DIR/.git" ]; then
   log "update dgit checkout"
   git -C "$DGIT_DIR" fetch --quiet --depth 1 origin main
-  git -C "$DGIT_DIR" checkout --quiet --detach FETCH_HEAD
+  # --force: the previous deploy left wrangler.celld.jsonc patched, so the
+  # tree is dirty and a plain checkout refuses. The patch below rebuilds the
+  # file from upstream, invites included, so nothing is lost.
+  git -C "$DGIT_DIR" checkout --quiet --force --detach FETCH_HEAD
 else
   log "clone dgit"
   git clone --quiet --depth 1 https://github.com/littledivy/dgit "$DGIT_DIR"
@@ -350,15 +353,27 @@ npm install --no-audit --no-fund --silent
 
 log "patch wrangler.celld.jsonc"
 VARS_FILE="$(mktemp "$DGIT_DIR/.nashgit-vars.XXXXXX")"
-trap 'rm -f "$VARS_FILE"' EXIT
+PATCH_FILE="$(mktemp "$DGIT_DIR/.nashgit-patch.XXXXXX")"
+trap 'rm -f "$VARS_FILE" "$PATCH_FILE"' EXIT
+cat >"$PATCH_FILE" <<'NASHGIT_PATCH_EOF'
+{patch}
+NASHGIT_PATCH_EOF
 cat >"$VARS_FILE" <<'NASHGIT_VARS_EOF'
 {vars}
 NASHGIT_VARS_EOF
-node - "$DGIT_DIR/wrangler.celld.jsonc" "$VARS_FILE" <<'NASHGIT_PATCH_EOF'
-{patch}
-NASHGIT_PATCH_EOF
+node "$PATCH_FILE" "$DGIT_DIR/wrangler.celld.jsonc" "$VARS_FILE"
+
+# A re-run starts from a fresh upstream file, which would drop the invited
+# tokens; restore GIT_TOKENS from the mapping the invites live in.
+INVITES="$HOME/git-invites.toml"
+if [ -s "$INVITES" ]; then
+  TOKENS="$(sed -n 's/^[^=]* = "\(.*\)"$/\1/p' "$INVITES" | paste -sd, -)"
+  printf '{{"GIT_TOKENS": "%s"}}' "$TOKENS" >"$VARS_FILE"
+  node "$PATCH_FILE" "$DGIT_DIR/wrangler.celld.jsonc" "$VARS_FILE"
+  log "restored GIT_TOKENS from $INVITES"
+fi
 chmod 600 "$DGIT_DIR/wrangler.celld.jsonc"
-rm -f "$VARS_FILE"
+rm -f "$VARS_FILE" "$PATCH_FILE"
 trap - EXIT
 
 log "celld deploy"
@@ -831,7 +846,11 @@ mod tests {
             revoke_script("alice", &Profile::default(), "127.0.0.1:8080"),
             invites_list_script(),
         ] {
-            assert!(s.starts_with("set -eu\n"), "missing strict mode: {}", &s[..40]);
+            assert!(
+                s.starts_with("set -euo pipefail\n"),
+                "missing strict mode: {}",
+                &s[..40]
+            );
         }
     }
 
@@ -859,6 +878,20 @@ mod tests {
         let d = deploy_script(&sample());
         assert!(!d.contains("celld deploy wrangler.celld.jsonc --token"));
         assert!(d.contains("export AWS_SECRET_ACCESS_KEY='s3cr3t'"));
+    }
+
+    #[test]
+    fn a_deploy_rerun_survives_the_dirty_wrangler_file_and_keeps_the_invites() {
+        let s = deploy_script(&sample());
+        // The previous deploy patched wrangler.celld.jsonc in the tree, so a
+        // plain `checkout --detach` refuses and `set -e` kills the re-run.
+        assert!(s.contains("checkout --quiet --force --detach FETCH_HEAD"), "{s}");
+        // The force-checkout resets the file to upstream, so the invited
+        // tokens must come back from the mapping.
+        assert!(s.contains(r#"if [ -s "$INVITES" ]"#), "{s}");
+        assert!(s.contains(r#"printf '{"GIT_TOKENS": "%s"}' "$TOKENS""#), "{s}");
+        // Temp files are cleaned up even when a step dies.
+        assert!(s.contains(r#"trap 'rm -f "$VARS_FILE" "$PATCH_FILE"' EXIT"#), "{s}");
     }
 
     #[test]

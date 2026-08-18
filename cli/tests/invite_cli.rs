@@ -189,6 +189,14 @@ fn revoke_removes_the_name_and_verifies_the_token_is_dead() {
     let alice = host.token_of("alice");
     let bob = host.token_of("bob");
 
+    // A regex-shaped "name" dies locally before it can reach the host's
+    // grep pattern and wipe the whole mapping.
+    let before = host.mapping();
+    let out = host.run(&["--json", "invite", "--revoke", ".*"]);
+    assert!(!out.status.success());
+    assert!(json(&out)["error"].as_str().unwrap().contains("not a usable"));
+    assert_eq!(host.mapping(), before, "mapping must be untouched");
+
     // From here the probe answers 401: the revoked token is rejected.
     let curl = host.dir.path().join("stubs/curl");
     fs::write(&curl, "#!/bin/sh\nprintf '401'\n").unwrap();

@@ -52,6 +52,30 @@ fn the_file_is_0600_and_the_directory_0700() {
 }
 
 #[test]
+fn saving_replaces_atomically_and_leaves_no_temp_file_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nashgit").join("config.toml");
+
+    let mut store = Store::default();
+    store.insert("box", sample());
+    store.save_to(&path).unwrap();
+
+    // Overwrite with a different store: the new content lands whole.
+    let mut second = Store::default();
+    second.insert("other", Profile { url: "https://o".into(), ..Default::default() });
+    second.save_to(&path).unwrap();
+    assert_eq!(Store::load_from(&path).unwrap(), second);
+
+    // Only the store itself remains — the temp file was renamed into place,
+    // so a crash mid-write could never have truncated the real file.
+    let names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["config.toml"], "{names:?}");
+}
+
+#[test]
 fn resolve_prefers_the_override_and_reports_missing_names() {
     let mut store = Store::default();
     store.insert("box", sample()); // first insert becomes active

@@ -99,6 +99,14 @@ fn invite(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
 }
 
 fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
+    // Same gate as invite: the name lands in a grep pattern on the host, so
+    // `--revoke '.*'` must die here, not wipe the mapping there.
+    if !valid_invite_name(name) {
+        bail!(
+            "`{name}` is not a usable invite name. Letters, digits, dash, and \
+             underscore, starting with a letter or digit. See `nashgit invite --list`."
+        );
+    }
     ctx.out.step(format!("removing `{name}` and redeploying"));
     let out = ssh
         .script(&remote::revoke_script(name, p, &listen(p)))?
