@@ -38,9 +38,15 @@ Two pieces:
   main → part-1 → part-2 → part-3.
 - **Pages:**
   - `/` — repos, each with its stacks summarized (branch names, commits-ahead counts).
-  - `/:repo` — Code tab: branch list, Forgejo-style (branch, stack parent, ahead count,
-    last commit, CI dot).
-  - `/:repo/stacks` — full stack graph for the repo, plus the merge/restack audit log.
+  - `/:repo` — Code tab, laid out like a GitHub repo home: the root directory listing
+    of the default branch (directories first, then files), and the repo's README
+    rendered below it. Directory rows link to `/:repo/tree/:path` (same listing,
+    deeper; a README in that directory renders below it too); file rows link to
+    `/:repo/blob/:path` (markdown rendered, everything else shown as code, binaries
+    offered as a download link). `tree` and `blob` join the reserved words the branch
+    catch-all must not swallow. The Forgejo-style branch list moves to the Stacks tab.
+  - `/:repo/stacks` — full stack graph for the repo, the branch list (branch, stack
+    parent, ahead count, last commit, CI dot), plus the merge/restack audit log.
   - `/:repo/plans` — the Plans tab (see below).
   - `/:repo/ci` — recent CI runs for the repo.
   - `/:repo/:branch` — the "PR view": commits unique to B (`parent..B`), then per-file
@@ -252,10 +258,33 @@ stores both and lets you cross-reference them.
   the repo's `HEAD` at the moment it happened. When `HEAD` moves between two events of a
   session, that commit is attributed to the session. No agent cooperation, no convention to
   remember, no commit-message trailer.
-- **Pages:**
-  - `/:repo/traces` — sessions, newest first: agent, when, event count, commits produced.
-  - `/:repo/traces/:session` — the transcript rendered top to bottom (prompts, tool calls,
-    results) with the commits it produced linked inline.
+- **Pages: one Agent tab.** The Traces and Prompts tabs merge into a single tab named
+  Agent. Reading a session should feel like reading the conversation, not a log table.
+  - `/:repo/agent` — sessions, newest first: agent, when, first prompt as the title,
+    event count, commits produced. Above the list, a prompt search across all sessions
+    (the old `/prompts` behavior): `?q=` filters by substring, `?session=` narrows to
+    one run, and the same URL returns JSON for `Accept: application/json`.
+  - `/:repo/agent/:session` — the full conversation, top to bottom:
+    - **Everything the person wrote** and **everything the agent wrote**, rendered as
+      markdown. Thinking blocks collapsed behind a disclosure.
+    - **Every tool call**: tool name plus its telling argument (the Bash command, the
+      file path) always visible; the full input JSON behind a disclosure.
+    - **Every tool result**, collapsed by default — except errors, which are open and
+      styled as errors. An agent run that failed should be findable by scrolling.
+    - **File changes as Pierre diffs.** A tool call that edited a file (Edit, Write,
+      and friends) renders the change with the same `@pierre/diffs` pipeline as the
+      branch page. The diff comes from the transcript itself (Claude Code's
+      `toolUseResult.structuredPatch`, or synthesized from the tool input when the
+      harness gives enough to reconstruct one) — no git required, so unpushed and
+      since-rewritten changes still display.
+    - Commits attributed to the session linked inline where `HEAD` moved.
+  - The renderer understands two payload shapes natively: live hook events
+    (`prompt`/`tool_name` fields) and raw Claude Code transcript lines
+    (`type: user|assistant|system`, `message.content` block arrays). Unknown shapes
+    degrade to the one-line summary, never to a blank row.
+  - `/:repo/traces...` and `/:repo/prompts` redirect (301) to their `/agent`
+    equivalents. The JSON APIs under `/traces` keep their paths; agents already push
+    to them.
   - The branch page and every commit list gain a trace link where a session is known, so
     you get from a diff to the conversation that wrote it in one click.
 - **API:**
