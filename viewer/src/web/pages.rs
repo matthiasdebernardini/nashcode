@@ -10,6 +10,7 @@ use topcoat::view::{View, component, view};
 use crate::ci::strip_ansi;
 use crate::db::{CiRun, Comment, CommentFilter, status};
 use crate::docs::{self, DocIndex, Document};
+use crate::git::{EntryKind, TreeEntry};
 use crate::render;
 use crate::stack::StackGraph;
 use crate::web::components::{
@@ -119,20 +120,324 @@ async fn home(cx: &Cx) -> Result {
     }
 }
 
-// ---- /{repo} — the Code tab ------------------------------------------------------
+// ---- /{repo} and /{repo}/tree/{*path} — the Code tab -----------------------------
 
 #[page("/{repo}")]
 async fn repo_code(cx: &Cx) -> Result {
+    tree_page(cx, String::new()).await
+}
+
+#[page("/{repo}/tree/{*rest}")]
+async fn repo_tree(cx: &Cx) -> Result {
+    let dir = join_rest(cx);
+    tree_page(cx, dir).await
+}
+
+/// A directory listing on the default branch, with that directory's README below it.
+async fn tree_page(cx: &Cx, dir: String) -> Result {
     let name = path_param::<Repo>(cx).to_owned();
     let ctx = repo_ctx(cx, &name).await?;
     if !ctx.status.available {
-        return view! {
+        return view! { cx =>
             shell(title: name.clone(), repo: name.clone(), active: "code",
                 unavailable_card(repo: name.clone(), status: ctx.status.clone()))
         };
     }
+    let repo = app(cx).mirrors.repo(&name);
+    // A mirror of a repo nobody has pushed to yet has no default branch. That is a
+    // state, not a failure.
+    let Ok(branch) = repo.default_branch().await else {
+        return view! { cx =>
+            shell(title: name.clone(), repo: name.clone(), active: "code", status: Some(ctx.status.clone()),
+                <div class="Box"><div class="Box-body color-fg-muted">
+                    "Nothing pushed here yet."
+                </div></div>)
+        };
+    };
+    let tip = repo.tip(&branch).await?;
+    let dir = dir.trim_matches('/').to_owned();
+    let Some(mut entries) = repo.ls_tree(&tip, &dir).await? else {
+        return Err(topcoat::router::error::not_found().into());
+    };
+    // Directories first, then files, each alphabetical — the GitHub order.
+    entries.sort_by(|a, b| b.is_dir().cmp(&a.is_dir()).then_with(|| a.name.cmp(&b.name)));
 
+    let readme = entries
+        .iter()
+        .find(|entry| {
+            entry.kind == EntryKind::File && entry.name.eq_ignore_ascii_case("README.md")
+        })
+        .cloned();
+    let readme_html = match &readme {
+        Some(entry) => render_markdown_at(cx, &name, &repo, &tip, &entry.path).await?,
+        None => None,
+    };
+
+    let title =
+        if dir.is_empty() { name.clone() } else { format!("{name} · {dir}") };
+    view! { cx =>
+        shell(title: title, repo: name.clone(), active: "code", status: Some(ctx.status.clone()),
+            path_crumbs(repo: name.clone(), path: dir.clone())
+            <div class="Box mb-3">
+                <div class="Box-header d-flex flex-items-center gap-2">
+                    <i class="ph ph-git-branch"></i>
+                    branch_label(repo: name.clone(), branch: branch.clone())
+                    <span class="Counter">(entries.len())</span>
+                </div>
+                if entries.is_empty() {
+                    <div class="Box-row color-fg-muted">"This directory is empty."</div>
+                }
+                let n = &name;
+                for entry in entries {
+                    <div key=(entry.path.clone()) class="Box-row d-flex flex-items-center gap-2">
+                        <i class=(entry_icon(&entry))></i>
+                        match entry_url(n, &entry) {
+                            Some(url) => <a class="Link--primary" href=(url)>(entry.name.clone())</a>,
+                            None => <span>(entry.name.clone()) <span class="Label">"submodule"</span></span>,
+                        }
+                        if let Some(size) = entry.size {
+                            <span class="ml-auto color-fg-muted text-small">(human_size(size))</span>
+                        }
+                    </div>
+                }
+            </div>
+            if let (Some(entry), Some(html)) = (&readme, readme_html) {
+                <div class="Box">
+                    <div class="Box-header d-flex flex-items-center gap-2">
+                        <i class="ph ph-book-open"></i>
+                        <strong>(entry.name.clone())</strong>
+                    </div>
+                    <div class="Box-body markdown-body">(Raw(html))</div>
+                </div>
+            }
+        )
+    }
+}
+
+// ---- /{repo}/blob/{*path} --------------------------------------------------------
+
+/// What a blob page has to show. Markdown renders, other text goes in a `<pre>`,
+/// and anything that is not UTF-8 is offered as a download instead.
+enum Blob {
+    Markdown(String),
+    Text(String),
+    Binary,
+}
+
+#[page("/{repo}/blob/{*rest}")]
+async fn repo_blob(cx: &Cx) -> Result {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    if !ctx.status.available {
+        return view! { cx =>
+            shell(title: name.clone(), repo: name.clone(), active: "code",
+                unavailable_card(repo: name.clone(), status: ctx.status.clone()))
+        };
+    }
+    let path = join_rest(cx).trim_matches('/').to_owned();
+    let (parent, file_name) = match path.rsplit_once('/') {
+        Some((dir, file)) => (dir.to_owned(), file.to_owned()),
+        None => (String::new(), path.clone()),
+    };
+    if file_name.is_empty() {
+        return Err(topcoat::router::error::not_found().into());
+    }
+
+    let repo = app(cx).mirrors.repo(&name);
+    let Ok(branch) = repo.default_branch().await else {
+        return Err(topcoat::router::error::not_found().into());
+    };
+    let tip = repo.tip(&branch).await?;
+
+    // The parent listing answers two questions at once: does this path exist, and is
+    // it a blob? `git show <rev>:<dir>` succeeds on a directory and prints its
+    // entries, so asking for the bytes first would render a tree as a file.
+    let entry = repo
+        .ls_tree(&tip, &parent)
+        .await?
+        .unwrap_or_default()
+        .into_iter()
+        .find(|entry| entry.name == file_name);
+    let Some(entry) = entry.filter(|entry| entry.kind != EntryKind::Dir) else {
+        return Err(topcoat::router::error::not_found().into());
+    };
+    let Some(bytes) = repo.show_file(&tip, &path).await? else {
+        return Err(topcoat::router::error::not_found().into());
+    };
+
+    let size = bytes.len() as u64;
+    let body = match String::from_utf8(bytes) {
+        Ok(text) if is_markdown(&file_name) => Blob::Markdown(
+            render_markdown_source(cx, &name, &repo, &tip, &text).await,
+        ),
+        Ok(text) => Blob::Text(text),
+        Err(_) => Blob::Binary,
+    };
+    let raw_url = format!("/{name}/raw/{branch}/{path}");
+
+    view! { cx =>
+        shell(title: format!("{name} · {path}"), repo: name.clone(), active: "code", status: Some(ctx.status.clone()),
+            path_crumbs(repo: name.clone(), path: path.clone())
+            <div class="Box">
+                <div class="Box-header d-flex flex-items-center gap-2">
+                    <i class=(entry_icon(&entry))></i>
+                    <strong>(file_name.clone())</strong>
+                    <span class="color-fg-muted text-small">(human_size(size))</span>
+                    <a class="ml-auto Link--secondary text-small" href=(raw_url.clone())>"raw"</a>
+                </div>
+                match &body {
+                    Blob::Markdown(html) => <div class="Box-body markdown-body">(Raw(html.clone()))</div>,
+                    Blob::Text(text) => <pre class="Box-body nashcode-code text-small">(text.clone())</pre>,
+                    Blob::Binary => <div class="Box-body color-fg-muted">
+                        <i class="ph ph-file-x"></i>
+                        (format!(" Binary file, {size} bytes. "))
+                        <a href=(raw_url.clone())>"Download"</a>
+                    </div>,
+                }
+            </div>
+        )
+    }
+}
+
+// ---- code-tab helpers ------------------------------------------------------------
+
+/// `repo / dir / file` — every step but the last links back up the tree.
+#[component]
+async fn path_crumbs(#[into] repo: String, #[into] path: String) -> Result {
+    let mut crumbs: Vec<(String, Option<String>)> = Vec::new();
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    crumbs.push((
+        repo.clone(),
+        (!segments.is_empty()).then(|| format!("/{repo}")),
+    ));
+    let mut walked = String::new();
+    for (i, segment) in segments.iter().enumerate() {
+        if !walked.is_empty() {
+            walked.push('/');
+        }
+        walked.push_str(segment);
+        let last = i + 1 == segments.len();
+        crumbs.push((
+            (*segment).to_owned(),
+            (!last).then(|| format!("/{repo}/tree/{walked}")),
+        ));
+    }
+    view! {
+        <div class="d-flex flex-items-center gap-1 mb-2 h4 nashcode-display">
+            for (i, (label, href)) in crumbs.into_iter().enumerate() {
+                if i > 0 {
+                    <span key=(format!("sep-{i}")) class="color-fg-muted">"/"</span>
+                }
+                match href {
+                    Some(href) => <a key=(format!("crumb-{i}")) class="Link--primary no-underline" href=(href)>(label)</a>,
+                    None => <strong key=(format!("crumb-{i}"))>(label)</strong>,
+                }
+            }
+        </div>
+    }
+}
+
+/// Where a listing row points. Submodules have no content here, so they have no page.
+fn entry_url(repo: &str, entry: &TreeEntry) -> Option<String> {
+    match entry.kind {
+        EntryKind::Dir => Some(format!("/{repo}/tree/{}", entry.path)),
+        EntryKind::File | EntryKind::Symlink => Some(format!("/{repo}/blob/{}", entry.path)),
+        EntryKind::Submodule => None,
+    }
+}
+
+fn entry_icon(entry: &TreeEntry) -> &'static str {
+    match entry.kind {
+        EntryKind::Dir => "ph ph-folder color-fg-accent",
+        EntryKind::Symlink => "ph ph-link color-fg-muted",
+        EntryKind::Submodule => "ph ph-git-commit color-fg-muted",
+        EntryKind::File => match extension(&entry.name).as_deref() {
+            Some("md" | "markdown" | "txt" | "rst") => "ph ph-file-text color-fg-muted",
+            Some(
+                "rs" | "js" | "ts" | "tsx" | "jsx" | "py" | "go" | "rb" | "sh" | "c" | "h"
+                | "cpp" | "toml" | "json" | "yaml" | "yml" | "css" | "html" | "sql",
+            ) => "ph ph-file-code color-fg-muted",
+            _ => "ph ph-file color-fg-muted",
+        },
+    }
+}
+
+fn extension(name: &str) -> Option<String> {
+    name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase())
+}
+
+fn is_markdown(name: &str) -> bool {
+    matches!(extension(name).as_deref(), Some("md" | "markdown"))
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 { format!("{bytes} B") } else { format!("{size:.1} {}", UNITS[unit]) }
+}
+
+/// Render one file in the mirror as markdown, autolinked against the repo's document
+/// index and branch list. `None` when the file cannot be read.
+async fn render_markdown_at(
+    cx: &Cx,
+    name: &str,
+    repo: &crate::git::Repo,
+    tip: &str,
+    path: &str,
+) -> Result<Option<String>> {
+    let Some(bytes) = repo.show_file(tip, path).await? else {
+        return Ok(None);
+    };
+    let source = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(Some(render_markdown_source(cx, name, repo, tip, &source).await))
+}
+
+async fn render_markdown_source(
+    cx: &Cx,
+    name: &str,
+    repo: &crate::git::Repo,
+    tip: &str,
+    source: &str,
+) -> String {
+    let index = app(cx).docs.get(name, repo, tip).await;
+    let branches = repo.branches().await.unwrap_or_default();
+    render::markdown(source, name, Some(&index), &branches)
+}
+
+// ---- /{repo}/stacks --------------------------------------------------------------
+
+#[page("/{repo}/stacks")]
+async fn repo_stacks(cx: &Cx) -> Result {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    if !ctx.status.available {
+        return view! {
+            shell(title: name.clone(), repo: name.clone(), active: "stacks",
+                unavailable_card(repo: name.clone(), status: ctx.status.clone()))
+        };
+    }
     let graph = StackGraph::infer(&app(cx).mirrors.repo(&name)).await?;
+    let mut chains: Vec<Vec<StackRow>> = Vec::new();
+    for chain in graph.chains() {
+        let mut rows = Vec::new();
+        for branch in chain {
+            let node = graph.get(&branch).expect("chain branches exist");
+            rows.push(StackRow {
+                branch: branch.clone(),
+                ahead: node.ahead,
+                ci: ci_for(cx, &name, &node.tip).await,
+            });
+        }
+        chains.push(rows);
+    }
+
+    // The branch list, Forgejo's fields: branch, stack parent, ahead count, last
+    // commit, CI dot.
     struct Row {
         branch: String,
         parent: Option<String>,
@@ -157,9 +462,18 @@ async fn repo_code(cx: &Cx) -> Result {
     }
     rows.sort_by_key(|row| (!row.is_default, row.branch.clone()));
 
+    let audit = app(cx).db.audit(&name, 50).unwrap_or_default();
+
     view! {
-        shell(title: name.clone(), repo: name.clone(), active: "code", status: Some(ctx.status.clone()),
-            <div class="Box">
+        shell(title: format!("{name} · stacks"), repo: name.clone(), active: "stacks", status: Some(ctx.status.clone()),
+            <h3 class="mb-2"><i class="ph ph-stack"></i>" Stacks"</h3>
+            <div class="d-flex flex-wrap gap-3 mb-4">
+                let n = &name;
+                for (i, chain) in chains.into_iter().enumerate() {
+                    stack_column(key: i, repo: n.clone(), chain: chain)
+                }
+            </div>
+            <div class="Box mb-4">
                 <div class="Box-header d-flex flex-items-center gap-2">
                     <i class="ph ph-git-branch"></i>
                     <strong>"Branches"</strong>
@@ -191,47 +505,6 @@ async fn repo_code(cx: &Cx) -> Result {
                             </span>
                         }
                     </div>
-                }
-            </div>
-        )
-    }
-}
-
-// ---- /{repo}/stacks --------------------------------------------------------------
-
-#[page("/{repo}/stacks")]
-async fn repo_stacks(cx: &Cx) -> Result {
-    let name = path_param::<Repo>(cx).to_owned();
-    let ctx = repo_ctx(cx, &name).await?;
-    if !ctx.status.available {
-        return view! {
-            shell(title: name.clone(), repo: name.clone(), active: "stacks",
-                unavailable_card(repo: name.clone(), status: ctx.status.clone()))
-        };
-    }
-    let graph = StackGraph::infer(&app(cx).mirrors.repo(&name)).await?;
-    let mut chains: Vec<Vec<StackRow>> = Vec::new();
-    for chain in graph.chains() {
-        let mut rows = Vec::new();
-        for branch in chain {
-            let node = graph.get(&branch).expect("chain branches exist");
-            rows.push(StackRow {
-                branch: branch.clone(),
-                ahead: node.ahead,
-                ci: ci_for(cx, &name, &node.tip).await,
-            });
-        }
-        chains.push(rows);
-    }
-    let audit = app(cx).db.audit(&name, 50).unwrap_or_default();
-
-    view! {
-        shell(title: format!("{name} · stacks"), repo: name.clone(), active: "stacks", status: Some(ctx.status.clone()),
-            <h3 class="mb-2"><i class="ph ph-stack"></i>" Stacks"</h3>
-            <div class="d-flex flex-wrap gap-3 mb-4">
-                let n = &name;
-                for (i, chain) in chains.into_iter().enumerate() {
-                    stack_column(key: i, repo: n.clone(), chain: chain)
                 }
             </div>
             <h3 class="mb-2"><i class="ph ph-git-merge"></i>" Merge and restack log"</h3>

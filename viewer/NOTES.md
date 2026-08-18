@@ -23,15 +23,41 @@ where the implementation had to choose.
   are parsed off the tail: `.../ci`, `.../ci/rerun`, `.../merge`, `.../restack`,
   `.../delete`. A branch name therefore may not *end* in one of those suffixes.
 - Reserved first segments under a repo (never valid branch names): `stacks`, `plans`,
-  `tasks`, `board`, `ci`, `comments`, `raw`, `traces`, `commits`, `assets`. `tasks` and
-  `commits` are reserved beyond the spec's list: a card page renders at
-  `/{repo}/tasks/{*path}` and the commit-to-trace link at `/{repo}/commits/{sha}/trace`.
+  `tasks`, `board`, `ci`, `comments`, `raw`, `traces`, `commits`, `assets`, `tree`,
+  `blob`. `tasks` and `commits` are reserved beyond the spec's list: a card page renders
+  at `/{repo}/tasks/{*path}` and the commit-to-trace link at
+  `/{repo}/commits/{sha}/trace`. Reserving costs nothing extra: a `#[page]` with a
+  literal second segment out-ranks the catch-all in the router, so `tree` and `blob`
+  needed no branch-name filter of their own.
 - `GET /{repo}/traces[...]` is both a page and an API: `Accept: application/json`
   selects JSON, anything else gets HTML. One URL per resource instead of a parallel
   `/api` tree.
 - `/{repo}/raw/{*rest}`: the branch part of the rest is matched greedily against real
   branch names (longest prefix wins) so branches with `/` still get raw URLs; if nothing
   matches, the first segment is taken as the revision.
+
+## Code tab (`/{repo}`, `/{repo}/tree`, `/{repo}/blob`)
+
+- **Trees are addressed as `<rev>:<dir>`, not through a pathspec.** Directory names
+  arrive from the URL, and a pathspec would read `*` or a leading `:` in one of them as
+  a pattern. Object addressing has no such syntax, so `../..` and friends simply fail to
+  resolve — the 404 is git's answer, not a filter of ours.
+- **The blob page reads the parent directory first.** `git show <rev>:<dir>` succeeds on
+  a directory and prints its entries, so asking for the bytes first would render a tree
+  as if it were a file. One `ls-tree` of the parent answers "does it exist" and "is it a
+  blob" together, and hands back the size for free.
+- **A wrong-kind URL is a 404, not a redirect.** `/blob/` on a directory and `/tree/` on
+  a file both 404. A redirect would have to put a repo path in a `Location` header,
+  which means percent-encoding decisions for paths containing spaces; every link the
+  viewer generates already points at the right one of the two.
+- **Only the default branch.** The spec describes the Code tab as the repo home; a
+  `?branch=` selector is not in it. Other branches are read through their PR view.
+- **README is `README.md`, any case, at that tree level only.** No `README`, no
+  `readme.rst`, no walking up. The renderer is `render::markdown`, the same one the
+  plans pages use, so escaping, XSS handling, and plan/branch autolinking are identical.
+- **A mirror with no branches renders "Nothing pushed here yet."** Before this, an empty
+  mirror took `/{repo}` to a 500 through `default_branch()`. Degrading was the rule
+  everywhere else already.
 
 ## Spec interpretation
 

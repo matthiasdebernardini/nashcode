@@ -351,6 +351,26 @@ impl Repo {
         }
     }
 
+    /// One directory level at a revision, in git's own tree order. `None` when `dir`
+    /// names nothing, or names something that is not a directory.
+    ///
+    /// The tree is addressed as `<rev>:<dir>` rather than through a pathspec. Path
+    /// segments arrive from a URL, and a pathspec would read `*` or a leading `:` in
+    /// one of them as a pattern; object addressing has no such syntax and cannot
+    /// escape the tree.
+    pub async fn ls_tree(&self, rev: &str, dir: &str) -> GitResult<Option<Vec<TreeEntry>>> {
+        let dir = dir.trim_matches('/');
+        let treeish =
+            if dir.is_empty() { rev.to_owned() } else { format!("{rev}:{dir}") };
+        let out = self
+            .try_run(&["ls-tree", "-z", "--long", "--end-of-options", &treeish])
+            .await?;
+        if !out.ok() {
+            return Ok(None);
+        }
+        Ok(Some(parse_ls_tree(&out.stdout, dir)))
+    }
+
     /// When the last commit reachable from `rev` touched `path` (author date,
     /// RFC3339). `None` when no commit touched it.
     pub async fn last_touched(&self, rev: &str, path: &str) -> GitResult<Option<String>> {
@@ -390,6 +410,60 @@ pub struct Commit {
     /// Author date, RFC3339.
     pub date: String,
     pub subject: String,
+}
+
+/// What a tree entry is. A submodule is a `commit` entry: it has no content here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Dir,
+    File,
+    Symlink,
+    Submodule,
+}
+
+/// One entry in a single directory level of a tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+    /// The entry's own name, without the directory it sits in.
+    pub name: String,
+    /// The full repo-relative path.
+    pub path: String,
+    pub kind: EntryKind,
+    /// Blob size in bytes. `None` for directories and submodules.
+    pub size: Option<u64>,
+}
+
+impl TreeEntry {
+    pub fn is_dir(&self) -> bool {
+        self.kind == EntryKind::Dir
+    }
+}
+
+/// `ls-tree -z --long` emits `<mode> SP <type> SP <object> SP..SP <size> TAB <path>\0`.
+/// `-z` means the path is literal — never quoted — so the first tab always ends the
+/// metadata and everything after it is the name, tabs included.
+fn parse_ls_tree(raw: &str, dir: &str) -> Vec<TreeEntry> {
+    raw.split('\0')
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            let (meta, name) = record.split_once('\t')?;
+            let mut fields = meta.split_whitespace();
+            let mode = fields.next()?;
+            let kind = match (fields.next()?, mode) {
+                ("tree", _) => EntryKind::Dir,
+                ("commit", _) => EntryKind::Submodule,
+                ("blob", "120000") => EntryKind::Symlink,
+                ("blob", _) => EntryKind::File,
+                _ => return None,
+            };
+            let _object = fields.next()?;
+            // `-` for anything that is not a blob.
+            let size = fields.next().and_then(|size| size.parse().ok());
+            let path =
+                if dir.is_empty() { name.to_owned() } else { format!("{dir}/{name}") };
+            Some(TreeEntry { name: name.to_owned(), path, kind, size })
+        })
+        .collect()
 }
 
 /// One path in a diff, with the status letter git reported.
@@ -545,6 +619,31 @@ mod tests {
         assert_eq!(files[1].path, "new.rs");
         assert_eq!(files[1].old_path.as_deref(), Some("old.rs"));
         assert_eq!(files[2].status, "A");
+    }
+
+    #[test]
+    fn ls_tree_records_carry_kind_size_and_full_path() {
+        let raw = "040000 tree aaa       -\tsrc\0\
+                   100644 blob bbb      12\tREADME.md\0\
+                   120000 blob ccc       7\tlink\0\
+                   160000 commit ddd       -\tvendor\0";
+        let entries = parse_ls_tree(raw, "docs");
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].kind, EntryKind::Dir);
+        assert_eq!(entries[0].path, "docs/src");
+        assert_eq!(entries[0].size, None);
+        assert_eq!(entries[1].kind, EntryKind::File);
+        assert_eq!(entries[1].size, Some(12));
+        assert_eq!(entries[2].kind, EntryKind::Symlink);
+        assert_eq!(entries[3].kind, EntryKind::Submodule);
+    }
+
+    #[test]
+    fn a_tab_in_a_path_stays_part_of_the_name() {
+        let entries = parse_ls_tree("100644 blob abc       3\tod\td\0", "");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "od\td");
+        assert_eq!(entries[0].path, "od\td");
     }
 
     #[test]

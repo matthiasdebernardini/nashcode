@@ -55,8 +55,12 @@ async fn index_code_and_stacks_pages_render() {
         let (status, body) = get(&bed.router, path).await;
         assert_eq!(status, 200, "{path} -> {status}: {body}");
     }
+    // The Code tab is the repo home: the default branch's root listing.
     let (_, code) = get(&bed.router, "/demo").await;
-    assert!(code.contains("part-1") && code.contains("feature-x"));
+    assert!(code.contains("/demo/blob/README.md") && code.contains("/demo/tree/src"), "{code}");
+    // The branch list lives on the Stacks tab now.
+    let (_, stacks) = get(&bed.router, "/demo/stacks").await;
+    assert!(stacks.contains("part-1") && stacks.contains("feature-x"), "{stacks}");
 }
 
 #[tokio::test]
