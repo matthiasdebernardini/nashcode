@@ -1,0 +1,20 @@
+{
+  "repo": "demo",
+  "file": "plans/rewrite-the-parser.md",
+  "comments": [
+    {
+      "id": 1,
+      "author": "rob",
+      "created_at": "2026-08-17T14:03:00Z",
+      "line": 12,
+      "body": "This step assumes the old parser is gone. It is not."
+    },
+    {
+      "id": 2,
+      "author": "rob",
+      "created_at": "2026-08-17T14:05:30Z",
+      "line": null,
+      "body": "Overall shape looks right.\nShip step 1 first and let me look again."
+    }
+  ]
+}
