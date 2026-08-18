@@ -1,0 +1,19 @@
+{
+  "name": "nashgit-assets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser asset bundle (JS + CSS) for the nashgit Rust server, built into Cargo's OUT_DIR by build.rs",
+  "type": "module",
+  "scripts": {
+    "build:js": "esbuild js/app.js --bundle --format=esm --minify --target=es2022 --outfile=dist/nashgit.js",
+    "build:css": "esbuild js/app.css --bundle --minify --loader:.woff=file --loader:.woff2=file --loader:.svg=dataurl --outfile=dist/nashgit.css"
+  },
+  "dependencies": {
+    "@pierre/diffs": "^1.3.5",
+    "@primer/css": "^22.3.0",
+    "@primer/primitives": "^11.10.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25"
+  }
+}

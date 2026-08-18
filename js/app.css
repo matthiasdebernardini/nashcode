@@ -1,0 +1,238 @@
+/*
+ * The stylesheet entry, bundled by esbuild into OUT_DIR/nashgit.css.
+ *
+ * Primer supplies the whole design language. `primer.css` already carries the light
+ * and dark theme variables behind `[data-color-mode]` selectors, so dark mode is
+ * `<html data-color-mode="auto" data-light-theme="light" data-dark-theme="dark">` and
+ * nothing else: no JavaScript, no toggling, no second import.
+ *
+ * The app CSS below is the only hand-written CSS in the project, and every value in it
+ * is a Primer variable. No raw colours.
+ */
+@import "@primer/css/dist/primer.css";
+
+:root {
+  /* Match the diff component's type to the rest of the page. */
+  --diffs-font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  --diffs-font-size: 12px;
+  --diffs-line-height: 1.5;
+}
+
+/* ---- diffs ------------------------------------------------------------------ */
+
+.nashgit-diff-mount {
+  margin-bottom: 16px;
+}
+
+.nashgit-diff-mount:last-child {
+  margin-bottom: 0;
+}
+
+/* ---- stack graph ------------------------------------------------------------ */
+
+/*
+ * A Graphite-style column: main -> part-1 -> part-2. The connector is a border on a
+ * pseudo-element rather than an SVG, so it costs nothing and reflows correctly.
+ */
+.nashgit-stack-graph {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.nashgit-stack-row {
+  position: relative;
+  padding-left: 28px;
+}
+
+.nashgit-stack-row::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 0;
+  bottom: 0;
+  border-left: 2px solid var(--borderColor-default);
+}
+
+.nashgit-stack-row:first-child::before {
+  top: 50%;
+}
+
+.nashgit-stack-row:last-child::before {
+  bottom: 50%;
+}
+
+.nashgit-stack-row:only-child::before {
+  display: none;
+}
+
+.nashgit-stack-row::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background-color: var(--bgColor-default);
+  border: 2px solid var(--borderColor-emphasis);
+}
+
+.nashgit-stack-row.is-current::after {
+  border-color: var(--borderColor-accent-emphasis, var(--fgColor-accent));
+  background-color: var(--fgColor-accent);
+}
+
+/* ---- board ------------------------------------------------------------------ */
+
+.nashgit-board {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.nashgit-board-column {
+  flex: 0 0 300px;
+  display: flex;
+  flex-direction: column;
+  max-height: 75vh;
+  border: 1px solid var(--borderColor-default);
+  border-radius: 6px;
+  background-color: var(--bgColor-muted);
+}
+
+.nashgit-board-column-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--borderColor-default);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nashgit-board-column-body {
+  padding: 8px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 60px;
+}
+
+.nashgit-board-column.is-drag-over .nashgit-board-column-body {
+  background-color: var(--bgColor-accent-muted);
+  border-radius: 6px;
+}
+
+.nashgit-board-card {
+  display: block;
+  padding: 8px 12px;
+  border: 1px solid var(--borderColor-default);
+  border-radius: 6px;
+  background-color: var(--bgColor-default);
+  cursor: grab;
+  text-decoration: none;
+  color: inherit;
+}
+
+.nashgit-board-card:hover {
+  border-color: var(--borderColor-emphasis);
+  text-decoration: none;
+}
+
+.nashgit-board-card.is-dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+.nashgit-board-column[data-nodrop="true"] .nashgit-board-card {
+  cursor: default;
+}
+
+/* ---- CI status dot ----------------------------------------------------------- */
+
+.nashgit-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background-color: var(--fgColor-muted);
+  flex: none;
+}
+
+.nashgit-status-dot.is-passed {
+  background-color: var(--fgColor-success);
+}
+
+.nashgit-status-dot.is-failed,
+.nashgit-status-dot.is-timeout,
+.nashgit-status-dot.is-error {
+  background-color: var(--fgColor-danger);
+}
+
+.nashgit-status-dot.is-running,
+.nashgit-status-dot.is-queued {
+  background-color: var(--fgColor-attention);
+}
+
+.nashgit-status-dot.is-skipped,
+.nashgit-status-dot.is-unknown {
+  background-color: var(--borderColor-emphasis);
+}
+
+/* ---- toasts ------------------------------------------------------------------ */
+
+.nashgit-toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 420px;
+}
+
+/* ---- comments ---------------------------------------------------------------- */
+
+.nashgit-annotation {
+  border: 1px solid var(--borderColor-default);
+  border-radius: 6px;
+  background-color: var(--bgColor-default);
+  margin: 4px 8px;
+  font-family: var(--fontStack-system, system-ui);
+  font-size: 12px;
+}
+
+.nashgit-annotation-comment {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--borderColor-muted);
+}
+
+.nashgit-annotation-comment:last-child {
+  border-bottom: 0;
+}
+
+.nashgit-annotation-body > *:first-child {
+  margin-top: 0;
+}
+
+.nashgit-annotation-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.nashgit-composer {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nashgit-composer textarea {
+  min-height: 60px;
+  resize: vertical;
+}
