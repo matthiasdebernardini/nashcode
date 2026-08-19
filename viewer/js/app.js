@@ -295,6 +295,7 @@ async function renderMermaid(blocks) {
     theme: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default",
   });
 
+  const drawn = [];
   for (let i = 0; i < blocks.length; i += 1) {
     const block = blocks[i];
     const source = block.querySelector(".nashcode-mermaid-source");
@@ -305,12 +306,192 @@ async function renderMermaid(blocks) {
       out.innerHTML = svg;
       // The source was the fallback; the picture replaces it.
       source.hidden = true;
+      drawn.push(out);
     } catch (error) {
       // Mermaid's own message, above the source that produced it.
       out.className = "nashcode-mermaid-out flash flash-error";
       out.textContent = String(error && error.message ? error.message : error);
     }
   }
+
+  await linkNodesToCode(drawn).catch((error) => {
+    // The diagram is drawn and readable; the links were the extra.
+    console.warn("nashcode: node links failed", error);
+  });
+}
+
+/* ---- architecture: nodes link back to the code ------------------------------- */
+
+/*
+ * A drawn box is a claim about the codebase. This is what lets a reader check it:
+ * the server resolves each node's label against the code graph, and a label it can
+ * place gets a popover of the functions and types the box is actually made of.
+ *
+ * The wiring happens here, after render, and never through mermaid's own `click`
+ * directives — those stay dead under `securityLevel: "strict"`, which is the whole
+ * reason a diagram someone else posted is safe to render at all.
+ */
+
+/** Matches the server's cap, so a huge diagram degrades instead of 400ing. */
+const MAX_NODE_NAMES = 100;
+
+/** Whichever node popover is open, so only one ever is. */
+let closeNodePopover = null;
+
+/** The repo a page is about: the first segment of its path. */
+function currentRepo() {
+  const first = window.location.pathname.split("/").filter(Boolean)[0];
+  if (!first) return null;
+  try {
+    return decodeURIComponent(first);
+  } catch {
+    return first;
+  }
+}
+
+/**
+ * Every flowchart node in a rendered diagram, with the text on its face.
+ *
+ * Mermaid 11 puts the label in a `<span class="nodeLabel">` inside a foreignObject;
+ * the `<text>` fallback covers the svg-label path, which is what a config without
+ * HTML labels emits.
+ */
+function diagramNodes(mount) {
+  const found = [];
+  for (const group of mount.querySelectorAll("g.node")) {
+    const label = group.querySelector(".nodeLabel") || group.querySelector("text");
+    const text = (label ? label.textContent : "").replace(/\s+/g, " ").trim();
+    if (text) found.push({ group, label, text });
+  }
+  return found;
+}
+
+async function linkNodesToCode(mounts) {
+  const repo = currentRepo();
+  if (!repo) return;
+  const nodes = mounts.flatMap(diagramNodes);
+  if (!nodes.length) return;
+
+  // The batch is comma-separated, so a label containing a comma cannot round-trip.
+  // Dropping it leaves that one node inert rather than resolving the wrong halves.
+  const labels = [...new Set(nodes.map((node) => node.text))]
+    .filter((text) => !text.includes(","))
+    .slice(0, MAX_NODE_NAMES);
+  if (!labels.length) return;
+
+  const url = `/${encodeURIComponent(repo)}/code/where?names=${encodeURIComponent(labels.join(","))}`;
+  const response = await fetch(url, { headers: { accept: "application/json" } });
+  if (!response.ok) return;
+  const answer = await response.json();
+  const placed = (answer && answer.names) || {};
+
+  for (const node of nodes) {
+    // A label is attacker-chosen text, so `__proto__` and `constructor` would both
+    // read off the prototype chain and "match" a node the server never placed.
+    if (!Object.hasOwn(placed, node.text)) continue;
+    const entries = codeEntries(placed[node.text]);
+    if (entries.length) wireNode(node, entries, repo);
+  }
+}
+
+/**
+ * One label's matches flattened into the rows a popover shows: the definitions named
+ * exactly, then each file named by stem with what it defines.
+ */
+function codeEntries(match) {
+  const rows = [];
+  for (const symbol of match.symbols || []) {
+    rows.push({ name: symbol.name, kind: symbol.kind, path: symbol.path, line: symbol.line });
+  }
+  for (const file of match.files || []) {
+    rows.push({ file: file.path });
+    for (const symbol of file.symbols || []) {
+      rows.push({ name: symbol.name, kind: symbol.kind, path: file.path, line: symbol.line });
+    }
+  }
+  return rows;
+}
+
+function blobUrl(repo, path, line) {
+  // `.` and `..` segments would walk the URL out of the blob route. The server would
+  // refuse the result anyway; dropping them here means the link is never built wrong.
+  const encoded = String(path)
+    .split("/")
+    .filter((part) => part && part !== "." && part !== "..")
+    .map(encodeURIComponent)
+    .join("/");
+  const anchor = line ? `#L${line}` : "";
+  return `/${encodeURIComponent(repo)}/blob/${encoded}${anchor}`;
+}
+
+function wireNode(node, entries, repo) {
+  node.group.classList.add("nashcode-node-linked");
+  node.group.addEventListener("click", () => {
+    // No stopPropagation: swallowing diagram clicks would break the next
+    // document-level handler anyone adds. The click-away listener compares targets
+    // instead, so it ignores the click that opened the popover.
+    if (closeNodePopover) {
+      const wasOpen = closeNodePopover.node === node.group;
+      closeNodePopover();
+      if (wasOpen) return;
+    }
+    openNodePopover(node, entries, repo);
+  });
+}
+
+function openNodePopover(node, entries, repo) {
+  const popover = document.createElement("div");
+  popover.className = "nashcode-node-popover Box p-2";
+
+  const heading = document.createElement("div");
+  heading.className = "text-small color-fg-muted mb-1";
+  heading.textContent = node.text;
+  popover.appendChild(heading);
+
+  for (const entry of entries) {
+    if (entry.file) {
+      const file = document.createElement("a");
+      file.className = "d-block text-small text-bold";
+      file.href = blobUrl(repo, entry.file, null);
+      file.textContent = entry.file;
+      popover.appendChild(file);
+      continue;
+    }
+    const link = document.createElement("a");
+    link.className = "d-block text-small";
+    link.href = blobUrl(repo, entry.path, entry.line);
+    link.textContent = `${entry.name} (${entry.kind})`;
+    popover.appendChild(link);
+  }
+
+  document.body.appendChild(popover);
+  // Document coordinates, so the popover stays put when the page scrolls.
+  const box = node.group.getBoundingClientRect();
+  popover.style.top = `${box.bottom + window.scrollY + 6}px`;
+  popover.style.left = `${box.left + window.scrollX}px`;
+
+  function close() {
+    popover.remove();
+    document.removeEventListener("click", onAway);
+    document.removeEventListener("keydown", onKey);
+    if (closeNodePopover === close) closeNodePopover = null;
+  }
+  function onAway(event) {
+    // This listener is registered while the opening click is still being dispatched,
+    // so that click reaches the document too. Ignoring the anchor is what keeps the
+    // popover from closing the instant it opens, without stopping the event for
+    // anyone else.
+    if (popover.contains(event.target) || node.group.contains(event.target)) return;
+    close();
+  }
+  function onKey(event) {
+    if (event.key === "Escape") close();
+  }
+  close.node = node.group;
+
+  document.addEventListener("click", onAway);
+  document.addEventListener("keydown", onKey);
+  closeNodePopover = close;
 }
 
 /* ---- board ------------------------------------------------------------------ */

@@ -438,6 +438,8 @@ struct CodeQuery {
     limit: Option<String>,
     /// Which revision to search. Defaults to the default branch.
     rev: Option<String>,
+    /// Comma-separated diagram labels, for `/code/where`.
+    names: Option<String>,
 }
 
 impl CodeQuery {
@@ -578,6 +580,52 @@ async fn code_callers(cx: &Cx) -> Result<Response> {
     let symbol = query.required("symbol", query.symbol.as_ref())?;
     let hits = crate::code::callers(&app(cx).db, &name, &symbol);
     json_ok(graph_answer(cx, &name, &symbol, "callers", hits, query.limit()))
+}
+
+/// `GET /{repo}/code/where?names=a,b,c` — batch-resolve diagram labels to code.
+///
+/// The architecture tab draws whatever an agent posted; this is what lets a reader
+/// check it. One call per page, not one per node: a diagram is thirty boxes and thirty
+/// round trips would make the affordance cost more than it is worth.
+///
+/// Never an error for a label it cannot place. A repo with no index, a label naming a
+/// Python module, a label naming nothing at all — all three answer with that label
+/// simply absent, and the node stays inert on the page.
+#[route(GET "/{repo}/code/where")]
+async fn code_where(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    if !app(cx).config.knows_repo(&name) {
+        return Err(topcoat::router::error::not_found().into());
+    }
+    let query = query_params::<CodeQuery>(cx)?;
+
+    // Empty segments are typing, not a request: `a,,b` asks about two labels. A list
+    // that is *all* empty segments is the same mistake as leaving `names` off
+    // altogether, so both spellings get the same answer rather than one 400 and one
+    // cheerful empty object.
+    let names: Vec<String> = query
+        .names
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if names.is_empty() {
+        return Err(bad_request("names is required").into());
+    }
+    if names.len() > crate::code::MAX_WHERE_NAMES {
+        return Err(bad_request(format!(
+            "at most {} names per call, got {}",
+            crate::code::MAX_WHERE_NAMES,
+            names.len()
+        ))
+        .into());
+    }
+
+    let found = crate::code::locate(&app(cx).db, &name, names).await;
+    json_ok(serde_json::json!({ "names": found }))
 }
 
 /// The shared body of the three graph endpoints.

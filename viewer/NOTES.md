@@ -628,3 +628,9 @@ Lives in `cli/`, noted here because this is the file that records choices SPEC l
 - **The scratch directory is 0700 from birth,** created with `DirBuilder::mode` rather
   than chmodded afterwards. The feedback sits in a shared `/tmp` for as long as the human
   is writing it.
+
+## Architecture: node links (`/code/where`)
+
+- Node links point at the line numbers of the commit the code index was last built
+  from, rendered against the tip blob. Where the two have drifted, the link lands
+  near the symbol rather than on it; re-indexing is what closes the gap.

@@ -63,6 +63,21 @@ pub const MAX_GRAPH_EDGES: usize = 100_000;
 /// The most total matches `/code/text` will read out of `git grep`.
 pub const MAX_TEXT_MATCHES: usize = 1_000;
 
+/// The most labels one `/code/where` call will resolve. A diagram with more nodes than
+/// this is not a diagram anyone reads, and the cap is what keeps one request from
+/// turning into a whole-graph scan per node.
+pub const MAX_WHERE_NAMES: usize = 100;
+
+/// The most definitions one label carries back, counted once across its exact matches
+/// *and* every file it named. One running budget, not a cap per list: a label like
+/// `new` matches hundreds of symbols, and separate caps multiply into a payload nobody
+/// reads and real bytes over the tailnet.
+pub const MAX_WHERE_SYMBOLS: usize = 50;
+
+/// The most files one label resolves to. A stem like `mod` would otherwise name every
+/// module in the repo.
+pub const MAX_WHERE_FILES: usize = 20;
+
 /// Why an index run could not start. A run that starts always finishes with a record,
 /// however much of it degraded.
 #[derive(Debug)]
@@ -690,6 +705,171 @@ pub fn definitions(db: &Db, repo: &str, symbol: &str) -> Vec<SymbolHit> {
 /// Every reference to a symbol.
 pub fn references(db: &Db, repo: &str, symbol: &str) -> Vec<RefHit> {
     db.code_references(repo, symbol, false).unwrap_or_default()
+}
+
+/// One definition a diagram label resolved to.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct WhereSymbol {
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    pub line: i64,
+}
+
+/// One symbol inside a file a label named. The path lives on the file, not repeated
+/// on every row of it.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct WhereFileSymbol {
+    pub name: String,
+    pub kind: String,
+    pub line: i64,
+}
+
+/// A file a diagram label named, with what that file defines.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct WhereFile {
+    pub path: String,
+    pub symbols: Vec<WhereFileSymbol>,
+}
+
+/// Where the codebase makes one diagram label true.
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq, Eq)]
+pub struct WhereMatch {
+    pub symbols: Vec<WhereSymbol>,
+    pub files: Vec<WhereFile>,
+}
+
+impl WhereMatch {
+    fn is_empty(&self) -> bool {
+        self.symbols.is_empty() && self.files.is_empty()
+    }
+}
+
+/// The names a Rust file answers to in a diagram.
+///
+/// Its stem, normally. A `mod.rs` is the exception: nobody draws a box called "mod",
+/// they draw one called `code` and mean `src/code/mod.rs`, so the directory above it
+/// is the name. That is the whole of the module-directory handling — a diagram label
+/// that means a directory of several files is not something a stem can decide.
+fn file_stem(path: &str) -> Option<&str> {
+    let stem = path.rsplit('/').next().unwrap_or(path).strip_suffix(".rs")?;
+    if stem != "mod" {
+        return Some(stem);
+    }
+    path.rsplit('/').nth(1)
+}
+
+/// Resolve diagram labels against a repo's own definitions.
+///
+/// The whole point of the architecture tab is that a drawn box is a claim; this is what
+/// turns the claim into a link. Two ways a label can be true: a symbol is defined under
+/// exactly that name, or a file is named after it. Both are filtered to `.rs` — the
+/// graph reads other languages, but a Python `refresh` under a Rust box would be a
+/// coincidence dressed up as evidence, so the endpoint stays Rust-only until the
+/// diagram carries a language.
+///
+/// A label with no match is simply absent: the client leaves that node inert, and an
+/// unindexed repo therefore answers `{}` rather than failing.
+pub async fn locate(
+    db: &Db,
+    repo: &str,
+    names: Vec<String>,
+) -> std::collections::BTreeMap<String, WhereMatch> {
+    use std::collections::BTreeMap;
+
+    let db = db.clone();
+    let repo = repo.to_owned();
+    // Indexed lookups, but a hundred of them, each holding the connection mutex. That
+    // is not a runtime worker's job however short each one is.
+    tokio::task::spawn_blocking(move || {
+        // The one full read. The file list is small next to the symbol table, it is
+        // the only way to know a `.rs` file exists at all when it defines nothing, and
+        // the stem index has to be built from all of it anyway.
+        let files = db.code_file_list(&repo).unwrap_or_default();
+        let mut by_stem: BTreeMap<String, Vec<(&str, &str)>> = BTreeMap::new();
+        for file in files.iter().filter(|file| file.path.ends_with(".rs")) {
+            // Stems are matched case-insensitively: a diagram writes `Mirror`, the
+            // file is `mirror.rs`, and both mean the same module.
+            if let Some(stem) = file_stem(&file.path) {
+                by_stem
+                    .entry(stem.to_lowercase())
+                    .or_default()
+                    .push((&file.path, &file.blob));
+            }
+        }
+
+        let mut answered: BTreeMap<String, WhereMatch> = BTreeMap::new();
+        for label in &names {
+            if answered.contains_key(label) {
+                continue;
+            }
+            let mut found = WhereMatch::default();
+            // One budget for the whole answer. It bounds the payload and, because a
+            // spent budget skips the per-file query, the number of round trips too.
+            let mut budget = MAX_WHERE_SYMBOLS;
+
+            // The exact-name half rides `code_symbols_name (repo, name)`.
+            for hit in db
+                .code_definitions(&repo, label)
+                .unwrap_or_default()
+                .into_iter()
+                // Rust only: the graph reads other languages, but a Python `refresh`
+                // under a Rust box would be a coincidence dressed up as evidence.
+                .filter(|hit| hit.path.ends_with(".rs"))
+                .take(budget)
+            {
+                found.symbols.push(WhereSymbol {
+                    name: hit.name,
+                    kind: hit.kind,
+                    path: hit.path,
+                    line: hit.start_line,
+                });
+            }
+            budget -= found.symbols.len();
+
+            for (path, blob) in
+                by_stem.get(&label.to_lowercase()).into_iter().flatten().take(MAX_WHERE_FILES)
+            {
+                // A file past the budget still earns its path: the link to the blob is
+                // the useful half, and listing it costs one string instead of a query.
+                let symbols =
+                    if budget == 0 { Vec::new() } else { blob_symbols(&db, &repo, blob, budget) };
+                budget -= symbols.len();
+                found.files.push(WhereFile { path: (*path).to_owned(), symbols });
+            }
+
+            if !found.is_empty() {
+                answered.insert(label.clone(), found);
+            }
+        }
+        answered
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// One file's own definitions, in line order.
+///
+/// Scoped by blob, which is the leading half of `code_symbols`' primary key, so this
+/// is an index seek rather than a scan. It is also the right key on its own terms:
+/// everything in this module is addressed by content, and two paths holding identical
+/// bytes share one row set.
+fn blob_symbols(db: &Db, repo: &str, blob: &str, limit: usize) -> Vec<WhereFileSymbol> {
+    db.with(|conn| {
+        let mut statement = conn.prepare(
+            "SELECT name, kind, start_line FROM code_symbols
+             WHERE repo = ?1 AND blob = ?2
+             ORDER BY start_line, name
+             LIMIT ?3",
+        )?;
+        let rows = statement
+            .query_map(rusqlite::params![repo, blob, limit as i64], |row| {
+                Ok(WhereFileSymbol { name: row.get(0)?, kind: row.get(1)?, line: row.get(2)? })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .unwrap_or_default()
 }
 
 /// The distinct functions that call a symbol, each with one example site.

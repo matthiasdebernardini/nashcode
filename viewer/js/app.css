@@ -618,3 +618,29 @@ h6,
 .ph:not(:last-child) {
   margin-right: 0.35em;
 }
+
+/* ---- architecture: nodes that resolve to code -------------------------------- */
+
+/*
+ * Only nodes the server could place get the affordance. A dotted underline says
+ * "there is more here" without redrawing the diagram the author submitted; a node
+ * with no match keeps the plain mermaid look and does nothing on click.
+ */
+.nashcode-node-linked {
+  cursor: pointer;
+}
+
+.nashcode-node-linked .nodeLabel {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.nashcode-node-popover {
+  position: absolute;
+  z-index: 40;
+  max-width: 360px;
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  box-shadow: var(--shadow-floating-small, 0 4px 12px rgb(0 0 0 / 30%));
+}
