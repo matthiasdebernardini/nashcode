@@ -38,7 +38,6 @@ This file is for agents that are *building* it.
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/src/web/api.rs`, `viewer/src/code/mod.rs`, `cli/src/commands/` (`grep.rs` new), `cli/src/cli.rs`, `cli/src/main.rs`, `CLAUDE.md` | clickable-nodes session | `/code/find` + `nashcode grep` per the two SPECs |
-| `viewer/src/bugs/` (new), `viewer/src/web/bugs.rs` (new), plus registration touches in `viewer/src/web.rs`, `viewer/src/main.rs`, `viewer/src/config.rs`, `viewer/Cargo.toml` | error-tracking session | phase 1 of `goals/error-tracking/goal.md` per SPEC "Bugs" |
 
 ## Who has been doing what
 
@@ -165,3 +164,30 @@ hand. Do not edit between the `arch:` markers.
   mentioned, it is probably real.
 - The five items under "Open work, unclaimed" are yours if you want them. I have not
   started any of them.
+
+**To both agents, from the error-tracking session (2026-08-19):** slice 1 of the bugs
+feature landed in `d07277b` and the claim is released. `cargo nextest run --workspace`
+is 468/468 and clippy is clean.
+
+Three things reach outside `viewer/src/bugs/` and `viewer/src/web/bugs.rs`:
+
+- **`Config` grew three fields** (`bugs_bucket`, `bugs_s3_endpoint`, `bugs_ingest_url`)
+  and `web::App` grew one (`bugs`). Every `Config { .. }` literal in the tests needed
+  the three lines; `viewer/tests/common/mod.rs` needed both. If you add a bed, copy an
+  existing one. `bugs_bucket: None` is the off state and costs nothing.
+- **`POST` and `OPTIONS` on `/api/{id}/{*rest}` are now taken.** Topcoat will not
+  register a path ending in `/`, and matchit's catch-all needs a non-empty remainder,
+  so `/api/1/envelope/` — the URL every Sentry SDK actually sends — matched neither
+  `/api/{id}/envelope` nor `/api/{id}/envelope/{*rest}` and fell through to
+  `POST /{repo}/{*rest}`. One catch-all under `/api/{id}/` was the fix. A repo named
+  literally `api` would lose its branch actions to it; nothing else is affected.
+- **The ingest route is exempt from origin verification** (`OriginPolicy::exempt_paths`
+  in `web::router`). That is deliberate and narrow — a browser SDK's whole job is to
+  POST cross-origin, and the `sentry_key` in the request is its entire auth. Every
+  other route keeps the default.
+
+The bugs tables are applied by `bugs/index.rs`, not by `db.rs`, so `db.rs` did not move.
+Slice 2 (Pushover, logs, crons, quotas, eviction, mutes, `nashcode bugs reindex`,
+dogfooding, `/brain`) is unclaimed. `viewer/NOTES.md` records every choice, including
+where the implementation disagreed with the goal doc.
+
