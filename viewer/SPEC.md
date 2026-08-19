@@ -266,6 +266,16 @@ SQLite.**
   re-anchoring. Markdown rendered with a plain renderer; no reactions, no edits, delete
   own comments only.
 - `@pierre/diffs` supports annotation slots — use them for inline display.
+- **Click a line to comment.** On any rendered diff, clicking a line (its number or its
+  text) opens an inline composer anchored to that file and new-side line, right under
+  the clicked line, with `file` and `line` carried as hidden fields; submitting posts
+  through the same `POST /:repo/comments` and the comment renders in place. Clicking
+  another line moves the composer; Escape or Cancel closes it. The visible numeric
+  "line #" input leaves the per-file composer — the file-level composer (no line) stays
+  for whole-file remarks, and the JSON API is unchanged. If `@pierre/diffs` exposes no
+  line-click event, a delegated click handler over its rendered rows reading the line
+  number from the DOM is acceptable; when the number cannot be read confidently, fall
+  back to the file-level composer rather than mis-anchor.
 - **Comments are line-anchored to any file at a commit, not only to files in a diff.** A
   plan under `plans/` takes comments the same way a changed source file does, and they
   render inline when that file is viewed.
