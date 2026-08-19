@@ -238,3 +238,41 @@ implementation had to choose:
   in the router, so a branch named `docs` keeps every URL except that one.
 - **A wiki URL only reaches markdown that exists.** `/docs/src/lib.rs` is a 404, not a
   redirect to `/blob/`; the wiki's own links already point at the right one of the two.
+
+### After peer review
+
+- **`docs/...` is a namespace the wiki shares with branches.** Reserving `docs` was
+  meant to cost one branch name; a catch-all under it would have cost every name
+  beginning `docs/`. So a wiki URL that names no markdown page in the index but does
+  name a real branch falls through to that branch's PR view, and a name that is
+  neither is a 404 rather than a guess. A wiki page always wins, because it is the
+  thing the URL says it is.
+- **A path's text is not enough to make a write safe.** A repo can commit
+  `link -> /etc` as an ordinary blob, and the scratch clone checks it out;
+  `root.join("link/passwd")` then names a file outside the clone, which
+  `create_dir_all` and `write` reach happily and git objects to only afterwards.
+  `ops::resolve_inside` walks the path component by component, refuses a component
+  that is a symlink, and requires the result to stay under the canonicalized root.
+  Both writers use it — the card flip on merge writes a repo-supplied path too.
+- **Cross-site POSTs were already handled, by Topcoat.** `OriginPolicy` is on by
+  default and `web::router` never disables it: `sec-fetch-site` present and not
+  `same-origin`/`none` is a 403 before any handler runs, an absent header is allowed
+  (the CLI, curl, and the trace hook carry no ambient credentials), GETs are untouched.
+  That is load-bearing for a viewer whose actor comes from a header, so `tests/csrf.rs`
+  pins it instead of trusting it.
+- **The edit form carries the blob it was opened against.** A submit whose base no
+  longer matches is refused with the person's text intact, because overwriting a push
+  that landed in between is the one outcome nobody can undo from this page. A client
+  that never loaded a form sends no base and gets no check — it never had a version to
+  be stale against.
+- **The form also reports whether the file ended with a newline.** Restoring one
+  unconditionally rewrote the last line of every file that did without, which is a diff
+  nobody asked for.
+- **Two line caps, not one.** 5000 lines drops the language tag (shiki would out-think
+  the reader); 50 000 drops the gutter as well, because ~145 bytes a line makes a
+  500k-line generated file a 70 MB page. Past that cap the raw link is the honest
+  answer, and it is already on the header.
+- **URL paths are percent-encoded through `render::encode_path`.** Ordinary paths come
+  out byte-identical, so no existing URL moved; `a#b.md` and `notes v2.md` stop
+  truncating. Topcoat decodes catch-all segments one at a time, so the round trip is
+  exact. In markdown source a `#` is still a fragment — that is the author's to escape.
