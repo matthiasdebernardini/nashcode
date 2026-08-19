@@ -115,13 +115,19 @@ comment on the rendered page.
 
 ```sh
 nashcode plan new "replace the parser"   # plans/replace-the-parser.md
-nashcode annotate plans/replace-the-parser.md   # open locally in plannotator
+nashcode annotate plans/replace-the-parser.md   # review locally in plannotator
 nashcode comments plans/replace-the-parser.md   # read the replies
 nashcode comments plans/replace-the-parser.md --branch main --since 2026-08-01T00:00:00Z
 ```
 
 This is a loop an agent can drive: write a plan, wait for a human to comment
 in the viewer, read the comments back with `--json`.
+
+`annotate` feeds the same loop from the other end. It opens the plan in
+plannotator with an Approve button, and posts what you decided back to the
+viewer as one comment on the file — your notes, or `Approved.` when you had
+none. Dismissing posts nothing. When the comment cannot be sent, the feedback
+is printed in the terminal with the reason, so it is never lost.
 
 ## JSON output
 

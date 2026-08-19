@@ -234,6 +234,11 @@ to get it and does nothing else. When the active profile has a viewer URL, the
 plan's URL on the viewer is printed too, which is the link to send to someone
 who should comment on it.
 
+What you write in plannotator is posted back to the viewer as one comment on the
+plan, so the agent polling `nashcode comments` hears it. Approving posts too:
+`Approved.`, plus your notes when you left any. Dismissing posts nothing. If the
+comment cannot be sent, your feedback is printed here instead, with the reason.
+
 With --json nothing is launched: the output only reports the file, where
 plannotator is (null when absent), and the viewer URL — plannotator is
 interactive, and an agent asking for JSON does not want an editor opening.")]

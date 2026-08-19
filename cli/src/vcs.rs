@@ -191,6 +191,22 @@ impl Workspace {
         }
     }
 
+    /// The branch the working copy is on, or `None` when it is on none.
+    ///
+    /// git's `symbolic-ref` answers for a plain repo and for a colocated jj one,
+    /// where jj keeps git's HEAD pointed at the checked-out bookmark. A detached
+    /// HEAD, a jj-only repo, or no git at all all mean "no branch to name" —
+    /// callers treat the branch as optional, so a missing answer is not an error.
+    pub fn current_branch(&self) -> Result<Option<String>> {
+        if self.kind == Kind::JjOnly {
+            return Ok(None);
+        }
+        let r = git(&self.root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+        Ok(r.ok()
+            .then(|| r.stdout.trim().to_string())
+            .filter(|b| !b.is_empty()))
+    }
+
     /// The name `origin` currently points at, e.g. `myrepo` from
     /// `https://host/myrepo.git`. Used as the default for `nashcode comments`.
     pub fn origin_repo_name(&self) -> Result<Option<String>> {

@@ -576,3 +576,27 @@ with empty lists, and a repo of files no grammar reads answers with the inventor
 - **The empty state reads `ARCHITECTURE.md` at the default tip**, extracting only its
   ` ```mermaid ` fences. The prose around them belongs to the wiki tab, which already
   renders that file whole.
+
+## `nashcode annotate` posts what plannotator decided (2026-08-19)
+
+Lives in `cli/`, noted here because this is the file that records choices SPEC left open.
+
+- **The decision arrives in a result file, not on stdout.** plannotator's
+  `--gate --json --result-file <path>` writes one JSON record and refuses to overwrite an
+  existing file, so `annotate` makes a fresh directory per run under the system temp dir
+  (`nashcode-annotate-<pid>-<n>`, with `create_dir` as the collision check) and lets
+  plannotator create the file inside it. `tempfile` stayed a dev-dependency: ten lines of
+  stdlib do this, and the shipped binary keeps its dependency list.
+- **`annotated` with no feedback is an error, not an empty comment.** The four records are
+  specified; a malformed one is not. An empty comment would tell the polling agent the
+  review is over and give it nothing to act on, so the command bails. Blank `feedback` on
+  an `approved` record is different — it degrades to the bare `Approved.`, because there
+  the decision is the whole message.
+- **The branch comes from git's `symbolic-ref`, and a jj-native repo reports none.** A
+  colocated jj repo keeps git's HEAD on the checked-out bookmark, so one question answers
+  for both. A detached HEAD or a `.jj`-only repo gives `None` and the payload omits
+  `branch`, which the viewer accepts.
+- **"Nowhere to post" exits 0; a refused post does not.** A profile with no viewer URL and
+  a directory that is not a known repository are configuration, not failure: print the
+  feedback, say why it went nowhere, exit 0. A POST that was attempted and rejected is a
+  real failure, so the feedback prints and then the command bails.

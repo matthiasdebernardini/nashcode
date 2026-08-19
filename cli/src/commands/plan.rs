@@ -11,6 +11,7 @@ use crate::cli::{AnnotateArgs, CommentsArgs, PlanNewArgs};
 use crate::timefmt::age_of;
 use crate::vcs;
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -109,15 +110,221 @@ pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<()> {
         }));
         return Ok(());
     }
+
+    // Resolved before the launch so a missing viewer is a known fact by the time
+    // the human is done writing, not a surprise discovered afterwards.
+    let target = comment_target(ctx, &path);
+
+    let dir = scratch_dir()?;
+    let result_file = dir.join("decision.json");
     let status = std::process::Command::new(&bin)
         .arg("annotate")
         .arg(&path)
+        .arg("--gate")
+        .arg("--json")
+        .arg("--result-file")
+        .arg(&result_file)
         .status()
-        .with_context(|| format!("run {}", bin.display()))?;
+        .with_context(|| format!("run {}", bin.display()));
+    let status = match status {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e);
+        }
+    };
     if !status.success() {
+        let _ = std::fs::remove_dir_all(&dir);
         bail!("plannotator exited {}", status.code().unwrap_or(-1));
     }
+    let raw = std::fs::read_to_string(&result_file);
+    let _ = std::fs::remove_dir_all(&dir);
+    let raw = raw.with_context(|| {
+        format!(
+            "plannotator exited 0 but wrote no decision to {}",
+            result_file.display()
+        )
+    })?;
+
+    let decision = match decision_body(&raw) {
+        Ok(d) => d,
+        Err(e) => {
+            // Unreadable, but still the human's words. Put them where they can
+            // be copied out, then fail.
+            ctx.out.line(raw.trim());
+            return Err(e);
+        }
+    };
+    let Some(body) = decision else {
+        ctx.out.line("dismissed, nothing posted");
+        return Ok(());
+    };
+
+    let target = match target {
+        Ok(t) => t,
+        Err(why) => {
+            // The human's words outlive the plumbing. Print them, say why they
+            // went nowhere, and exit 0: nothing failed, there was just nowhere
+            // to put them.
+            ctx.out.line(&body);
+            ctx.out.line(format!("not posted: {why}"));
+            return Ok(());
+        }
+    };
+
+    let payload = comment_payload(&target.file, target.branch.as_deref(), &body).to_string();
+    let client = Client::new(&target.viewer, &target.token);
+    let reply = match client.post_url(&target.url, &payload) {
+        Ok(r) => r,
+        Err(e) => {
+            ctx.out.line(&body);
+            return Err(e.context("post the annotation to the viewer"));
+        }
+    };
+    if !reply.ok() {
+        ctx.out.line(&body);
+        bail!(
+            "{} returned HTTP {}\n{}",
+            target.url,
+            reply.status,
+            reply.body.trim()
+        );
+    }
+
+    let id = serde_json::from_str::<Value>(&reply.body)
+        .ok()
+        .and_then(|v| v.get("id").and_then(|i| i.as_i64()));
+    ctx.out.line(match id {
+        Some(id) => format!("posted #{id}"),
+        None => "posted".to_string(),
+    });
+    if let Some(u) = &viewer {
+        ctx.out.line(u);
+    }
     Ok(())
+}
+
+/// What plannotator writes to `--result-file`: one record, one decision.
+#[derive(Debug, Deserialize)]
+struct Decision {
+    decision: String,
+    #[serde(default)]
+    feedback: Option<String>,
+}
+
+/// The comment to post for a plannotator decision record, or `None` when the
+/// human dismissed the review and there is nothing to say.
+///
+/// An approval posts "Approved." on purpose. The agent that pushed the plan is
+/// polling the comment stream, and silence and approval look the same there.
+pub fn decision_body(raw: &str) -> Result<Option<String>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        bail!("plannotator wrote an empty decision file");
+    }
+    let d: Decision =
+        serde_json::from_str(raw).context("plannotator's decision file is not the JSON we expect")?;
+    let feedback = d.feedback.as_deref().map(str::trim).filter(|f| !f.is_empty());
+    match d.decision.as_str() {
+        "annotated" => match feedback {
+            Some(f) => Ok(Some(f.to_string())),
+            None => bail!("plannotator reported annotations but no feedback"),
+        },
+        "approved" => Ok(Some(match feedback {
+            Some(f) => format!("Approved.\n\n{f}"),
+            None => "Approved.".to_string(),
+        })),
+        "dismissed" => Ok(None),
+        other => bail!("plannotator reported an unknown decision `{other}`"),
+    }
+}
+
+/// The body of `POST /:repo/comments` for a whole-file plan comment.
+///
+/// No `line`: the decision record has no per-annotation anchors, so the comment
+/// belongs to the file. No `author`: the viewer reads the caller's Tailscale
+/// identity, which is truer than anything this side could claim.
+pub fn comment_payload(file: &str, branch: Option<&str>, body: &str) -> Value {
+    let mut v = json!({ "file": file, "body": body });
+    if let Some(b) = branch {
+        v["branch"] = json!(b);
+    }
+    v
+}
+
+/// Everything needed to post one comment about a plan.
+struct CommentTarget {
+    /// The viewer's base URL, for the HTTP client.
+    viewer: String,
+    /// The dgit token, unused by the viewer but part of the client's shape.
+    token: String,
+    /// `<viewer>/<repo>/comments`.
+    url: String,
+    /// The plan's path as the viewer names it: relative, forward slashes.
+    file: String,
+    branch: Option<String>,
+}
+
+/// Where a decision about `path` would be posted. The `Err` side is the reason
+/// nothing can be, written for the human who just finished annotating.
+fn comment_target(ctx: &Ctx, path: &Path) -> std::result::Result<CommentTarget, String> {
+    let (name, p) = ctx.profile().map_err(|e| e.to_string())?;
+    let viewer = p
+        .viewer_url
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| format!("profile `{name}` has no viewer URL"))?
+        .trim_end_matches('/')
+        .to_string();
+    let ws = vcs::detect_cwd()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "not inside a git or jj repository".to_string())?;
+    let repo = ws
+        .origin_repo_name()
+        .map_err(|e| e.to_string())?
+        .or_else(|| ws.default_repo_name())
+        .ok_or_else(|| "cannot tell which repository this is".to_string())?;
+    Ok(CommentTarget {
+        url: format!("{viewer}/{}/comments", pct(&repo)),
+        viewer,
+        token: p.token.clone(),
+        file: relative_path(&ws.root, path),
+        branch: ws.current_branch().map_err(|e| e.to_string())?,
+    })
+}
+
+/// `path` as the viewer names it: relative to the workspace root, forward
+/// slashes. Both sides are canonicalised first, so `./plans/x.md` and an
+/// absolute path give the same answer.
+fn relative_path(root: &Path, path: &Path) -> String {
+    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    abs.strip_prefix(&root)
+        .unwrap_or(&abs)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// A fresh empty directory under the system temp dir.
+///
+/// plannotator refuses to overwrite its `--result-file` and wants the parent to
+/// exist, so we make the parent and let it make the file. `create_dir` fails
+/// when the name is taken, which is the whole collision check: pid plus a
+/// counter, retried.
+fn scratch_dir() -> Result<PathBuf> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let base = std::env::temp_dir();
+    for _ in 0..64 {
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(format!("nashcode-annotate-{}-{n}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("create {}", dir.display())),
+        }
+    }
+    bail!("could not make a scratch directory under {}", base.display());
 }
 
 /// The plan's URL on the viewer, when the active profile names one.
@@ -132,14 +339,11 @@ fn viewer_plan_url(ctx: &Ctx, path: &Path) -> Result<Option<String>> {
     let Some(repo) = ws.origin_repo_name()?.or_else(|| ws.default_repo_name()) else {
         return Ok(None);
     };
-    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let root = std::fs::canonicalize(&ws.root).unwrap_or_else(|_| ws.root.clone());
-    let rel = abs.strip_prefix(&root).unwrap_or(&abs).to_string_lossy();
     Ok(Some(format!(
         "{}/{}/tree/{}",
         viewer.trim_end_matches('/'),
         repo,
-        rel.replace('\\', "/")
+        relative_path(&ws.root, path)
     )))
 }
 
@@ -348,6 +552,76 @@ mod tests {
         let (_, c) = parse_comments(bare).unwrap();
         assert_eq!(c[0].author, "ann");
         assert_eq!(c[0].body, "yes");
+    }
+
+    #[test]
+    fn each_decision_maps_to_the_body_the_agent_will_read() {
+        assert_eq!(
+            decision_body(r#"{"decision":"annotated","feedback":"line 4 is wrong"}"#).unwrap(),
+            Some("line 4 is wrong".to_string())
+        );
+        assert_eq!(
+            decision_body("{\"decision\":\"approved\",\"feedback\":\"ship it\"}\n").unwrap(),
+            Some("Approved.\n\nship it".to_string())
+        );
+        assert_eq!(
+            decision_body(r#"{"decision":"approved"}"#).unwrap(),
+            Some("Approved.".to_string())
+        );
+        assert_eq!(decision_body(r#"{"decision":"dismissed"}"#).unwrap(), None);
+    }
+
+    #[test]
+    fn an_approval_with_blank_feedback_is_a_bare_approval() {
+        assert_eq!(
+            decision_body(r#"{"decision":"approved","feedback":"   "}"#).unwrap(),
+            Some("Approved.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_decision_that_cannot_be_read_is_an_error() {
+        assert!(decision_body("").is_err());
+        assert!(decision_body("   \n").is_err());
+        assert!(decision_body("not json").is_err());
+        assert!(decision_body(r#"{"decision":"annotated"}"#).is_err());
+        assert!(decision_body(r#"{"decision":"pondered"}"#).is_err());
+    }
+
+    #[test]
+    fn the_comment_payload_is_whole_file_and_unauthored() {
+        let v = comment_payload("plans/x.md", Some("review/x"), "Approved.");
+        assert_eq!(v["file"], "plans/x.md");
+        assert_eq!(v["branch"], "review/x");
+        assert_eq!(v["body"], "Approved.");
+        let o = v.as_object().unwrap();
+        assert!(!o.contains_key("line"));
+        assert!(!o.contains_key("author"));
+
+        let v = comment_payload("plans/x.md", None, "hi");
+        assert!(!v.as_object().unwrap().contains_key("branch"));
+    }
+
+    #[test]
+    fn the_file_is_named_relative_to_the_workspace_root() {
+        let root = PathBuf::from("/repo");
+        assert_eq!(
+            relative_path(&root, &root.join("plans").join("x.md")),
+            "plans/x.md"
+        );
+        // Outside the root there is nothing to strip; the path stands as given.
+        assert_eq!(relative_path(&root, Path::new("/elsewhere/x.md")), "/elsewhere/x.md");
+    }
+
+    #[test]
+    fn scratch_directories_are_fresh_and_distinct() {
+        let a = scratch_dir().unwrap();
+        let b = scratch_dir().unwrap();
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
+        assert!(!a.join("decision.json").exists());
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 
     #[test]
