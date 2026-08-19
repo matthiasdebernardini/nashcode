@@ -687,10 +687,11 @@ viewer-side surface; the goal doc binds protocol, grouping, and notification sem
   snippet inline on the log row (expandable) and the issue frame. Read on render, not
   at ingest: the mirror is local and the index stores only file/line/release. A path
   or SHA the mirror cannot answer degrades to the plain link, never an error.
-- **Phasing.** 1: core loop (projects, ingest, digest, grouping, issues UI, Pushover on
-  new/regression, dogfood nashcode's own errors). 2: logs, crons, quotas, retention,
-  mutes, escalation. 3: public ingester per `ingester.md`. Acceptance = the 20 facts in
-  the goal doc.
+- **Phasing.** 1: core loop (landed). 2: logs + hardening (landed). 3: public ingester
+  per `ingester.md`, pulled forward — ingestion scales from day one; the celld edge
+  buffers per project, the viewer's digest stays the single writer behind it. 4:
+  Pushover, context capture, dogfood. 5: crons, quotas, retention polish, nac-bugs
+  cutover. Acceptance = the 20 facts in the goal doc.
 
 ## Inspiration
 

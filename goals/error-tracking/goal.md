@@ -159,16 +159,24 @@ fixtures: github.com/bugsink/event-samples.
    grouping, issues UI, Pushover on new issue and regression. Wire nashcode to
    its own DSN (Rust SDK, `sentry-tracing` with the `logs` feature): dogfood
    from day one.
-2. **Logs + crons + retention**: both log doors, FTS search, check-ins, sweeper,
-   quotas, eviction, escalation ladder, mutes.
-3. **Public ingester + cutover**: the design in
-   `goals/error-tracking/ingester.md`. A celld app on one public VPS accepts
-   envelopes (one buffer cell per project, bucket-durable via celld's
-   replication); nashcode pulls batches over iroh with mutually pinned
-   EndpointIds and feeds its normal digest. nashcode accepts no inbound
-   connection. nashcode side: the iroh drainer task and registry push. Then
-   mint new DSNs for the two nac-bugs apps, verify end to end, decommission
-   the nac-bugs Fly app, and update the `nac-bugs-wire` skill.
+2. **Logs**: both log doors, FTS search, code origin, retention prune, the
+   ingest hardening. (Landed with slice 2.)
+3. **Public ingester** (pulled forward from last place, 2026-08-19: ingestion
+   must scale from day one — all agent output, app logs, and errors flow
+   through it): the design in `goals/error-tracking/ingester.md`. A celld app
+   on one public VPS accepts envelopes (one buffer cell per project,
+   bucket-durable via celld's replication); nashcode pulls batches over iroh
+   with mutually pinned EndpointIds and feeds its normal digest. nashcode
+   accepts no inbound connection. nashcode side: the iroh drainer task and
+   registry push. The edge scales per project; digest stays the single writer
+   behind the buffer.
+4. **Pushover + context capture + dogfood**: the notification queue, the
+   mirror-read source snippets (SPEC "Context capture"), path suffix-matching
+   for containerized apps, nashcode wired to its own DSN.
+5. **Crons + quotas + retention polish + cutover**: check-ins, sweeper,
+   eviction, escalation ladder, mutes evaluation; then mint new DSNs for the
+   two nac-bugs apps, verify end to end, decommission the nac-bugs Fly app,
+   and update the `nac-bugs-wire` skill.
 
 Out of scope, deliberately: transactions/APM, sessions/release health, replays,
 profiles, browser-JS sourcemap symbolication (the one expensive feature; keep a

@@ -52,6 +52,9 @@ graph LR
     cli_vcs[vcs]
   end
   cli_api --> cli_index_page
+  cli_cli --> cli_commands
+  cli_cli --> cli_output
+  cli_cli --> cli_timefmt
   cli_commands --> cli_api
   cli_commands --> cli_cli
   cli_commands --> cli_index_page
