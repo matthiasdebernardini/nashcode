@@ -276,3 +276,34 @@ implementation had to choose:
   out byte-identical, so no existing URL moved; `a#b.md` and `notes v2.md` stop
   truncating. Topcoat decodes catch-all segments one at a time, so the round trip is
   exact. In markdown source a `#` is still a fragment — that is the author's to escape.
+
+## Click a line to comment (2026-08-19)
+
+- **`@pierre/diffs` gives us the click, so nothing is scraped.** `FileDiff` takes
+  `onLineClick` and `onLineNumberClick`; both hand back the row's own `lineNumber`,
+  `annotationSide`, and `lineType`. The number is the renderer's, not something read out
+  of the DOM, so the anchor cannot drift from what the reader clicked. The two
+  callbacks are mutually exclusive inside the interaction manager (number column wins),
+  so both point at one handler and a click anywhere on the row opens the composer.
+- **The composer goes back in through the annotation slots.** The same mechanism that
+  renders stored comments renders the composer: one extra `{side, lineNumber, metadata}`
+  appended to the server's annotations, then `instance.render({ lineAnnotations })`.
+  Nothing is positioned by hand and the composer lands under the clicked row wherever
+  the renderer puts that row — after any comments already anchored there.
+- **One metadata object, compared by identity.** `areDiffLineAnnotationsEqual` compares
+  `metadata` with `===`, so a single stable object keeps the renderer's annotation cache
+  from rebuilding the composer on every render — the element survives, and with it the
+  half-typed comment.
+- **A deletion-side click has no new-side line to anchor to, so it does not guess.**
+  Comments anchor to the new side. A click in the deletion column focuses the
+  file-level composer under the diff instead, which is the honest answer: a whole-file
+  remark rather than a line the reader never picked.
+- **The composer is a clone of a server-rendered `<template>`.** Same action, same
+  hidden `branch`/`file`, plus the hidden `line` the click fills in. The server sees an
+  ordinary form post on `POST /:repo/comments` and needs no endpoint, and the markup is
+  testable from Rust without a browser. A submit is a plain navigation: the redirect
+  brings the page back with the comment already in the annotation slot.
+- **The typed "line #" input is gone from both composers.** Typing a number to anchor a
+  comment was a guess with a keyboard; clicking the line is the same intent with none of
+  the arithmetic. Plan pages keep the file-level composer for whole-file remarks, and
+  the JSON API still takes `line` for tools that compute one.
