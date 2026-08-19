@@ -34,6 +34,10 @@ pub struct Outcome {
     pub events: usize,
     /// Items whose type this build does not handle. Counted, never an error.
     pub skipped: usize,
+    /// Items that failed on the way to the bucket or the index. Counted so the item
+    /// beside them still lands — a transient error on item two used to drop item
+    /// three with it.
+    pub failed: usize,
 }
 
 pub struct Worker {
@@ -48,9 +52,13 @@ impl Worker {
         while let Some(job) = jobs.recv().await {
             let project_id = job.project_id;
             match self.digest(&job).await {
-                Ok(outcome) => {
-                    tracing::debug!(project_id, events = outcome.events, skipped = outcome.skipped, "digested")
-                }
+                Ok(outcome) => tracing::debug!(
+                    project_id,
+                    events = outcome.events,
+                    skipped = outcome.skipped,
+                    failed = outcome.failed,
+                    "digested"
+                ),
                 // A digest failure loses an index row, never a payload: the envelope
                 // is already in the bucket and a reindex re-reads it.
                 Err(error) => tracing::warn!(project_id, %error, "cannot digest envelope"),
@@ -74,8 +82,16 @@ impl Worker {
                 outcome.skipped += 1;
                 continue;
             };
-            self.record(job.project_id, &split, &event, item.payload).await?;
-            outcome.events += 1;
+            // One item's failure is that item's failure. The envelope is already in
+            // the bucket, so the sweep can retry the whole thing later; abandoning
+            // the items after this one would lose them for nothing.
+            match self.record(job.project_id, &split, &event, item.payload).await {
+                Ok(()) => outcome.events += 1,
+                Err(error) => {
+                    outcome.failed += 1;
+                    tracing::warn!(project_id = job.project_id, %error, "cannot record an event");
+                }
+            }
         }
 
         Ok(outcome)

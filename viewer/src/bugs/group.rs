@@ -161,7 +161,13 @@ fn exception_title(event: &Value) -> (String, String) {
 
 /// The last exception in the chain. Sentry orders `exception.values` oldest cause
 /// first, so the last one is the exception that actually reached the handler.
-fn last_exception(event: &Value) -> Option<&Value> {
+///
+/// Both shapes SDKs send are accepted: the documented `{"values": [...]}` wrapper and
+/// the bare array some older clients still emit. This is the one place that knows
+/// that, so the detail page and grouping can never disagree about which exception an
+/// event is about — they did, and an event in the bare form grouped correctly and
+/// then rendered with no exception at all.
+pub fn last_exception(event: &Value) -> Option<&Value> {
     let exception = event.get("exception")?;
     let values = match exception {
         Value::Array(values) => values,
@@ -199,7 +205,8 @@ fn crash_function(exception: &Value) -> Option<String> {
         .filter(|name| !name.trim().is_empty())
 }
 
-fn frames(exception: &Value) -> Option<&Vec<Value>> {
+/// The frames of one exception, in the order the SDK sent them (caller first).
+pub fn frames(exception: &Value) -> Option<&Vec<Value>> {
     exception.get("stacktrace")?.get("frames")?.as_array()
 }
 

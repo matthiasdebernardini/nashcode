@@ -714,6 +714,43 @@ async fn in_app_stack_frames_link_into_the_declared_repo() {
 // ---- review follow-ups ------------------------------------------------------------
 
 #[tokio::test]
+async fn a_bare_array_exception_renders_the_same_as_the_wrapped_form() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+
+    // The undocumented but real shape: `exception` as a bare array. Grouping has
+    // always taken it; the detail page read `exception.values` only, so the issue
+    // appeared with the right title and rendered with no exception and no stack.
+    let event = serde_json::json!({
+        "event_id": "d".repeat(32),
+        "timestamp": "2026-08-19T04:05:06Z",
+        "platform": "python",
+        "exception": [{
+            "type": "ConnectionError",
+            "value": "the socket went away",
+            "stacktrace": {"frames": [{
+                "filename": "src/app.txt",
+                "lineno": 12,
+                "function": "connect",
+                "in_app": true,
+            }]},
+        }],
+    })
+    .to_string();
+    let body = format!("{{}}\n{{\"type\":\"event\"}}\n{event}\n").into_bytes();
+    post_envelope(&bed, id, &key, body).await;
+    bed.bugs.digested(1).await;
+
+    let issues = get(&bed, "/bugs/api", &[JSON]).await.json();
+    let issue_id = issues["issues"][0]["id"].as_i64().expect("an issue id");
+    assert_eq!(issues["issues"][0]["grouping_key"], "ConnectionError: the socket went away");
+
+    let page = get(&bed, &format!("/bugs/api/issues/{issue_id}"), &[]).await;
+    assert!(page.body.contains("the socket went away"), "the exception value renders");
+    assert!(page.body.contains("src/app.txt:12"), "and so does its stack");
+}
+
+#[tokio::test]
 async fn an_envelope_with_no_event_id_still_gets_one_back() {
     let (bed, _bucket) = bugs_bed();
     let (id, key) = project(&bed, "api").await;

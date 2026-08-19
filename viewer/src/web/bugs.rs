@@ -21,7 +21,7 @@ use topcoat::router::{
 };
 use topcoat::view::{component, view};
 
-use crate::bugs::{Issue, Project, envelope, ingest, state};
+use crate::bugs::{Issue, Project, envelope, group, ingest, state};
 use crate::web::components::shell;
 use crate::web::{actor, app, see_other};
 
@@ -623,22 +623,15 @@ impl Frame {
 impl Detail {
     fn of(event: &serde_json::Value) -> Self {
         let mut detail = Self::default();
-        let exception = event
-            .get("exception")
-            .and_then(|exception| exception.get("values"))
-            .and_then(serde_json::Value::as_array)
-            .and_then(|values| values.last());
-
-        if let Some(exception) = exception {
+        // One helper, shared with grouping: this page used to read `exception.values`
+        // only, so an event sent as a bare `"exception": [...]` grouped correctly and
+        // then rendered without the exception it had grouped on.
+        if let Some(exception) = group::last_exception(event) {
             detail.ty =
                 exception.get("type").and_then(serde_json::Value::as_str).map(str::to_owned);
             detail.value =
                 exception.get("value").and_then(serde_json::Value::as_str).map(str::to_owned);
-            if let Some(frames) = exception
-                .get("stacktrace")
-                .and_then(|stack| stack.get("frames"))
-                .and_then(serde_json::Value::as_array)
-            {
+            if let Some(frames) = group::frames(exception) {
                 // Innermost first, which is the order a person reads a traceback in.
                 detail.frames = frames.iter().rev().map(render_frame).collect();
             }
