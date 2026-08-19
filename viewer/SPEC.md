@@ -590,6 +590,44 @@ maps events to URLs (JSON file path). Events: `push` (new tip seen), `ci_finishe
 failures logged not queued. `// ponytail: fire-and-forget; add a delivery table if a
 consumer ever needs replay`.
 
+## Bugs (error tracking)
+
+nashcode is the error tracker. Full contract: `goals/error-tracking/goal.md` (settled
+decisions — flag what the code disproves, do not relitigate) and
+`goals/error-tracking/ingester.md` (phase 3, the public ingester). This section binds the
+viewer-side surface; the goal doc binds protocol, grouping, and notification semantics.
+
+- **Projects and DSNs.** Projects live in SQLite, created in the UI. DSN =
+  `https://<32-hex-key>@<host>/<numeric-id>`; host from `NASHCODE_BUGS_INGEST_URL`. A
+  project page shows the DSN and an SDK snippet, and may declare a nashcode repo for
+  cross-links.
+- **Ingest.** One route, `POST /api/<project_id>/envelope/`. Auth from `X-Sentry-Auth`,
+  `?sentry_key=`, or the envelope `dsn` header; 403 on key mismatch, 404 on unknown
+  project, 429 over quota. Decompress gzip/deflate/br with streaming caps (1 MiB per
+  item, 20 MiB compressed, 100 MiB decompressed → 413). Raw bytes to the bucket first,
+  digest queued, `200 {"id":"..."}` immediately. Unknown item types are counted and
+  skipped, never 400. Every 200 carries the `X-Sentry-Rate-Limits` suppression header
+  and full browser CORS per the goal doc.
+- **Storage split.** `NASHCODE_BUGS_BUCKET=s3://name` (+ optional `S3_ENDPOINT`, AWS env
+  credentials only) holds raw payloads; SQLite holds only the index. Unset bucket = the
+  feature is off: one startup line, 404 on `/bugs` and ingest routes.
+  `nashcode bugs reindex` rebuilds the index from the bucket.
+- **Digest.** Single writer: parse, group (`nashcode-v1`: explicit fingerprint wins,
+  else last exception type + parameterized value; synthetic → crash function; native →
+  debug_id + relative addr), index, alert, one transaction. Issues: unresolved /
+  resolved / muted; any event on a resolved issue reopens it as a regression.
+- **Pushover.** `NASHCODE_PUSHOVER_TOKEN` + `NASHCODE_PUSHOVER_USER`. State changes
+  only — new issue, regression, unmute, cron incident, recovery — never per event.
+  SQLite outbound queue, single sender, retry/park rules and the ~20/hour cap per the
+  goal doc.
+- **UI.** `/bugs` project list; `/bugs/:project` issues by state; issue detail with
+  resolve/mute (Tailscale headers stamp the actor); later `/logs` and `/crons`. Same
+  accept-header JSON convention as the rest of the viewer. Bugs summary joins `/brain`.
+- **Phasing.** 1: core loop (projects, ingest, digest, grouping, issues UI, Pushover on
+  new/regression, dogfood nashcode's own errors). 2: logs, crons, quotas, retention,
+  mutes, escalation. 3: public ingester per `ingester.md`. Acceptance = the 20 facts in
+  the goal doc.
+
 ## Inspiration
 
 Forgejo is the reference for what a small forge should surface — branch/commit lists that
