@@ -37,7 +37,6 @@ This file is for agents that are *building* it.
 | Area | Agent | Status |
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
-| `cli/**` (src, tests, Cargo.toml), `AGENTS.md` (CLI sections), `cli/NOTES.md` (new) | agcli-migration session | clap → agcli surface rewrite per cli/CLI-SPEC.md "Agent envelope"; agcli 0.15.0 is published and pinned; grep keeps raw rg stdout, brain keeps exit-0 |
 | `viewer/src/bugs/**`, `viewer/src/web/bugs.rs`, `viewer/tests/bugs.rs`, `viewer/tests/bugs_logs.rs` | error-tracking session, slice-2 review fixes | the peer-review blockers on the NDJSON door and the digest queue, plus the should-fixes. `viewer/src/web.rs` NOT touched this time |
 | `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
 
@@ -318,3 +317,36 @@ One trap, in case it costs you an afternoon: **a freshly downloaded, unsigned ce
 binary hangs for about five minutes on its first run on macOS 26.** It sits in
 `_dyld_start` with no output and no CPU. That is Gatekeeper, not celld. Wait it out once
 and every later run is instant.
+
+**To everyone, from the agcli-migration session (2026-08-19): the CLI is agcli now.
+`cli/**` is released.**
+
+`de88209` is the commit that matters. It lands the whole surface — `cli.rs`, `main.rs`,
+`output.rs`, every command body, every test file — in one piece.
+
+I have to own a mistake first. `70641a9` swapped clap out of `cli/Cargo.toml` before the
+surface that used clap was gone, so for a while `cargo build --workspace` failed for
+everybody. Sorry. `de88209` fixes it, and the lesson generalises: a dependency swap and
+the code that uses the dependency are one commit, never two.
+
+What changed that you might trip over:
+
+- **Every `nashcode` command answers with one JSON envelope on stdout**, always, and a
+  typed exit code: 2 usage, 3 not found, 4 auth, 5 upstream, 1 anything else. Errors
+  carry a runnable `fix`. If a script of yours parsed the old human text, it now parses
+  `.result`; `--json` is still accepted and still ignored, so nothing that already passed
+  it breaks.
+- **`nashcode grep` is untouched.** Same rg flags, same `path:line:content`, same exit
+  codes, same 45 tests. It runs through agcli's raw passthrough, which hands it the argv
+  verbatim — including the `--` clap used to eat.
+- **`nashcode brain` still exits 0 on every path**, including a dead viewer, so the
+  SessionStart hook is safe. A dead viewer is now `result.status: "unavailable"` inside
+  an `ok: true` envelope rather than `ok: false`. The hook needed no change.
+- **Nothing prompts any more.** dialoguer is gone. `setup` with a missing answer is a
+  usage error naming the flag; `rm` needs `--yes`.
+
+The gaps agcli still has, and the decisions the spec left open, are in `cli/NOTES.md`.
+The one real regression is there too: `nashcode --profile x doctor` is rejected, because
+agcli's built-in `doctor` hardcodes its own usage string and no downstream flag can be
+declared on it. `doctor` checks the active profile until agcli grows a way to say
+otherwise.
