@@ -47,6 +47,12 @@ use crate::git::{Auth, Repo, clone_mirror};
 /// Where the manifest lives, in the repo, at the default-branch tip.
 pub const MANIFEST_PATH: &str = ".nashcode/stack.toml";
 
+/// The one dep name the routes cannot spell: `POST /{repo}/stack/sync` is a static
+/// route, so `/{repo}/stack/sync` can never be a dep's page. A manifest using the name
+/// would get a link on the column page that no page answers. Refusing the name where
+/// the manifest is read says so at the source instead.
+pub const RESERVED_DEP_NAME: &str = "sync";
+
 /// How often a `track` dep goes back to the wire, and how long a dep whose commit is
 /// still missing waits before trying again. Upstreams are somebody else's repo: half an
 /// hour is fresh enough to notice drift and slow enough to be a good neighbour.
@@ -183,6 +189,12 @@ fn validate(
         return Some(format!(
             "name {:?} is not a plain name: no separators, no traversal, no leading dash",
             dep.name
+        ));
+    }
+    if dep.name == RESERVED_DEP_NAME {
+        return Some(format!(
+            "name {RESERVED_DEP_NAME:?} is reserved: /{{repo}}/stack/{RESERVED_DEP_NAME} \
+             is the sync route, so a dep by that name would have no page"
         ));
     }
     if duplicate {
@@ -458,15 +470,6 @@ impl Browse {
     pub fn mirror(&self) -> Repo {
         upstream_repo(&self.path)
     }
-
-    /// Is this commit already in the mirror?
-    ///
-    /// The only question `?rev=` ever asks. A revision the mirror does not have is a
-    /// 404: browsing is a read of what has been mirrored, and a page load must never be
-    /// a reason to go and get more.
-    pub async fn has(&self, rev: &str) -> bool {
-        has_commit(&self.path, rev).await
-    }
 }
 
 // ---- the mirror pool -------------------------------------------------------------
@@ -489,6 +492,10 @@ pub struct Upstreams {
     /// [`SYNC_DEBOUNCE`] in milliseconds, shared by every clone of the handle. A knob
     /// rather than a constant only so a test can stand on both sides of it.
     sync_debounce: Arc<AtomicU64>,
+    /// [`TRACK_INTERVAL`] in milliseconds, the same way. A test that has to prove a page
+    /// did *not* fetch needs the interval out of the way first, or the assertion passes
+    /// for the wrong reason.
+    track_interval: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for Upstreams {
@@ -504,6 +511,7 @@ impl Upstreams {
             state: Arc::new(Mutex::new(HashMap::new())),
             locks: Arc::new(Mutex::new(HashMap::new())),
             sync_debounce: Arc::new(AtomicU64::new(SYNC_DEBOUNCE.as_millis() as u64)),
+            track_interval: Arc::new(AtomicU64::new(TRACK_INTERVAL.as_millis() as u64)),
         }
     }
 
@@ -515,6 +523,21 @@ impl Upstreams {
     /// Move the sync rate limit, on every clone of this handle at once.
     pub fn set_sync_debounce(&self, window: Duration) {
         self.sync_debounce.store(window.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// How long a dep waits after an attempt before it is worth another one.
+    pub fn track_interval(&self) -> Duration {
+        Duration::from_millis(self.track_interval.load(Ordering::Relaxed))
+    }
+
+    /// Move the refresh interval, on every clone of this handle at once. Zero means
+    /// every read that is allowed to refresh does: the setting a test wants when the
+    /// claim under test is "this page did not go to the wire".
+    ///
+    /// [`watch`](Self::watch)'s own clock keeps the constant — a ticker cannot have a
+    /// zero period — so this moves the "is it due" question only.
+    pub fn set_track_interval(&self, window: Duration) {
+        self.track_interval.store(window.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// The manifest a repo declares at its default-branch tip.
@@ -728,7 +751,7 @@ impl Upstreams {
             return false;
         }
         let state = self.state.lock().await.get(&location.path).cloned().unwrap_or_default();
-        state.last_attempt.is_none_or(|at| at.elapsed() >= TRACK_INTERVAL)
+        state.last_attempt.is_none_or(|at| at.elapsed() >= self.track_interval())
     }
 
     async fn lock_for(&self, path: &Path) -> Arc<Mutex<()>> {
@@ -1020,6 +1043,21 @@ track = "main""#, "credentials"),
             assert!(error.contains(expected), "{body}\ngave {error:?}, wanted {expected:?}");
             assert_eq!(dep.location, None, "{body} kept a mirror path");
         }
+    }
+
+    #[test]
+    fn the_one_name_a_route_already_owns_is_refused() {
+        // `POST /{repo}/stack/sync` is a static route, so a dep called `sync` would get
+        // a link on the column page that lands on no page at all. The name is refused
+        // where the manifest is read rather than left to surprise somebody.
+        let manifest = parse(
+            Path::new(MIRRORS),
+            "[[dep]]\nname = \"sync\"\nurl = \"https://h/a\"\ntrack = \"main\"\n",
+        );
+        let dep = &manifest.deps[0];
+        assert!(dep.error.as_deref().unwrap_or_default().contains("reserved"), "{dep:?}");
+        assert_eq!(dep.location, None);
+        assert_eq!(dep.mode, None);
     }
 
     #[test]
