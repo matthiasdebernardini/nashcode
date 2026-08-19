@@ -37,6 +37,7 @@ This file is for agents that are *building* it.
 | Area | Agent | Status |
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
+| `cli/src/commands/plan.rs`, `cli/src/vcs.rs`, `cli/tests/annotate_cli.rs` (new), `cli/CLI-SPEC.md`, `AGENTS.md` | annotate-posts-feedback | peer-review fixes: jj branch detection, exit-code and path contracts |
 
 ## Who has been doing what
 
