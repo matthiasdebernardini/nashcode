@@ -40,6 +40,10 @@ time = { version = "0.3.55", features = ["formatting", "parsing", "macros"] }
 serde_yaml_bw = "2.5.7"
 serde_urlencoded = "0.7"
 tempfile = "3"
+# `.nashcode/stack.toml` and the clone URLs it declares. Both were already in the
+# tree as transitive dependencies, so naming them here costs no extra build.
+toml = "1"
+url = "2"
 
 # Code intelligence. tree-sitter and its grammars are plain C and cross-compile
 # with the rest of the tree; `scip` reads the accurate overlay the language

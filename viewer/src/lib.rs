@@ -16,4 +16,5 @@ pub mod ops;
 pub mod render;
 pub mod stack;
 pub mod traces;
+pub mod upstream;
 pub mod web;
