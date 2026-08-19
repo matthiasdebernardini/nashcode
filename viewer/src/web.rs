@@ -9,6 +9,7 @@ pub mod architecture;
 pub mod bugs;
 pub mod components;
 pub mod pages;
+pub mod stack;
 pub mod traces;
 
 use std::sync::Arc;
@@ -28,6 +29,7 @@ use crate::db::Db;
 use crate::docs::DocIndexCache;
 use crate::mirror::{MirrorStatus, Mirrors};
 use crate::ops::{Actor, Ops};
+use crate::upstream::Upstreams;
 
 /// Everything a handler needs, registered once as Topcoat app context.
 #[derive(Clone)]
@@ -35,6 +37,9 @@ pub struct App {
     pub config: Arc<Config>,
     pub db: Db,
     pub mirrors: Mirrors,
+    /// Read-only mirrors of the upstream code repos declare in `.nashcode/stack.toml`.
+    /// Never a repo: nothing routes to one, nothing writes to one.
+    pub upstreams: Upstreams,
     pub docs: DocIndexCache,
     pub ci: CiQueue,
     pub ops: Ops,

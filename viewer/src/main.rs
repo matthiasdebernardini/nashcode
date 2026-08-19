@@ -11,6 +11,7 @@ use nashcode::docs::DocIndexCache;
 use nashcode::hooks::Webhooks;
 use nashcode::mirror::{Mirrors, NewTip, TipObserver};
 use nashcode::ops::Ops;
+use nashcode::upstream::Upstreams;
 use nashcode::bugs::Bugs;
 use nashcode::{brain, hooks, web};
 
@@ -140,6 +141,11 @@ async fn serve() {
         });
     }
 
+    // The upstream column has a clock of its own: a `track` dep moves in a repo nobody
+    // here pushes to, so no tip observer and no page load would ever notice.
+    let upstreams = Upstreams::new(config.clone());
+    tokio::spawn(upstreams.clone().watch());
+
     let bugs = match Bugs::new(&config, db.clone()) {
         Ok(bugs) => bugs,
         Err(error) => {
@@ -217,7 +223,8 @@ async fn serve() {
         mirrors,
         docs: DocIndexCache::new(),
         ci: ci_queue,
-        brain: brain::Brain::new(),
+        brain: brain::Brain::new(upstreams.clone()),
+        upstreams,
         bugs,
         embeddings,
     };

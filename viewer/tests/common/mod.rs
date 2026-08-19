@@ -19,6 +19,7 @@ use nashcode::docs::DocIndexCache;
 use nashcode::hooks::Webhooks;
 use nashcode::mirror::Mirrors;
 use nashcode::ops::{Actor, Ops};
+use nashcode::upstream::Upstreams;
 use nashcode::web::{self, App};
 use topcoat::router::{Body, Method, Router, request::Request, to_bytes};
 
@@ -151,6 +152,7 @@ pub struct TestBed {
     pub bugs: Bugs,
     pub embeddings: Embeddings,
     pub indexer: Indexer,
+    pub upstreams: Upstreams,
 }
 
 impl TestBed {
@@ -269,19 +271,21 @@ fn testbed_build(root: tempfile::TempDir, config: Arc<Config>, observe: bool) ->
         embeddings: embeddings.clone(),
     };
     let bugs = Bugs::new(&config, db.clone()).expect("the bugs schema applies");
+    let upstreams = Upstreams::new(config.clone());
     let app = App {
         config: config.clone(),
         db: db.clone(),
         mirrors: mirrors.clone(),
+        upstreams: upstreams.clone(),
         docs: DocIndexCache::new(),
         ci,
         ops,
-        brain: Brain::new(),
+        brain: Brain::new(upstreams.clone()),
         bugs: bugs.clone(),
         embeddings: embeddings.clone(),
     };
     let router = web::router(app.clone());
-    TestBed { root, config, db, mirrors, app, router, bugs, embeddings, indexer }
+    TestBed { root, config, db, mirrors, app, router, bugs, embeddings, indexer, upstreams }
 }
 
 /// A deterministic stand-in for the real encoder.
@@ -571,4 +575,88 @@ pub async fn spawn_stub(status_line: &'static str, response_body: String) -> Stu
 
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+/// A read-only static file server over one directory, counting what it was asked for.
+///
+/// This is enough HTTP for git's dumb protocol, which is all an upstream mirror needs:
+/// after `git update-server-info` a bare repo is a directory of files, and `git clone
+/// --mirror http://...` asks for `info/refs`, `HEAD`, and objects. Nothing here has to
+/// be smart, and nothing here needs the network — it binds loopback on a port the
+/// kernel picks.
+///
+/// The counter is the point of the whole thing: it is how a test proves that a pinned
+/// dependency already on disk stopped asking.
+pub struct FileServer {
+    pub url: String,
+    requests: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FileServer {
+    /// How many requests have been served since the listener came up.
+    pub fn requests(&self) -> usize {
+        self.requests.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Serve `root` over HTTP on 127.0.0.1, on a port the kernel picks.
+pub async fn serve_dir(root: PathBuf) -> FileServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = requests.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else { break };
+            let root = root.clone();
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if find_headers_end(&buf).is_some() {
+                        break;
+                    }
+                }
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                let mut parts = head.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_owned();
+                let target = parts.next().unwrap_or_default().to_owned();
+                let reply = static_reply(&root, &method, &target);
+                let _ = socket.write_all(&reply).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    FileServer { url: format!("http://{addr}"), requests }
+}
+
+/// One response: the file, or a 404. A target that is not a plain relative path is a
+/// 404 too — this server sits in a test, but it still does not serve `/etc/passwd`.
+fn static_reply(root: &Path, method: &str, target: &str) -> Vec<u8> {
+    let path = target.split(['?', '#']).next().unwrap_or_default().trim_start_matches('/');
+    let plain = !path.is_empty()
+        && path.split('/').all(|segment| !segment.is_empty() && segment != "." && segment != "..");
+    let body = if plain { std::fs::read(root.join(path)).ok() } else { None };
+
+    let (status, body) = match body {
+        Some(body) => ("200 OK", body),
+        None => ("404 Not Found", Vec::new()),
+    };
+    let mut reply = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    if method != "HEAD" {
+        reply.extend_from_slice(&body);
+    }
+    reply
 }

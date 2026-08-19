@@ -12,12 +12,16 @@ use crate::db::Db;
 use crate::docs::DocIndexCache;
 use crate::mirror::Mirrors;
 use crate::stack::StackGraph;
+use crate::upstream::Upstreams;
 
 /// Builds the deterministic aggregate, caching the git-derived part of each repo
 /// against its branch tips. SQLite-derived activity is cheap and always fresh.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Brain {
     git_cache: Arc<Mutex<HashMap<String, (String, serde_json::Value)>>>,
+    /// The upstream column. Held on the brain rather than passed to `aggregate`,
+    /// because `aggregate`'s signature is shared with a route this work does not own.
+    upstreams: Upstreams,
 }
 
 impl std::fmt::Debug for Brain {
@@ -27,8 +31,8 @@ impl std::fmt::Debug for Brain {
 }
 
 impl Brain {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(upstreams: Upstreams) -> Self {
+        Self { git_cache: Arc::new(Mutex::new(HashMap::new())), upstreams }
     }
 
     /// The `/brain` JSON. No model in the loop; every field is derived from the
@@ -128,6 +132,16 @@ impl Brain {
             }
             // How much the repo is queryable as code, and how old that answer is.
             object.insert("code".to_owned(), crate::code::brain_stanza(db, name));
+            // The upstream column, for a repo that declares one. Outside the tip cache
+            // above on purpose: a `track` dep moves without any branch of ours moving,
+            // and a mirror that failed to fetch has to be able to say so today. The
+            // key is absent for a repo with no manifest, the way `architecture` is
+            // absent for a repo nobody has drawn.
+            if let Some(stack) = self.upstreams.stack(&repo).await
+                && let Ok(stack) = serde_json::to_value(&stack)
+            {
+                object.insert("stack".to_owned(), stack);
+            }
         }
         value
     }
