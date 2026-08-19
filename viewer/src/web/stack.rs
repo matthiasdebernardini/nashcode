@@ -8,12 +8,14 @@
 //!
 //! Three rules shape the browsing surfaces:
 //!
-//! **Nothing here fetches.** A page renders the commit that is on disk, or says the
-//! mirror does not have it yet. `?rev=` narrows to a commit the mirror already has; one
-//! it does not have is a 404, never a reason to go to the wire. The background clock
-//! refreshes tracked deps every half hour and the brain stanza starts anything overdue
-//! behind the caller's back; `POST /{repo}/stack/sync` is the third door, the one an
-//! agent knocks on when half an hour is too long to wait, and the only one that waits.
+//! **The browse surfaces never fetch.** A dep's tree and blobs render the commit that
+//! is on disk, or say the mirror does not have it yet. `?rev=` narrows to a commit the
+//! mirror already has; one it does not have is a 404, never a reason to go to the wire.
+//! The column page is the one exception, and only in the background: like the brain
+//! stanza, `GET /{repo}/stack` starts whatever is overdue behind the caller's back and
+//! waits for none of it. The background clock refreshes tracked deps every half hour,
+//! and `POST /{repo}/stack/sync` is the third door — the one an agent knocks on when
+//! half an hour is too long to wait, and the only one that waits for the wire.
 //!
 //! **A dep is browsable under the repo that declared it, and nowhere else.** `{dep}` is
 //! a manifest name looked up in that repo's own manifest. A name no manifest carries is
@@ -76,8 +78,9 @@ struct Card {
     name: String,
     layer: Option<String>,
     url: String,
-    /// `pin`, `track`, or the dash a dep that declared neither gets.
-    mode: String,
+    /// `pin` or `track`. `None` for a declaration that was refused: validation strips
+    /// the mode off one, which is also how this page tells "refused" from "stale".
+    mode: Option<&'static str>,
     want: Option<String>,
     commit: Option<String>,
     fresh: bool,
@@ -125,7 +128,7 @@ async fn stack_page(cx: &Cx) -> Result {
                     name: dep.name,
                     layer: dep.layer,
                     url: dep.url,
-                    mode: dep.mode.unwrap_or("—").to_owned(),
+                    mode: dep.mode,
                     want: dep.want,
                     commit: dep.have,
                     fresh: dep.fresh,
@@ -188,13 +191,20 @@ async fn stack_page(cx: &Cx) -> Result {
                         if let Some(layer) = &card.layer {
                             <span class="Label">(layer.clone())</span>
                         }
-                        <span class="Label Label--secondary">(card.mode.clone())</span>
+                        if let Some(mode) = card.mode {
+                            <span class="Label Label--secondary">(mode)</span>
+                        }
                         if let Some(want) = &card.want {
                             <code class="text-small">(want.clone())</code>
                         }
                         <span class="ml-auto d-flex flex-items-center gap-2 text-small">
                             if card.fresh {
                                 <span class="color-fg-success"><i class="ph ph-check-circle"></i>" fresh"</span>
+                            } else if card.mode.is_none() {
+                                // Nothing was ever fetched for this one and nothing ever
+                                // will be: the declaration itself was refused, which is
+                                // not the same as a mirror that is behind.
+                                <span class="color-fg-danger"><i class="ph ph-x-circle"></i>" refused"</span>
                             } else {
                                 <span class="color-fg-attention"><i class="ph ph-warning"></i>" stale"</span>
                             }
@@ -259,14 +269,20 @@ async fn open(cx: &Cx, name: &str, dep_name: &str) -> Result<Option<Open>> {
     let asked = query_params::<RevQuery>(cx)?.rev.clone().filter(|rev| !rev.is_empty());
     let (commit, query) = match asked {
         Some(rev) => {
-            // The pin grammar, before the string is anywhere near an argv, and then the
-            // mirror's own answer. A rev that is not there is a 404, never a fetch.
-            if !upstream::is_commit_id(&rev) || !dep.has(&rev).await {
+            // The pin grammar first, before the string is anywhere near an argv. Then
+            // one question for the mirror: `rev-parse --verify <rev>^{commit}` both
+            // asks whether the commit is on disk and answers with its full id, since
+            // peeling to `^{commit}` has to read the object to do it. A rev the mirror
+            // does not have fails here, and failing here is a 404 — never a fetch.
+            if !upstream::is_commit_id(&rev) {
                 return Err(topcoat::router::error::not_found().into());
             }
             let Ok(full) = mirror.rev_parse(&format!("{rev}^{{commit}}")).await else {
                 return Err(topcoat::router::error::not_found().into());
             };
+            if full.is_empty() {
+                return Err(topcoat::router::error::not_found().into());
+            }
             let query = format!("?rev={}", render::encode_path(&full));
             (full, query)
         }
@@ -615,6 +631,11 @@ pub(super) async fn submodule_links(
 /// git's config grammar, cut to the shape this file always has: a `[submodule "name"]`
 /// header starts an entry, `path` and `url` fill it in. Anything else is skipped rather
 /// than guessed at — a submodule this cannot read simply keeps the inert label.
+///
+/// Where this diverges from git's own quoting and comment rules it fails closed, by
+/// construction: the worst a misread line can do is yield a value that is not the URL,
+/// which then fails [`upstream::locate`] or matches no dep, and the gitlink stays the
+/// label it already was. Nothing here can invent a link to the wrong upstream.
 fn gitmodules(text: &str) -> HashMap<String, String> {
     let mut found = HashMap::new();
     let mut path: Option<String> = None;
