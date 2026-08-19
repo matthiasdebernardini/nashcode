@@ -10,6 +10,7 @@
 
 import assert from "node:assert/strict";
 import { before, describe, it } from "node:test";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { gzipSync, brotliCompressSync } from "node:zlib";
 import { join } from "node:path";
@@ -18,6 +19,32 @@ const BASE = process.env.INGESTER_URL;
 const TOKEN = process.env.INGESTER_DRAIN_TOKEN;
 const FIXTURES = process.env.INGESTER_FIXTURES;
 assert.ok(BASE && TOKEN && FIXTURES, "run this through ingester/test.sh");
+
+/// Only the registry-outage test needs these: the container to stop, and a
+/// second node that has never read the registry.
+const MINIO = process.env.INGESTER_MINIO;
+const MINIO_PORT = process.env.INGESTER_MINIO_PORT;
+const COLD = process.env.INGESTER_COLD_URL;
+
+const docker = (...args) => execFileSync("docker", args, { stdio: "ignore" });
+
+/// Everything in the outage test gets a deadline. With the bucket gone, a path
+/// that should answer in milliseconds and instead waits on storage is a finding,
+/// not something to sit through.
+const soon = () => AbortSignal.timeout(15_000);
+
+async function waitForMinio() {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    try {
+      const answer = await fetch(`http://127.0.0.1:${MINIO_PORT}/minio/health/live`);
+      if (answer.ok) return;
+    } catch {
+      // still coming up
+    }
+    await new Promise((done) => setTimeout(done, 500));
+  }
+  assert.fail("MinIO never came back");
+}
 
 const KEY = "0123456789abcdef0123456789abcdef";
 const OTHER_KEY = "fedcba9876543210fedcba9876543210";
@@ -31,6 +58,9 @@ const P = {
   caps: "6",
   dsn: "7",
   revoked: "8",
+  exact: "9",
+  forwarded: "10",
+  inactive: "11",
 };
 const UNKNOWN = "999";
 
@@ -314,7 +344,8 @@ describe("drain, ack, and redelivery", () => {
       assert.equal((await post(P.drain, fixture(name), { key: KEY })).status, 200);
     }
 
-    const first = await drainRows(P.drain);
+    const firstText = await drainText(P.drain);
+    const first = ndjson(firstText);
     assert.equal(first.length, 3);
     assert.deepEqual(
       first.map((row) => row.seq),
@@ -325,9 +356,10 @@ describe("drain, ack, and redelivery", () => {
       fixture("python-exception.envelope").toString(),
     );
 
-    // Draining twice without an ack creates nothing and loses nothing.
-    const again = await drainRows(P.drain);
-    assert.deepEqual(again, first);
+    // Draining twice without an ack creates nothing and loses nothing. Compared
+    // byte for byte, not as parsed objects: a drainer reads the bytes, and two
+    // answers that parse alike could still differ in ways it would notice.
+    assert.equal(await drainText(P.drain), firstText);
 
     const acked = await (
       await control(`/ack/${P.drain}`, { method: "POST", body: JSON.stringify({ up_to: 2 }) })
@@ -359,11 +391,49 @@ describe("drain, ack, and redelivery", () => {
     assert.ok(rows[0].seq > 3, `seq went backwards to ${rows[0].seq}`);
   });
 
-  it("honours max_bytes but always returns at least one row", async () => {
+  it("honours max_bytes, always returns one row, and counts what is left", async () => {
+    for (const name of ["custom-fingerprint.envelope", "log-message.envelope"]) {
+      assert.equal((await post(P.drain, fixture(name), { key: KEY })).status, 200);
+    }
+    const total = (await stats(P.drain)).rows;
+    assert.equal(total, 3);
+
     const answer = await control(`/drain/${P.drain}?after=0&max_bytes=1`);
     const rows = ndjson(await answer.text());
     assert.equal(rows.length, 1);
     assert.equal(answer.headers.get("x-ingest-last-seq"), String(rows[0].seq));
+    assert.equal(answer.headers.get("x-ingest-remaining"), String(total - 1));
+
+    // Walk the cursor to the end the way a drainer does, and the count runs out
+    // exactly when the rows do.
+    const next = await control(`/drain/${P.drain}?after=${rows[0].seq}`);
+    assert.equal(next.headers.get("x-ingest-remaining"), "0");
+    assert.equal(ndjson(await next.text()).length, total - 1);
+  });
+
+  it("refuses a cursor it cannot read rather than replaying from the start", async () => {
+    for (const query of ["after=abc", "after=-1", "after=1.5"]) {
+      const answer = await control(`/drain/${P.drain}?${query}`);
+      assert.equal(answer.status, 400, query);
+      assert.match((await answer.json()).detail, /after must be/);
+    }
+  });
+
+  it("refuses max_bytes=0 rather than silently using the default", async () => {
+    for (const query of ["max_bytes=0", "max_bytes=nope"]) {
+      const answer = await control(`/drain/${P.drain}?${query}`);
+      assert.equal(answer.status, 400, query);
+      assert.match((await answer.json()).detail, /max_bytes must be/);
+    }
+  });
+
+  it("refuses an up_to that is not already a number", async () => {
+    const before = (await stats(P.drain)).rows;
+    for (const upTo of ['"5"', "true", "null", "1.5", "-1"]) {
+      const answer = await control(`/ack/${P.drain}`, { method: "POST", body: `{"up_to":${upTo}}` });
+      assert.equal(answer.status, 400, upTo);
+    }
+    assert.equal((await stats(P.drain)).rows, before, "a refused ack deleted rows");
   });
 });
 
@@ -403,6 +473,90 @@ describe("the registry", () => {
     // The bad PUT replaced nothing.
     assert.ok((await (await control("/registry")).json()).projects.length > 1);
   });
+
+  it("treats active:false as gone, not as present with the wrong key", async () => {
+    assert.equal((await post(P.inactive, envelopeWithDsn(null), { key: KEY })).status, 200);
+
+    await replaceRegistry((entry) =>
+      entry.project_id === P.inactive ? { ...entry, active: false } : entry,
+    );
+    const answer = await post(P.inactive, envelopeWithDsn(null), { key: KEY });
+    assert.equal(answer.status, 404);
+    assert.equal((await answer.json()).detail, "unknown project");
+
+    await replaceRegistry((entry) =>
+      entry.project_id === P.inactive ? { ...entry, active: true } : entry,
+    );
+    assert.equal((await post(P.inactive, envelopeWithDsn(null), { key: KEY })).status, 200);
+  });
+
+  it("refuses to empty the whole fleet by accident", async () => {
+    const answer = await control("/registry", {
+      method: "PUT",
+      body: JSON.stringify({ projects: [] }),
+    });
+    assert.equal(answer.status, 400);
+    assert.match((await answer.json()).detail, /allow_empty/);
+    assert.ok((await (await control("/registry")).json()).projects.length > 1);
+  });
+});
+
+describe("the size cap has an exact edge", () => {
+  const head = Buffer.from(
+    '{"event_id":"dddddddddddddddddddddddddddddddd"}\n{"type":"event","length":1}\n',
+  );
+  const sized = (total) => Buffer.concat([head, Buffer.alloc(total - head.length, 0x20)]);
+
+  it("takes a body of exactly 2 MiB", async () => {
+    const body = sized(2_097_152);
+    assert.equal(body.byteLength, 2_097_152);
+    const answer = await post(P.exact, body, { key: KEY });
+    assert.equal(answer.status, 200);
+    assert.deepEqual(await answer.json(), { id: "dddddddddddddddddddddddddddddddd" });
+    assert.equal((await stats(P.exact)).bytes, 2_097_152);
+  });
+
+  it("refuses a body one byte over", async () => {
+    const answer = await post(P.exact, sized(2_097_153), { key: KEY });
+    assert.equal(answer.status, 413);
+    assert.equal((await stats(P.exact)).rows, 1);
+  });
+});
+
+describe("the client address", () => {
+  const send = (forwarded) =>
+    post(P.forwarded, envelopeWithDsn(null), {
+      key: KEY,
+      headers: { "x-forwarded-for": forwarded },
+    });
+
+  it("takes the entry the proxy appended, never the one the client chose", async () => {
+    // caddy appends the peer it actually saw, so the last entry is the only one
+    // worth believing. The first is whatever the sender felt like typing.
+    assert.equal((await send("<script>alert(1)</script>, 203.0.113.9")).status, 200);
+    assert.equal((await send("198.51.100.1, 203.0.113.10")).status, 200);
+    assert.equal((await send("2001:db8::1")).status, 200);
+    assert.equal((await send("not-an-address")).status, 200);
+    assert.equal((await send("'; DROP TABLE envelopes; --")).status, 200);
+
+    const stored = (await drainRows(P.forwarded)).map((row) => row.remote_ip);
+    assert.deepEqual(stored, ["203.0.113.9", "203.0.113.10", "2001:db8::1", null, null]);
+  });
+});
+
+describe("odd paths", () => {
+  it("collapses a doubled slash instead of leaving two matchers to disagree", async () => {
+    const answer = await fetch(`${BASE}//api/${P.envelope}/envelope/?sentry_key=${KEY}`, {
+      method: "POST",
+      body: envelopeWithDsn(null),
+    });
+    assert.equal(answer.status, 200);
+
+    const hidden = await fetch(`${BASE}//_nashcode/registry`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    assert.equal(hidden.status, 200);
+  });
 });
 
 describe("the control plane is invisible without the bearer token", () => {
@@ -437,7 +591,94 @@ describe("the control plane is invisible without the bearer token", () => {
   });
 });
 
+// The bucket goes away in here, so it runs last. Everything above it assumes a
+// healthy fleet.
+describe("a registry it cannot read", () => {
+  it("serves the last good set, and answers 503 where it has none", async (t) => {
+    if (!MINIO || !COLD) {
+      t.skip("run this through ingester/test.sh: it needs the container name and the cold node");
+      return;
+    }
+
+    // Idle long enough for celld to evict the cells, so the next read of the
+    // registry has to come off the bucket rather than out of memory.
+    await new Promise((done) => setTimeout(done, 2500));
+    docker("stop", MINIO);
+    try {
+      // A warm isolate holds a registry it read successfully. Losing the bucket
+      // must not turn that into an empty set: the project is still known, so a
+      // bad key is still 403. Answering 404 here is the bug this guards — SDKs
+      // read 4xx as permanent and destroy the event rather than retrying it.
+      const wrongKey = await fetch(`${BASE}/api/${P.envelope}/envelope/?sentry_key=${OTHER_KEY}`, {
+        method: "POST",
+        body: envelopeWithDsn(null),
+        signal: soon(),
+      });
+      assert.equal(wrongKey.status, 403);
+      assert.equal((await wrongKey.json()).detail, "wrong key for this project");
+
+      // A project that was never in the set is still not in it.
+      const unknown = await fetch(`${BASE}/api/${UNKNOWN}/envelope/?sentry_key=${KEY}`, {
+        method: "POST",
+        body: envelopeWithDsn(null),
+        signal: soon(),
+      });
+      assert.equal(unknown.status, 404);
+
+      // The cold node has never read the registry at all. With nothing good to
+      // fall back on, the only honest answer is "try again later".
+      const cold = await fetch(`${COLD}/api/${P.envelope}/envelope/?sentry_key=${KEY}`, {
+        method: "POST",
+        body: envelopeWithDsn(null),
+        signal: soon(),
+      });
+      assert.equal(cold.status, 503);
+      assert.equal((await cold.json()).detail, "the project registry is unavailable");
+      assert.ok(Number(cold.headers.get("retry-after")) > 0);
+      // A browser has to be able to read a 503 too, or a browser SDK sees only
+      // an opaque network error and cannot back off.
+      assert.equal(cold.headers.get("access-control-allow-origin"), "*");
+    } finally {
+      docker("start", MINIO);
+      await waitForMinio();
+    }
+
+    // And it comes back on its own.
+    const recovered = await post(P.envelope, envelopeWithDsn(null), { key: KEY });
+    assert.equal(recovered.status, 200);
+  });
+});
+
+describe("emptying the registry on purpose", () => {
+  it("takes ?allow_empty=1, and then nobody is known", async () => {
+    const answer = await control("/registry?allow_empty=1", {
+      method: "PUT",
+      body: JSON.stringify({ projects: [] }),
+    });
+    assert.equal(answer.status, 200);
+    assert.deepEqual(await answer.json(), { projects: 0 });
+    await new Promise((done) => setTimeout(done, 400));
+
+    const gone = await post(P.envelope, envelopeWithDsn(null), { key: KEY });
+    assert.equal(gone.status, 404);
+  });
+});
+
 // ---- helpers -----------------------------------------------------------------
+
+/// Read the live set, run every entry through `edit`, and put it back. Building
+/// from the registry rather than from `P` keeps the earlier rotation and
+/// revocation tests intact.
+async function replaceRegistry(edit) {
+  const { projects } = await (await control("/registry")).json();
+  const answer = await control("/registry", {
+    method: "PUT",
+    body: JSON.stringify({ projects: projects.map(edit) }),
+  });
+  assert.equal(answer.status, 200);
+  await new Promise((done) => setTimeout(done, 400));
+  return answer;
+}
 
 function ndjson(text) {
   return text
@@ -446,9 +687,13 @@ function ndjson(text) {
     .map((line) => JSON.parse(line));
 }
 
-async function drainRows(project, after = 0) {
-  const answer = await control(`/drain/${project}?after=${after}&max_bytes=${32 * 1024 * 1024}`);
+async function drainText(project, after = 0) {
+  const answer = await control(`/drain/${project}?after=${after}&max_bytes=${8 * 1024 * 1024}`);
   assert.equal(answer.status, 200);
   assert.equal(answer.headers.get("content-type"), "application/x-ndjson");
-  return ndjson(await answer.text());
+  return answer.text();
+}
+
+async function drainRows(project, after = 0) {
+  return ndjson(await drainText(project, after));
 }

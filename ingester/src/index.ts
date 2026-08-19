@@ -45,27 +45,48 @@ interface Project {
 /// — a known project sending its thousandth envelope — costs no cell hop at all.
 /// A cold isolate pays one. TTL is a var so a test can shorten it; 60 s is the
 /// configured default and the number the design assumes.
+///
+/// It only ever holds a set that was read successfully. A failed refresh leaves
+/// the last good one in place, because the alternative — caching emptiness — is
+/// far worse than serving a stale key: an SDK reads 4xx as permanent and throws
+/// the event away, so one second of registry trouble would silently destroy a
+/// minute of everybody's telemetry.
 let cache: { at: number; projects: Map<string, Project> } | null = null;
 
 const DEFAULT_REGISTRY_TTL_MS = 60_000;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname.startsWith("/_nashcode/")) return control(request, env, url);
-
-    const api = matchApi(url.pathname);
-    if (!api) return sentryError(404, "no such endpoint");
-
-    if (request.method === "OPTIONS") return preflight();
-    if (request.method !== "POST") return sentryError(405, "this endpoint takes POST");
-
-    return api.door === "envelope"
-      ? acceptEnvelope(request, env, url, api.projectId)
-      : acceptLogs(request, env, url, api.projectId);
+    try {
+      return await route(request, env);
+    } catch (error) {
+      // Nothing should reach here. If something does, an SDK must hear
+      // "try again", with the CORS headers a browser needs to read it at all.
+      console.error(`ingest: unhandled failure: ${error}`);
+      return sentryError(502, "the ingester failed to handle the request", { "retry-after": "30" });
+    }
   },
 };
+
+async function route(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  // `//api/1/envelope/` reaches a Worker as-is. It authenticates like any other
+  // request, but it is the shape a caddy path matcher gets wrong, so collapse it
+  // here rather than trust two matchers to agree.
+  const pathname = url.pathname.replace(/\/{2,}/g, "/");
+
+  if (pathname.startsWith("/_nashcode/")) return control(request, env, url, pathname);
+
+  const api = matchApi(pathname);
+  if (!api) return sentryError(404, "no such endpoint");
+
+  if (request.method === "OPTIONS") return preflight();
+  if (request.method !== "POST") return sentryError(405, "this endpoint takes POST");
+
+  return api.door === "envelope"
+    ? acceptEnvelope(request, env, url, api.projectId)
+    : acceptLogs(request, env, url, api.projectId);
+}
 
 // ---- the public doors --------------------------------------------------------
 
@@ -88,8 +109,9 @@ function matchApi(pathname: string): ApiRoute | null {
 }
 
 async function acceptEnvelope(request: Request, env: Env, url: URL, projectId: string): Promise<Response> {
-  const project = await lookup(env, projectId);
-  if (!project) return sentryError(404, "unknown project");
+  const found = await lookup(env, projectId);
+  if (found.status !== "known") return unresolved(found.status);
+  const project = found.project;
 
   const declared = keyFromAuthHeader(request.headers.get("x-sentry-auth")) ?? keyFromQuery(url);
   if (declared && !secretEquals(declared, project.key)) {
@@ -135,8 +157,9 @@ async function acceptEnvelope(request: Request, env: Env, url: URL, projectId: s
 /// whole of it. That is also why the body is never read before the key is
 /// judged.
 async function acceptLogs(request: Request, env: Env, url: URL, projectId: string): Promise<Response> {
-  const project = await lookup(env, projectId);
-  if (!project) return sentryError(404, "unknown project");
+  const found = await lookup(env, projectId);
+  if (found.status !== "known") return unresolved(found.status);
+  const project = found.project;
 
   const declared = keyFromAuthHeader(request.headers.get("x-sentry-auth")) ?? keyFromQuery(url);
   if (!declared) return sentryError(403, "no sentry_key");
@@ -198,13 +221,52 @@ async function buffer(
   return sentryError(502, "cannot buffer the request");
 }
 
-/// Caddy sets `X-Forwarded-For`; celld is not told to trust it, because the only
-/// uses here are the stored row and the log line.
+/// The client address, from the one entry of `X-Forwarded-For` a proxy wrote.
+///
+/// Caddy **appends** the peer it actually saw, so the trustworthy entry is the
+/// last one, not the first. The first is whatever the client sent, and a client
+/// will send anything: an address that is not its own, a hostname, a sentence, a
+/// `<script>` tag. Taking the first put attacker-chosen text in a stored row and
+/// carried it across to nashcode.
+///
+/// It still has to parse as an address, because caddy is only trustworthy when
+/// caddy is what set the header — see the `header_up` line in the README.
 function clientIp(request: Request): string | null {
   const raw = request.headers.get("x-forwarded-for");
   if (!raw) return null;
-  const first = raw.split(",")[0].trim();
-  return first.length > 0 && first.length <= 64 ? first : null;
+  const entries = raw.split(",");
+  const last = entries[entries.length - 1].trim();
+  return isIpAddress(last) ? last : null;
+}
+
+/// IPv4 dotted quad, or IPv6 with an optional `::` run and an optional zone or
+/// embedded IPv4 tail. Deliberately strict: anything unrecognised is dropped
+/// rather than stored.
+function isIpAddress(value: string): boolean {
+  if (value.length === 0 || value.length > 45) return false;
+  if (/^(\d{1,3})(\.\d{1,3}){3}$/.test(value)) {
+    return value.split(".").every((part) => part.length <= 3 && Number(part) <= 255);
+  }
+  const address = value.split("%")[0];
+  if (!/^[0-9a-fA-F:.]+$/.test(address) || !address.includes(":")) return false;
+  const halves = address.split("::");
+  if (halves.length > 2) return false;
+  let groups = 0;
+  for (const half of halves) {
+    if (half.length === 0) continue;
+    for (const part of half.split(":")) {
+      if (part.length === 0) return false;
+      if (part.includes(".")) {
+        if (!isIpAddress(part)) return false;
+        groups += 2;
+      } else if (/^[0-9a-fA-F]{1,4}$/.test(part)) {
+        groups += 1;
+      } else {
+        return false;
+      }
+    }
+  }
+  return halves.length === 2 ? groups <= 7 : groups === 8;
 }
 
 async function detailOf(answer: Response, fallback: string): Promise<string> {
@@ -218,28 +280,54 @@ async function detailOf(answer: Response, fallback: string): Promise<string> {
 
 // ---- the registry cache ------------------------------------------------------
 
-async function lookup(env: Env, projectId: string): Promise<Project | null> {
+type Lookup =
+  | { status: "known"; project: Project }
+  | { status: "unknown" }
+  | { status: "unavailable" };
+
+async function lookup(env: Env, projectId: string): Promise<Lookup> {
   const ttl = Number(env.REGISTRY_TTL_MS ?? "") || DEFAULT_REGISTRY_TTL_MS;
-  if (!cache || Date.now() - cache.at > ttl) cache = { at: Date.now(), projects: await loadRegistry(env) };
+  if (!cache || Date.now() - cache.at > ttl) {
+    try {
+      cache = { at: Date.now(), projects: await loadRegistry(env) };
+    } catch (error) {
+      console.error(`ingest: cannot read the registry: ${error}`);
+      // Serve the last good set rather than an empty one. A stale key outliving
+      // a revocation by a few seconds is a routing identifier working slightly
+      // too long; an empty set is every project on earth being told, in a status
+      // code SDKs never retry, that it does not exist.
+      if (!cache) return { status: "unavailable" };
+      cache = { at: Date.now(), projects: cache.projects };
+    }
+  }
   const project = cache.projects.get(projectId);
-  return project && project.active ? project : null;
+  if (!project) return { status: "unknown" };
+  return project.active ? { status: "known", project } : { status: "unknown" };
 }
 
+/// Read the whole set, or throw. Never return a partial or empty answer for a
+/// failure — the caller cannot tell those apart from a registry that really is
+/// empty, and it has to.
 async function loadRegistry(env: Env): Promise<Map<string, Project>> {
+  const stub = env.REGISTRY.get(env.REGISTRY.idFromName("registry"));
+  const answer = await stub.fetch("https://cell.invalid/registry", { method: "GET" });
+  if (answer.status !== 200) throw new Error(`the registry answered ${answer.status}`);
+  const payload: any = await answer.json();
+  if (!Array.isArray(payload?.projects)) throw new Error("the registry answered without a projects array");
+
   const projects = new Map<string, Project>();
-  try {
-    const stub = env.REGISTRY.get(env.REGISTRY.idFromName("registry"));
-    const answer = await stub.fetch("https://cell.invalid/registry", { method: "GET" });
-    const payload: any = await answer.json();
-    for (const entry of payload?.projects ?? []) {
-      projects.set(String(entry.project_id), { key: String(entry.key), active: entry.active !== false });
-    }
-  } catch (error) {
-    // An unreadable registry authenticates nobody. Failing closed here turns a
-    // storage outage into 404s rather than into an open door.
-    console.error(`ingest: cannot read the registry: ${error}`);
+  for (const entry of payload.projects) {
+    projects.set(String(entry.project_id), { key: String(entry.key), active: entry.active !== false });
   }
   return projects;
+}
+
+/// A project we cannot serve. The difference matters more than it looks: 404 is
+/// permanent and an SDK drops the event, 503 is temporary and it retries.
+function unresolved(status: "unknown" | "unavailable"): Response {
+  return status === "unknown"
+    ? sentryError(404, "unknown project")
+    : sentryError(503, "the project registry is unavailable", { "retry-after": "30" });
 }
 
 // ---- the control plane -------------------------------------------------------
@@ -251,7 +339,7 @@ async function loadRegistry(env: Env): Promise<Map<string, Project>> {
 /// Rejection is 404 rather than 401 on purpose: a caller with no token learns
 /// nothing about what lives here. A drainer that suddenly sees 404 on every call
 /// has a token problem, and that is written down in the README.
-async function control(request: Request, env: Env, url: URL): Promise<Response> {
+async function control(request: Request, env: Env, url: URL, pathname: string): Promise<Response> {
   const token = env.DRAIN_TOKEN ?? "";
   const presented = bearer(request);
   if (token.length === 0 || !presented || !secretEquals(presented, token)) {
@@ -259,20 +347,21 @@ async function control(request: Request, env: Env, url: URL): Promise<Response> 
     return jsonResponse(404, { detail: "not found" });
   }
 
-  const parts = url.pathname.split("/").filter((part) => part.length > 0);
+  const parts = pathname.split("/").filter((part) => part.length > 0);
   // parts[0] is "_nashcode".
   if (parts.length === 2 && parts[1] === "registry") {
     if (request.method !== "GET" && request.method !== "PUT") {
       return jsonResponse(405, { detail: "the registry takes GET and PUT" });
     }
     const stub = env.REGISTRY.get(env.REGISTRY.idFromName("registry"));
-    const answer = await stub.fetch("https://cell.invalid/registry", {
+    const answer = await stub.fetch(`https://cell.invalid/registry${url.search}`, {
       method: request.method,
       body: request.method === "PUT" ? await request.text() : undefined,
     });
-    // The next public request must see the new set, not the cached one. Other
-    // isolates fall back to the TTL.
-    if (request.method === "PUT" && answer.status === 200) cache = null;
+    // The next public request must see the new set, not the cached one. Expire
+    // it rather than drop it: if the reload fails, the old set is still a far
+    // better answer than none. Other isolates fall back to the TTL.
+    if (request.method === "PUT" && answer.status === 200 && cache) cache = { at: 0, projects: cache.projects };
     return passthrough(answer);
   }
 

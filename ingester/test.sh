@@ -14,7 +14,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+# Progress goes to stderr so it appears as it happens and stays out of the TAP
+# stream on stdout. Redirected to a file, stdout is block-buffered and a stalled
+# run looks identical to one that never started.
+say() { printf '\n\033[1m%s\033[0m\n' "$*" >&2; }
 die() { printf '\n\033[31mingester/test.sh: %s\033[0m\n\n' "$*" >&2; exit 1; }
 
 # ---- prerequisites -----------------------------------------------------------
@@ -43,13 +46,14 @@ RUN_ID=$(node -e 'process.stdout.write(Date.now().toString(36) + Math.floor(Math
 MINIO_NAME="nashcode-ingester-test-$RUN_ID"
 BUCKET="ingester-test-$RUN_ID"
 WATCH=$(mktemp -d)
+COLD_WATCH=$(mktemp -d)
 LOG=$(mktemp -t ingester-celld)
 
-read -r MINIO_PORT NODE_PORT <<EOF
+read -r MINIO_PORT NODE_PORT COLD_PORT <<EOF
 $(node -e '
 const net = require("net");
 const free = () => new Promise((ok) => { const s = net.createServer(); s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => ok(port)); }); });
-Promise.all([free(), free()]).then((ports) => console.log(ports.join(" ")));
+Promise.all([free(), free(), free()]).then((ports) => console.log(ports.join(" ")));
 ')
 EOF
 
@@ -63,6 +67,7 @@ export AWS_REGION=us-east-1
 export S3_ENDPOINT="http://127.0.0.1:$MINIO_PORT"
 
 CELLD_PID=""
+COLD_PID=""
 cleanup() {
   local status=$?
   if [ "${KEEP:-}" = "1" ] && [ "$status" = "0" ]; then
@@ -71,6 +76,7 @@ cleanup() {
     return
   fi
   [ -n "$CELLD_PID" ] && kill "$CELLD_PID" 2>/dev/null || true
+  [ -n "$COLD_PID" ] && kill "$COLD_PID" 2>/dev/null || true
   docker rm -f "$MINIO_NAME" >/dev/null 2>&1 || true
   if [ "$status" != "0" ]; then
     say "celld log ($LOG), last 40 lines:"
@@ -103,14 +109,33 @@ say "[2/4] celld deploy ($("$CELLD" --version 2>/dev/null | head -1))"
 
 # ---- the node ----------------------------------------------------------------
 
-say "[3/4] celld node on 127.0.0.1:$NODE_PORT"
-CELLD_WATCH="$WATCH" \
-CELLD_VAR_DRAIN_TOKEN="$DRAIN_TOKEN" \
-CELLD_VAR_REGISTRY_TTL_MS=200 \
-CELLD_VAR_MAX_BUFFER_BYTES=8388608 \
-RUST_LOG=${RUST_LOG:-warn} \
-  "$CELLD" --bucket "s3://$BUCKET" --listen "127.0.0.1:$NODE_PORT" >>"$LOG" 2>&1 &
+say "[3/4] celld nodes on 127.0.0.1:$NODE_PORT and 127.0.0.1:$COLD_PORT"
+
+# A minute of lease, and cells that evict after a second idle. Both matter only
+# for the registry-outage test at the end: it stops MinIO for a few seconds, and
+# with the stock ten-second lease a node self-fences and halts rather than
+# staying up to be measured. Everything else is indifferent to these.
+node_env() {
+  CELLD_TTL_MS=60000
+  CELLD_IDLE_EVICT_S=1
+  CELLD_VAR_DRAIN_TOKEN="$DRAIN_TOKEN"
+  CELLD_VAR_REGISTRY_TTL_MS=200
+  CELLD_VAR_MAX_BUFFER_BYTES=8388608
+  RUST_LOG=${RUST_LOG:-warn}
+  export CELLD_TTL_MS CELLD_IDLE_EVICT_S CELLD_VAR_DRAIN_TOKEN CELLD_VAR_REGISTRY_TTL_MS \
+    CELLD_VAR_MAX_BUFFER_BYTES RUST_LOG
+}
+node_env
+
+CELLD_WATCH="$WATCH" "$CELLD" --bucket "s3://$BUCKET" --listen "127.0.0.1:$NODE_PORT" >>"$LOG" 2>&1 &
 CELLD_PID=$!
+
+# The second node exists to be cold. Nothing may touch it until the outage test,
+# because the thing under test is a Worker isolate that has never managed to read
+# the registry even once — the only state in which 503 is the right answer.
+CELLD_WATCH="$COLD_WATCH" CELLD_NODE="cold-$RUN_ID" \
+  "$CELLD" --bucket "s3://$BUCKET" --listen "127.0.0.1:$COLD_PORT" >>"$LOG" 2>&1 &
+COLD_PID=$!
 
 for _ in $(seq 1 60); do
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$NODE_PORT/api/999/envelope/" -d '{}' || true)
@@ -119,11 +144,15 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [ "$code" = "404" ] || die "the celld node never answered; see $LOG"
+kill -0 "$COLD_PID" 2>/dev/null || die "the cold celld node exited; see $LOG"
 
 # ---- the assertions ----------------------------------------------------------
 
 say "[4/4] node --test"
 INGESTER_URL="http://127.0.0.1:$NODE_PORT" \
+INGESTER_COLD_URL="http://127.0.0.1:$COLD_PORT" \
+INGESTER_MINIO="$MINIO_NAME" \
+INGESTER_MINIO_PORT="$MINIO_PORT" \
 INGESTER_DRAIN_TOKEN="$DRAIN_TOKEN" \
 INGESTER_FIXTURES="$(cd ../viewer/tests/fixtures/bugs && pwd)" \
   node --test test/*.test.mjs

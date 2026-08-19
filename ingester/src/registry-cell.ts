@@ -33,7 +33,7 @@ export class RegistryCell {
     const url = new URL(request.url);
     if (url.pathname !== "/registry") return json(404, { detail: "no such cell route" });
     if (request.method === "GET") return json(200, { projects: this.read() });
-    if (request.method === "PUT") return this.replace(request);
+    if (request.method === "PUT") return this.replace(request, url);
     return json(405, { detail: "the registry takes GET and PUT" });
   }
 
@@ -48,7 +48,7 @@ export class RegistryCell {
   /// PUT replaces the set rather than merging it. A project nashcode has deleted
   /// has to stop authenticating here, and a merge would leave it working for
   /// ever.
-  private async replace(request: Request): Promise<Response> {
+  private async replace(request: Request, url: URL): Promise<Response> {
     let payload: any;
     try {
       payload = await request.json();
@@ -57,6 +57,17 @@ export class RegistryCell {
     }
     const raw = payload?.projects;
     if (!Array.isArray(raw)) return json(400, { detail: "the registry body needs a projects array" });
+
+    // An empty replace takes the whole fleet offline, and because SDKs read the
+    // resulting 404 as permanent, it destroys events rather than delaying them.
+    // It is also what a drainer bug looks like: one serialisation of an empty
+    // Vec. Nashcode really can have no projects, so the door exists — it just
+    // has to be opened on purpose.
+    if (raw.length === 0 && url.searchParams.get("allow_empty") !== "1") {
+      return json(400, {
+        detail: "refusing to empty the registry; add ?allow_empty=1 if that is really the intent",
+      });
+    }
 
     const entries: RegistryEntry[] = [];
     for (const item of raw) {

@@ -9,7 +9,7 @@
 // Nothing here may leak into nashcode's drainer. The HTTP shapes below are the
 // contract; celld is an implementation of it. See ingester/README.md.
 
-import { toBase64 } from "./body";
+import { concat, toBase64 } from "./body";
 
 /// Per-project quota, from goal.md: 1k per 5 minutes, 5k per hour. Counters
 /// reset lazily, on the next write after the window has run out, so an idle
@@ -30,10 +30,19 @@ const DEFAULT_MAX_STORED_BYTES = 200 * 1024 * 1024;
 /// One drain interval, near enough.
 const FULL_RETRY_AFTER = 30;
 
-/// A drain that names no budget gets this one. Big enough to be worth a round
-/// trip, small enough that a stall costs one batch.
-const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
-const HARD_MAX_BYTES = 32 * 1024 * 1024;
+/// A drain that names no budget gets `DEFAULT_MAX_BYTES`, and no drain gets more
+/// than `HARD_MAX_BYTES`.
+///
+/// Both numbers are small on purpose, and both were larger until a review
+/// measured what they cost. A cell is single-threaded: while it is building a
+/// drain answer it is not accepting envelopes, and an 8 MiB drain was measured
+/// stalling a concurrent append by 992 ms. Base64 also inflates by a third, and
+/// the answer exists twice in memory before it leaves, against an isolate heap
+/// of 128 MB. 2 MiB per round trip costs a few hundred milliseconds of stall and
+/// a couple of extra round trips; the drainer loops until `X-Ingest-Remaining`
+/// reaches zero, so batching harder buys it nothing.
+const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
+const HARD_MAX_BYTES = 8 * 1024 * 1024;
 
 interface Row {
   seq: number;
@@ -124,8 +133,17 @@ export class IngestCell {
   /// base64. Rows stay until they are acked, so a drain that is never acked
   /// returns the same rows again — that is what makes redelivery safe.
   private drain(url: URL): Response {
-    const after = intParam(url, "after", 0);
-    const budget = Math.min(intParam(url, "max_bytes", DEFAULT_MAX_BYTES) || DEFAULT_MAX_BYTES, HARD_MAX_BYTES);
+    // A cursor that cannot be read is refused rather than rounded down to zero:
+    // silently replaying the whole buffer from the beginning is exactly the
+    // failure a typo in a drainer should not be able to cause.
+    const askedAfter = intParam(url, "after");
+    if (askedAfter === null) return json(400, { detail: "after must be a non-negative integer" });
+    const askedBytes = intParam(url, "max_bytes");
+    if (askedBytes === null || askedBytes === 0) {
+      return json(400, { detail: "max_bytes must be a positive integer" });
+    }
+    const after = askedAfter ?? 0;
+    const budget = Math.min(askedBytes ?? DEFAULT_MAX_BYTES, HARD_MAX_BYTES);
 
     const cursor = this.sql.exec(
       `SELECT seq, received_at, kind, content_encoding, remote_ip, bytes, body
@@ -134,16 +152,22 @@ export class IngestCell {
       this.maxRows,
     );
 
-    const lines: string[] = [];
+    // Each row is encoded and released one at a time. Collecting the lines as
+    // strings and joining them at the end would hold the whole answer three
+    // times over — the array, the joined string, and the encoded body — and
+    // base64 has already made it a third bigger than the bytes it describes.
+    const encoder = new TextEncoder();
+    const chunks: Uint8Array[] = [];
+    let encoded = 0;
     let spent = 0;
     let last = after;
     for (const row of cursor as Iterable<Row>) {
       // Always take the first row even when it alone busts the budget, or one
       // large envelope would stall the drain for ever.
-      if (lines.length > 0 && spent + row.bytes > budget) break;
+      if (chunks.length > 0 && spent + row.bytes > budget) break;
       spent += row.bytes;
       last = row.seq;
-      lines.push(
+      const line = encoder.encode(
         JSON.stringify({
           seq: row.seq,
           received_at: row.received_at,
@@ -152,15 +176,16 @@ export class IngestCell {
           remote_ip: row.remote_ip,
           bytes: row.bytes,
           body: toBase64(asBytes(row.body)),
-        }),
+        }) + "\n",
       );
+      encoded += line.byteLength;
+      chunks.push(line);
     }
 
     const remaining = Number(
       first(this.sql.exec(`SELECT COUNT(*) AS n FROM envelopes WHERE seq > ?`, last))?.n ?? 0,
     );
-    const text = lines.length === 0 ? "" : lines.join("\n") + "\n";
-    return new Response(text, {
+    return new Response(chunks.length === 0 ? "" : concat(chunks, encoded), {
       status: 200,
       headers: {
         "content-type": "application/x-ndjson",
@@ -180,8 +205,11 @@ export class IngestCell {
     } catch {
       return json(400, { detail: "the ack body is not JSON" });
     }
-    const upTo = Number(payload?.up_to);
-    if (!Number.isInteger(upTo) || upTo < 0) {
+    // `Number("5")` is 5 and `Number(true)` is 1, so coercing here would let a
+    // drainer that serialises the wrong shape delete real rows. It has to be a
+    // number already.
+    const upTo = payload?.up_to;
+    if (typeof upTo !== "number" || !Number.isSafeInteger(upTo) || upTo < 0) {
       return json(400, { detail: "up_to must be a non-negative integer" });
     }
     const before = this.usage();
@@ -261,11 +289,14 @@ function first(cursor: any): any {
   return null;
 }
 
-function intParam(url: URL, name: string, fallback: number): number {
+/// `undefined` when the parameter is absent, `null` when it is there and
+/// unreadable. The caller has to tell those apart: a missing cursor means "from
+/// the start", a broken one means "stop and say so".
+function intParam(url: URL, name: string): number | null | undefined {
   const raw = url.searchParams.get(name);
-  if (raw === null) return fallback;
-  const value = Number(raw);
-  return Number.isInteger(value) && value >= 0 ? value : fallback;
+  if (raw === null) return undefined;
+  if (!/^[0-9]{1,15}$/.test(raw)) return null;
+  return Number(raw);
 }
 
 function json(status: number, payload: unknown, extra?: Record<string, string>): Response {
