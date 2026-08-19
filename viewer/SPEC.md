@@ -634,6 +634,12 @@ viewer-side surface; the goal doc binds protocol, grouping, and notification sem
 - **UI.** `/bugs` project list; `/bugs/:project` issues by state; issue detail with
   resolve/mute (Tailscale headers stamp the actor); later `/logs` and `/crons`. Same
   accept-header JSON convention as the rest of the viewer. Bugs summary joins `/brain`.
+- **Code origin.** Log rows index `code.file.path` / `code.line.number` /
+  `code.function.name` (old OTel names accepted and normalized). The logs page shows
+  `file:line` per row; when the project declares a nashcode repo, it links into the code
+  browser (`/:repo/blob/:path#L<n>`), and issue-detail in-app stack frames get the same
+  links. Unresolvable paths render as text, never a dead link. `file:` filters log
+  search.
 - **Phasing.** 1: core loop (projects, ingest, digest, grouping, issues UI, Pushover on
   new/regression, dogfood nashcode's own errors). 2: logs, crons, quotas, retention,
   mutes, escalation. 3: public ingester per `ingester.md`. Acceptance = the 20 facts in

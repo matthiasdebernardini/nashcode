@@ -116,6 +116,7 @@ graph LR
   viewer_traces --> viewer_db
   viewer_traces --> viewer_git
   viewer_web --> viewer_brain
+  viewer_web --> viewer_bugs
   viewer_web --> viewer_ci
   viewer_web --> viewer_code
   viewer_web --> viewer_config

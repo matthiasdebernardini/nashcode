@@ -109,7 +109,18 @@ Rust ≥0.42, Ruby ≥5.24, Cocoa ≥9.0). (2) `POST /api/<project_id>/logs` NDJ
 (ts, level, message, free attributes), authed by the same DSN key, for
 journald/Vector/curl/cron. The schema uses the OTel severity model (trace…fatal,
 severity_number 1–24) so a future OTLP receiver needs no migration. Batches
-archive to the bucket as NDJSON objects. SQLite keeps the hot window with FTS5
+archive to the bucket as NDJSON objects.
+
+Every log row indexes its code origin when the attributes carry it:
+`code.file.path`, `code.line.number`, `code.function.name` (also accept the
+pre-2024 OTel names `code.filepath` / `code.lineno` / `code.function` and
+normalize). SDK logger integrations attach these by default; the NDJSON door
+takes them as plain attributes. The logs page shows `file:line` on each row,
+and when the project declares a nashcode repo, links it to the code browser
+(`/:repo/blob/:path#L<n>`, path resolved against the repo root; unresolvable
+paths render as plain text, never a dead link). Filter by `file:` in the logs
+search. The same linking applies to stack frames on the issue detail page:
+in-app frames whose filename resolves in the declared repo link to the line. SQLite keeps the hot window with FTS5
 (external-content table) for search, pruned nightly by per-project
 `retention_days`. Logs never push to Pushover (per-project fatal-log opt-in at
 most, later).
