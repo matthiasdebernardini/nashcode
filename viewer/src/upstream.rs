@@ -191,7 +191,7 @@ fn validate(
 
     dep.mode = match (pin.as_deref().map(str::trim), track.as_deref().map(str::trim)) {
         (Some(pin), None) if !pin.is_empty() => {
-            if !is_commit_ish(pin) {
+            if !is_commit_id(pin) {
                 return Some(format!("pin {pin:?} is not a commit id"));
             }
             Some(Mode::Pin(pin.to_ascii_lowercase()))
@@ -355,7 +355,10 @@ fn is_plain_name(name: &str) -> bool {
 ///
 /// Seven digits is the floor because four is ambiguous in any repo worth pinning, and a
 /// pin that resolves to the wrong commit is worse than one that will not parse.
-fn is_commit_ish(pin: &str) -> bool {
+///
+/// `?rev=` on the browse routes is held to this same grammar, before it reaches an
+/// argv: one rule for "this string names a commit", written once.
+pub fn is_commit_id(pin: &str) -> bool {
     (7..=40).contains(&pin.len()) && pin.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
@@ -410,6 +413,60 @@ pub struct Stack {
     /// The manifest would not parse. `deps` is empty and nothing was fetched.
     pub error: Option<String>,
     pub deps: Vec<DepState>,
+}
+
+// ---- browsing the column ---------------------------------------------------------
+
+/// One dep, opened for reading: where its mirror is and which commit it points at.
+///
+/// Nothing here goes to the wire. A page built from a `Browse` shows what is on disk,
+/// or says the commit is not there yet — the fetch that would change that is the
+/// clock's job and the sync route's, never a reader's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Browse {
+    pub name: String,
+    pub url: String,
+    pub layer: Option<String>,
+    pub mode: Mode,
+    /// The mirror directory. Also the key a `.gitmodules` URL is matched against, since
+    /// it is what [`locate`] turns every spelling of one upstream into.
+    pub path: PathBuf,
+    /// The commit the declaration resolves to, `None` while the mirror lacks it.
+    pub commit: Option<String>,
+}
+
+impl Browse {
+    /// Resolve a validated dep against its mirror. `None` for a dep that was refused:
+    /// it has no mode and no mirror, so there is nothing to open.
+    async fn open(dep: Dep) -> Option<Self> {
+        if dep.error.is_some() {
+            return None;
+        }
+        let (location, mode) = (dep.location?, dep.mode?);
+        let commit = resolve(&location.path, &mode).await;
+        Some(Self {
+            name: dep.name,
+            url: dep.url,
+            layer: dep.layer,
+            mode,
+            path: location.path,
+            commit,
+        })
+    }
+
+    /// A read handle on the mirror — unauthenticated, like every other read of one.
+    pub fn mirror(&self) -> Repo {
+        upstream_repo(&self.path)
+    }
+
+    /// Is this commit already in the mirror?
+    ///
+    /// The only question `?rev=` ever asks. A revision the mirror does not have is a
+    /// 404: browsing is a read of what has been mirrored, and a page load must never be
+    /// a reason to go and get more.
+    pub async fn has(&self, rev: &str) -> bool {
+        has_commit(&self.path, rev).await
+    }
 }
 
 // ---- the mirror pool -------------------------------------------------------------
@@ -507,6 +564,32 @@ impl Upstreams {
             self.refresh(dep, true).await;
         }
         Some(self.report(&manifest).await)
+    }
+
+    /// One named dep of a repo, opened for reading.
+    ///
+    /// `None` when the repo declares no dep by that name, or declared one we refused:
+    /// neither has a mirror, so neither has a page. The name is the manifest's, and it
+    /// is looked up in *this* repo's manifest only — a dep is browsable under the repo
+    /// that declared it and nowhere else.
+    pub async fn browse(&self, repo: &Repo, name: &str) -> Option<Browse> {
+        let manifest = self.manifest(repo).await?;
+        let dep = manifest.deps.into_iter().find(|dep| dep.name == name)?;
+        Browse::open(dep).await
+    }
+
+    /// Every dep of a repo that has a mirror, in manifest order. Nothing fetches: this
+    /// is what is on disk, which is what a page renders and what a `.gitmodules` URL is
+    /// matched against.
+    pub async fn column(&self, repo: &Repo) -> Vec<Browse> {
+        let Some(manifest) = self.manifest(repo).await else { return Vec::new() };
+        let mut column = Vec::with_capacity(manifest.deps.len());
+        for dep in manifest.deps {
+            if let Some(browse) = Browse::open(dep).await {
+                column.push(browse);
+            }
+        }
+        column
     }
 
     /// The background clock. A `track` dep goes stale on its own — no push and no page
