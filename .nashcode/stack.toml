@@ -1,0 +1,14 @@
+# The upstream column this repo runs on. The viewer mirrors, browses, and (phase 3)
+# indexes each dep; see viewer/SPEC.md "Stack (upstream dependencies)".
+
+[[dep]]
+name  = "dgit"
+url   = "https://github.com/littledivy/dgit"
+pin   = "17b03631eb6676f3b2c86b6662d9af4aa9237bef"
+layer = "server"
+
+[[dep]]
+name  = "celld"
+url   = "https://github.com/denoland/celld"
+track = "main"
+layer = "runtime"

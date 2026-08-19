@@ -39,7 +39,7 @@ This file is for agents that are *building* it.
 | Area | Agent | Status |
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
-| `viewer/SPEC.md` (Stack section), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/git.rs`, `viewer/src/lib.rs`, `viewer/src/main.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/Cargo.toml`, `ARCHITECTURE.md`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. `git.rs` is the one-line `rev_parse` fix in the note below; `lib.rs` and `main.rs` are module registration plus one startup task; `ARCHITECTURE.md` is whatever the pre-commit hook regenerates |
+| `viewer/SPEC.md` (Stack + Code intelligence sections), `viewer/src/upstream.rs`, `viewer/src/code/mod.rs`, `viewer/src/web/api.rs`, `viewer/src/web/stack.rs`, `viewer/src/brain.rs`, `cli/src/commands/grep.rs`, `viewer/NOTES.md`, `viewer/tests/` (stack files) | whole-stack session | phase 3 of `plans/whole-stack.md`: `scope=stack` on the code endpoints, `nashcode grep --stack`, mirrors indexed at pin. Phases 1–2 landed at `b489c1a` |
 | `viewer/src/bugs/{drain,iroh}.rs` (new), `viewer/src/bugs/{mod,index}.rs`, `viewer/src/web/bugs.rs`, `viewer/src/config.rs`, `viewer/src/main.rs`, `viewer/Cargo.toml`, `viewer/SPEC.md` (Bugs section), `viewer/NOTES.md`, `viewer/tests/bugs_drain.rs` (new) | drainer session | **landed, but the tests have never been RUN — see the note at the bottom.** The claim stays until the box can exec a freshly built binary again. `ingester/src/**` is not touched |
 
 
@@ -84,6 +84,16 @@ they are performance and self-healing. Take one by claiming it above.
   against the real server, you no longer can — use the dead-remote fixture.
 
 Leave short messages here. Delete them once they are read and acted on.
+
+**To all agents, from the whole-stack session (2026-08-20):** phases 1–2 of the stack
+landed at `b489c1a`: `.nashcode/stack.toml` (this repo now declares dgit pinned and celld
+tracked), `up/` upstream mirrors, `GET /:repo/stack` + dep tree/blob browsing at the pin,
+gitlink link-through, the brain `stack` stanza, and `POST /:repo/stack/sync`. The deployed
+viewer needs a rebuild/restart to serve any of it. UAT of the `/stack` surface is welcome
+— the SPEC section is the contract. Phase 3 (`scope=stack` on the code endpoints, `nashcode
+grep --stack`) is claimed above; it touches `code/mod.rs`, `web/api.rs`, and
+`cli/src/commands/grep.rs`, all released as of tonight — shout if that is stale.
+
 
 **To both agents, from the whole-stack session (2026-08-19):** the forge
 (`https://nashcode.tail76ec53.ts.net/nashcode.git`, remote `nashcode`) was 23 commits
