@@ -129,12 +129,31 @@ renders them). CLI support:
 - `nashcode annotate <plans/file.md>` — shell out to a locally installed `plannotator`
   binary against the file if present (`which plannotator`), else print install pointer.
   When the active profile has a viewer URL configured, print the plan's viewer URL too.
+  It launches with `--gate --json --result-file <scratch>/decision.json`, so plannotator
+  shows an Approve button and writes one JSON record of what the human decided. That
+  record becomes one comment on the viewer:
+
+  | decision | comment body |
+  |---|---|
+  | `annotated` | the feedback |
+  | `approved` with feedback | `Approved.`, a blank line, then the feedback |
+  | `approved` alone | `Approved.` |
+  | `dismissed` | nothing is posted |
+
+  Approval posts too, because a polling agent has no other way to hear the loop close.
+  The request is `POST /:repo/comments` with `{"branch", "file", "body"}`: whole-file,
+  since the record carries no per-annotation anchors, and unauthored, since the viewer
+  falls back to the caller's Tailscale identity. `--json` still launches nothing.
+  Feedback is never lost. When the POST fails, when the profile names no viewer, or when
+  the repository cannot be resolved, the feedback goes to stdout with the reason it was
+  not posted.
 - `nashcode comments <file> [--branch ...] [--since RFC3339] [--repo ...]` — GET
   the viewer's `/:repo/comments` JSON endpoint (`viewer_url` from the active
   profile; a clear error when it is unset). `--repo` defaults to the name
   `origin` points at. `--json` passes the viewer's answer through untouched.
   Tested against a canned JSON fixture served by a local test listener.
-- Nothing else: annotation feedback flows through the viewer's comment API, not the CLI.
+- Nothing else: annotation feedback still lives in the viewer's comment API. `annotate` is
+  only the courier that carries a local review there.
 
 ## Non-goals
 
