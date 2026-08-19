@@ -89,6 +89,7 @@ graph LR
     viewer_render[render]
     viewer_stack[stack]
     viewer_traces[traces]
+    viewer_upstream[upstream]
     viewer_web[web]
   end
   viewer_brain --> viewer_code
@@ -97,6 +98,7 @@ graph LR
   viewer_brain --> viewer_docs
   viewer_brain --> viewer_mirror
   viewer_brain --> viewer_stack
+  viewer_brain --> viewer_upstream
   viewer_bugs --> viewer_config
   viewer_bugs --> viewer_db
   viewer_ci --> viewer_code
@@ -125,6 +127,10 @@ graph LR
   viewer_stack --> viewer_git
   viewer_traces --> viewer_db
   viewer_traces --> viewer_git
+  viewer_upstream --> viewer_config
+  viewer_upstream --> viewer_db
+  viewer_upstream --> viewer_git
+  viewer_upstream --> viewer_mirror
   viewer_web --> viewer_brain
   viewer_web --> viewer_bugs
   viewer_web --> viewer_ci
@@ -138,5 +144,6 @@ graph LR
   viewer_web --> viewer_render
   viewer_web --> viewer_stack
   viewer_web --> viewer_traces
+  viewer_web --> viewer_upstream
 ```
 <!-- arch:end -->
