@@ -77,6 +77,14 @@ async fn submit(cx: &Cx, body: topcoat::router::request::Bytes) -> Result<Respon
     if input.mermaid.len() > MERMAID_LIMIT {
         return Err(bad_request("mermaid must be 64 KiB or less").into());
     }
+    // The other two fields are stored and rendered on every page load too; an
+    // unauthenticated POST must not be able to park megabytes there.
+    if input.title.as_ref().is_some_and(|title| title.len() > 512) {
+        return Err(bad_request("title must be 512 bytes or less").into());
+    }
+    if input.note.as_ref().is_some_and(|note| note.len() > MERMAID_LIMIT) {
+        return Err(bad_request("note must be 64 KiB or less").into());
+    }
 
     let trim = |field: Option<String>| field.filter(|value| !value.trim().is_empty());
     let stored = app(cx).db.add_architecture(NewArchitecture {
@@ -125,6 +133,10 @@ async fn tab(cx: &Cx) -> Result<Response> {
     if id.is_some() && showing.is_none() {
         return Err(topcoat::router::error::not_found().into());
     }
+
+    // JSON `?history` above stays complete per SPEC; only the rendered page caps an
+    // append-only list that an open POST endpoint can grow without bound.
+    let history: Vec<_> = history.into_iter().take(100).collect();
 
     // Nothing submitted: fall back to the repo's own ARCHITECTURE.md, else teach the
     // loop with the POST recipe.

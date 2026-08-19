@@ -108,6 +108,22 @@ async fn an_empty_or_oversized_diagram_is_refused() {
         post_json(&bed.router, "/demo/architecture", serde_json::json!({"mermaid": huge})).await;
     assert!((400..500).contains(&status), "oversized diagram accepted: {status} {body}");
 
+    // The other stored-and-rendered fields are capped too.
+    let (status, body) = post_json(
+        &bed.router,
+        "/demo/architecture",
+        serde_json::json!({"mermaid": "graph TD;", "title": "t".repeat(513)}),
+    )
+    .await;
+    assert!((400..500).contains(&status), "oversized title accepted: {status} {body}");
+    let (status, body) = post_json(
+        &bed.router,
+        "/demo/architecture",
+        serde_json::json!({"mermaid": "graph TD;", "note": "n".repeat(64 * 1024 + 1)}),
+    )
+    .await;
+    assert!((400..500).contains(&status), "oversized note accepted: {status} {body}");
+
     // Nothing was stored, so the page still shows the empty state.
     let (status, body) = get_json(&bed.router, "/demo/architecture").await;
     assert_eq!(status, 404, "{body}");

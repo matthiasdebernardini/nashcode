@@ -28,6 +28,22 @@ async fn the_js_entry_and_its_chunks_are_served_from_one_directory() {
     assert_eq!(status, 200);
 }
 
+/// The two client-side mermaid controls are load-bearing security/perf layers with no
+/// other coverage: strict mode sanitizes rendered SVG, and the dynamic import keeps
+/// the ~700 KiB library off every non-architecture page.
+#[tokio::test]
+async fn mermaid_stays_strict_and_out_of_the_entry_chunk() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    let (status, entry) = get(&bed.router, "/assets/nashcode.js").await;
+    assert_eq!(status, 200);
+    assert!(
+        entry.contains(r#"securityLevel:"strict""#) || entry.contains(r#"securityLevel: "strict""#),
+        "mermaid lost strict mode"
+    );
+    // The entry is ~250 KiB today; mermaid riding along would multiply that.
+    assert!(entry.len() < 400 * 1024, "entry chunk grew to {} bytes — did mermaid stop lazy-loading?", entry.len());
+}
+
 #[tokio::test]
 async fn an_unknown_asset_is_404_and_no_path_escapes_the_bundle() {
     let bed = simple_bed(|root| stacked_fixture(root, "demo"));
