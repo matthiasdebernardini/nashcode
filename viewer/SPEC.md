@@ -674,7 +674,9 @@ viewer-side surface; the goal doc binds protocol, grouping, and notification sem
   work identically; `NASHCODE_BUGS_DRAIN_TOKEN` is the bearer token;
   `NASHCODE_BUGS_DRAIN_KEY` is the file holding the persistent iroh secret key, whose
   EndpointId goes in the ingester's allow-file; `NASHCODE_BUGS_DRAIN_INTERVAL` is seconds
-  between cycles, default 30. Unset `NASHCODE_BUGS_DRAIN` = the drainer is off, one doctor
+  between cycles, default 30. The iroh half is the `drain-iroh` cargo feature, off until
+  it has dialled a live ingress once; a default build handed an EndpointId refuses to
+  start and names the flag. Unset `NASHCODE_BUGS_DRAIN` = the drainer is off, one doctor
   line. Drain set with `NASHCODE_BUGS_BUCKET` unset is a refusal to start, not a warning:
   a drain with nowhere durable to put a payload would ack rows into nothing.
   Each cycle drains every active project after its stored cursor and replays each row into
