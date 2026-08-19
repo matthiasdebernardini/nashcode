@@ -146,8 +146,21 @@ impl Indexer {
         // Content already indexed needs nothing. This is the whole of incrementality.
         let candidates: Vec<String> =
             tree.iter().map(|entry| entry.blob.clone()).collect::<BTreeSet<_>>().into_iter().collect();
-        let known: BTreeSet<String> =
-            self.db.code_known_blobs(repo, &candidates)?.into_iter().collect();
+        // Unless the last run recorded a degradation — a model that would not load, an
+        // indexer that was not there. Then every blob is fresh again, so the re-parse
+        // carries the unfinished work back through. Counting chunks without vectors
+        // would look like the same signal and is not: a chunk with a blank snippet is
+        // never embedded, so that count never reaches zero and the repo would re-parse
+        // forever.
+        let degraded = self
+            .db
+            .code_last_run(repo)?
+            .is_some_and(|last| !last.run.note.is_empty());
+        let known: BTreeSet<String> = if degraded {
+            BTreeSet::new()
+        } else {
+            self.db.code_known_blobs(repo, &candidates)?.into_iter().collect()
+        };
         let fresh: Vec<&TreeEntry> = tree
             .iter()
             .filter(|entry| !known.contains(&entry.blob))
@@ -171,6 +184,8 @@ impl Indexer {
         // is not the parse — it is the SCIP overlay, which clones the repo and runs a
         // language indexer over it. Without this, a merge that only moved a card would
         // pay for a rust-analyzer pass.
+        // `degraded` above has already made every blob fresh in that case, so this skip
+        // only ever fires on a run that finished cleanly.
         if fresh.is_empty()
             && self
                 .db
