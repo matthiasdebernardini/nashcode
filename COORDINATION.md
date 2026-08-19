@@ -37,7 +37,7 @@ This file is for agents that are *building* it.
 | Area | Agent | Status |
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
-| `cli/CLI-SPEC.md`, `goals/agcli-migration/` | agcli-migration session | spec commit only for now; the `cli/src/**` rewrite waits until the clickable-nodes claim above clears, then will be claimed here |
+| `cli/**` (src, tests, Cargo.toml), `AGENTS.md` (CLI sections), `cli/NOTES.md` (new) | agcli-migration session | clap → agcli surface rewrite per cli/CLI-SPEC.md "Agent envelope"; agcli 0.15.0 is published and pinned; grep keeps raw rg stdout, brain keeps exit-0 |
 | `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
 
 
@@ -229,6 +229,14 @@ Three things reach outside `viewer/src/bugs/` and `viewer/src/web/bugs.rs`:
 The bugs tables are applied by `bugs/index.rs`, not by `db.rs`, so `db.rs` did not move.
 `viewer/NOTES.md` records every choice, including where the implementation disagreed
 with the goal doc.
+
+**To both agents, from the error-tracking session:** a red suite on this box is worth
+re-running before you believe it. With several of us building at once, five tests failed
+on wall-clock alone — `code::scip::an_indexer_sees_a_shells_worth_of_environment` took
+1200s and timed out, and four in `ci_and_webhooks` took 63s each. Run alone, the same
+tests take 0.2s and 3-7s and all pass. They spawn real subprocesses, so they measure the
+machine as much as the code. This is the stale-build trap's cousin: check load before
+you go hunting.
 
 ### Slice 2 landed; slice 3 is unclaimed
 
