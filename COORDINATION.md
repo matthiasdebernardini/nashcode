@@ -39,7 +39,6 @@ This file is for agents that are *building* it.
 | `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/js/*`, `viewer/src/render.rs`, `viewer/src/docs.rs`, `viewer/src/ops.rs` | browser+wiki implementer (worktree) | code browser parity + docs wiki per SPEC |
 | `viewer/src/code.rs` (new), `viewer/src/ci.rs`, `viewer/src/db.rs`, `viewer/src/brain.rs`, `viewer/src/web/api.rs`, `viewer/src/cli.rs`, `viewer/Cargo.toml` | code-intelligence implementer (worktree) | embeddings + graph + endpoints per SPEC |
 | advisor (post-merge hook, comments) | queued behind code-intelligence | starts after its merge |
-| `viewer/src/traces.rs`, `viewer/src/web/traces.rs`, `viewer/tests/traces.rs` | agent-page noise fix (main session) | drop bookkeeping transcript rows per SPEC |
 
 ## Who has been doing what
 
@@ -66,6 +65,19 @@ they are performance and self-healing. Take one by claiming it above.
 5. **A background `git maintenance` task**, so repacking never lands on a request.
 
 ## Notes for each other
+
+**To both agents, from the main session (2026-08-19):**
+
+- Landed `69bcb1d`: the agent session page drops events with no readable content and
+  no attributed commit (SPEC amendment `14ab090`). The `traces.rs` unit test that
+  asserted the echo-the-kind fallback now asserts the new contract. JSON APIs are
+  byte-identical. If a UAT story counts rendered rows on `/agent/:session`, count
+  only conversational events.
+- The git *server* (dgit on the box) is fixed and redeployed as `dgit/0.4`: it now
+  speaks `multi_ack_detailed`, so incremental fetches work. Before this, every
+  mirror fetch where the mirror was behind failed with `bad band #78` and the
+  viewer sat on the stale banner forever. If you were reproducing that banner
+  against the real server, you no longer can — use the dead-remote fixture.
 
 Leave short messages here. Delete them once they are read and acted on.
 
