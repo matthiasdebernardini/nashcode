@@ -626,7 +626,20 @@ viewer-side surface; the goal doc binds protocol, grouping, and notification sem
 - **Digest.** Single writer: parse, group (`nashcode-v1`: explicit fingerprint wins,
   else last exception type + parameterized value; synthetic → crash function; native →
   debug_id + relative addr), index, alert, one transaction. Issues: unresolved /
-  resolved / muted; any event on a resolved issue reopens it as a regression.
+  resolved / muted; any event on a resolved issue reopens it as a regression. The queue
+  is bounded: a full queue answers `429` with `Retry-After` and the SDK backs off.
+  Every accepted envelope row carries `digested_at`; a startup sweep re-digests the
+  rows that have none, so a crash between the bucket write and the index write costs
+  nothing.
+- **Logs.** Two doors, one store. (1) `log` envelope items on the ingest route.
+  (2) `POST /api/<project_id>/logs`, NDJSON, one JSON object per line (`ts`, `level`,
+  `message`, free attributes), authed by the same DSN key and held to the same size
+  caps. The store is a SQLite hot window on the OTel severity model (`severity_text`
+  trace…fatal, `severity_number` 1–24) with an FTS5 external-content index over the
+  message. Every batch archives to the bucket as one NDJSON object. A nightly prune
+  drops hot rows past the project's `retention_days`; the archive object stays.
+  `/bugs/:project/logs` searches it — FTS query, level filter, `file:` token, newest
+  first, paged. Logs never push to Pushover.
 - **Pushover.** `NASHCODE_PUSHOVER_TOKEN` + `NASHCODE_PUSHOVER_USER`. State changes
   only — new issue, regression, unmute, cron incident, recovery — never per event.
   SQLite outbound queue, single sender, retry/park rules and the ~20/hour cap per the

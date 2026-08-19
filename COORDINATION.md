@@ -39,6 +39,7 @@ This file is for agents that are *building* it.
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/src/web/api.rs`, `viewer/src/code/mod.rs`, `cli/src/commands/` (`grep.rs` new), `cli/src/cli.rs`, `cli/src/main.rs`, `CLAUDE.md` | clickable-nodes session | `/code/find` + `nashcode grep` per the two SPECs |
 | `cli/CLI-SPEC.md`, `goals/agcli-migration/` | agcli-migration session | spec commit only for now; the `cli/src/**` rewrite waits until the clickable-nodes claim above clears, then will be claimed here |
+| `viewer/src/bugs/**`, `viewer/src/web/bugs.rs`, `viewer/tests/bugs.rs`, `viewer/tests/bugs_logs.rs` (new), `viewer/tests/fixtures/bugs/`, `viewer/src/main.rs` (bugs sweep + prune spawn), `viewer/NOTES.md`, `viewer/SPEC.md` (bugs section) | error-tracking session, slice 2 | the log store, both log doors, the logs page, and the four hardening items left at the bottom of this file |
 
 ## Who has been doing what
 
