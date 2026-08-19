@@ -307,3 +307,180 @@ implementation had to choose:
   comment was a guess with a keyboard; clicking the line is the same intent with none of
   the arithmetic. Plan pages keep the file-level composer for whole-file remarks, and
   the JSON API still takes `line` for tools that compute one.
+
+## Code intelligence as built (2026-08-19)
+
+The endpoint contract in SPEC.md is exactly what shipped. Two of the tools behind it
+are not, and both changes were forced by measurement.
+
+### codanna is out: it cannot coexist with fastembed
+
+codanna 0.13 pins `fastembed = "=5.6.0"`, which pins `ort = "=2.0.0-rc.10"`. fastembed
+6 pins `ort = "=2.0.0-rc.13"`. `ort` links a native library, so cargo cannot carry two
+of it, and the resolver refuses outright:
+
+    error: failed to select a version for `ort`.
+        ... required by package `fastembed v5.6.0`
+        ... which satisfies dependency `fastembed = "=5.6.0"` of package `codanna v0.13.0`
+      previously selected package `ort v2.0.0-rc.13`
+
+Downgrading to fastembed 5.6.0 to match does not rescue it: that version has no
+`ort-download-binaries-rustls-tls` feature, so it can only reach ONNX Runtime through
+native-tls, which means OpenSSL, which does not cross-compile. And codanna is a whole
+application — tantivy, rmcp, axum, notify, sysinfo, clap — behind a `parse` API whose
+output would need adapting into our tables anyway.
+
+So the graph is built by our own tree-sitter pass, in `code/lang.rs`. The escape hatch
+in the brief covers this, and the cost is small: SPEC already requires tree-sitter for
+function-level chunking, so the grammars were going to be dependencies regardless, and
+codanna's `find_calls` is itself a tree-sitter query. What is lost is codanna's
+per-language import resolution; a call is attributed by its last path segment, so
+`self.retry()` and `crate::net::retry()` both answer `retry`. The SCIP overlay is what
+fixes that, and it is the layer the accuracy was always supposed to come from.
+
+### ort is loaded, not linked, and that is what makes the release build cross-compile
+
+`cargo zigbuild --release -p nashcode --target x86_64-unknown-linux-gnu` **links, with
+embeddings on by default.** It did not at first. fastembed's default
+`ort-download-binaries` pulls a prebuilt ONNX Runtime static archive, and zig cannot
+link it, because the archive wants GNU libstdc++ and zig ships libc++:
+
+    ld.lld: error: undefined symbol: std::__cxx11::basic_string<...>::find(char, unsigned long) const
+    >>> referenced by manifest_parser.cc in archive libort_sys.rlib
+
+Those are GNU-ABI symbols (`std::__cxx11::`); libc++ spells them `std::__1::`. There
+is no flag that bridges that. The fix is `ort`'s `load-dynamic` feature: no native
+archive enters the link at all, and the runtime is opened with `dlopen` on first use.
+The linux binary's only dynamic dependencies are `libc`, `libm`, `libdl`, and
+`libpthread` — no `libonnxruntime`, no `libstdc++`.
+
+This is better than the feature-gate the brief offered as a fallback, because there is
+one binary and one code path. The `embeddings` cargo feature still exists and is still
+on by default, but it is now a build-size knob rather than a portability one:
+`--no-default-features` compiles fastembed out and `/code/similar` answers
+`"this build has no embedding support"`.
+
+What the box needs, then:
+
+- **`libonnxruntime.so` somewhere the loader looks**, or `ORT_DYLIB_PATH` pointing at
+  it. Without it, `/:repo/code/similar` reports itself unavailable and everything else
+  is untouched. `nashcode-viewer serve` prints this as a doctor line at startup.
+- **Network on the first index run**, which downloads the model (a few hundred
+  megabytes) into the hf-hub cache. Later runs read the cache.
+- **Nothing else.** SCIP indexers on `PATH` are optional; see below.
+
+`ort` *panics* when the dylib is missing rather than returning an error, which is
+exactly the case a fresh box hits. `Embeddings::load` catches that panic and turns it
+into a message, and remembers the failure for ten minutes so a missing dependency
+costs one warning line rather than one per merge.
+
+### The trigger is the mirror's tip observer, not a call inside `merge`
+
+SPEC says "every merge to the default branch". The implementation hangs off
+`Mirrors::with_observer` — the callback that already queues CI for every newly seen
+tip — with the worker dropping any job whose branch is not the default one. Two
+reasons. `Ops::merge` ends in `refresh_now`, which observes the new tip anyway, so a
+call inside `merge` would be the second of two triggers for one event. And a merge
+pushed straight to dgit, bypassing the viewer, gets indexed by this and would not by
+the other. One rule covers both.
+
+`POST /:repo/code/index` is the manual path and enqueues the same job with no branch
+and no commit, meaning "whatever the default branch points at when you get to it".
+`nashcode index [repo]` is a thin client over that endpoint; `--status` reads
+`GET /:repo/code` without queueing anything. Indexing never runs on a request path.
+
+### Everything is keyed by blob SHA, and the path table is separate
+
+`code_chunks`, `code_symbols`, and `code_refs` are keyed by `(repo, blob, ordinal)`.
+`code_files` maps `(repo, path)` to a blob. Queries join the two. The consequences are
+the point:
+
+- An index run parses and embeds only blobs the repo has never held. A second run over
+  an unchanged tree does no work at all.
+- A rename is free — the content did not change, so the chunks, the vectors, and the
+  symbols stay and only the path moves.
+- A delete is a path-table rewrite, and the sweep that follows it drops content no path
+  references any more, so a deleted file stops answering immediately.
+- Two files with identical content share one set of vectors.
+
+Line numbers live with the content, not the path, which is what makes that safe: a
+chunk's `start_line` is a fact about the blob and is true wherever the blob sits.
+
+### Chunking, in one paragraph
+
+Rust, Python, and TypeScript get a real parse. One chunk per top-level function, class,
+struct, trait, or interface; nested definitions are symbols but not their own chunks,
+because the enclosing one already carries their text. Runs of ten or more lines that no
+definition claimed — module preamble, top-level statements — get fifty-line window
+chunks, so a question about a file's imports still has something to hit. Everything
+else, and anything that fails to parse, is fifty-line windows over the whole file.
+Files over a megabyte are skipped on the size `ls-tree` already reported, without ever
+being read; files with a NUL in the first eight kilobytes are binary and skipped too.
+The TSX grammar covers `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, and `.cjs`: it is a
+superset of the TypeScript one and parses plain JavaScript.
+
+### SCIP: the overlay, and the interval map SCIP does not give you
+
+`code/scip.rs` runs `rust-analyzer scip`, `scip-typescript`, and `scip-python` as
+subprocesses in a scratch checkout, but only where the binary is on `PATH` *and* the
+repo has the marker file for it (`Cargo.toml`, `package.json`, `pyproject.toml`). A
+missing binary is silent — most repos have none, and the tree-sitter graph is the
+designed answer for them. A binary that fails, times out, or emits an unreadable index
+is one note on the run record; the tree-sitter graph it would have replaced stays
+exactly as it was. The degradation ladder is SCIP, then tree-sitter, then `git grep`,
+and no rung is an error.
+
+The research pass flagged that SCIP occurrences do not name their enclosing function.
+The map is built in `read_document`: every occurrence carrying the Definition role
+contributes its `enclosing_range` (the body, not the identifier) to an interval list,
+and each reference is attributed to the innermost interval containing its line. Two
+details worth keeping:
+
+- **A symbol string is not a name.** `rust-analyzer cargo demo 0.1.0 net/retry().` is
+  precise and unreadable. The last descriptor's `name` is stored, so `/code/def?symbol=`
+  takes the same input whichever layer answered. Locals (`local 12`), parameters, and
+  type parameters are dropped: nobody looks those up by name.
+- **SCIP does not separate "called" from "mentioned".** Every non-definition occurrence
+  is stored as a call edge. Over-reporting a caller beats silently dropping one, and the
+  alternative would be inferring call-ness from a range, which is guesswork.
+
+`rust-analyzer`'s SCIP pass is single-threaded (rust-analyzer#18140). Nothing here works
+around that; it runs on the CI queue behind a twenty-minute deadline and nothing waits
+on it.
+
+### `/brain/ask` gained a tool loop
+
+`brain::ask` sent one request and returned. It now loops up to six times, offering five
+tools — `code_text`, `code_similar`, `code_def`, `code_refs`, `code_callers`. The
+seventh request goes without tools, so a model that keeps asking has to answer with what
+it already found. The opening user message is still a plain string, so the request an
+operator sees on the wire has not changed shape; only the tool-result turns use content
+blocks. `Answer` gained `tools_used`, which names what the reply was actually grounded
+in.
+
+A tool call may only name a repo the question was scoped to, so `?repo=x` is a boundary
+rather than a hint. Without `ANTHROPIC_API_KEY` the route still answers 404, unchanged.
+
+### Smaller decisions
+
+- **`/code/similar` never loads the model.** Loading downloads hundreds of megabytes.
+  A request that triggered it would hang for minutes, so an unloaded model is a 503
+  naming what makes it loaded (an index run) and pointing at `/code/text`. Because
+  indexing is in-process, the model is resident from the first index run onward.
+- **`code` joins the reserved first segments** under a repo, alongside `stacks`,
+  `plans`, `tasks`, and the rest. A branch may not be named `code`.
+- **The graph endpoints answer 200 with an empty list and a hint,** never 404 or 500,
+  for a symbol that is not there. A language the graph cannot parse is *expected* to
+  fall through to text search, and an error would teach a caller to stop asking.
+- **Brute-force cosine, as specified.** No ANN index. A tie breaks on path then line,
+  so the order is stable across runs rather than whatever the scan visited first, and a
+  vector of a different length scores zero rather than panicking — which is what makes
+  changing `NASHCODE_EMBED_MODEL` safe: old vectors simply stop matching.
+- **`git cat-file blob`, not `git show`.** The index has the object id and does not
+  care which path it came from. `Repo::read_blob` was added for it. (`git show ":<sha>"`
+  is not valid syntax; that bug silently indexed nothing until an integration test
+  caught it.)
+- **`git grep --null`** so a path containing a colon cannot be misread as a field
+  boundary. Exit status 1 means "no matches", which is an answer.
+- **One transaction per blob.** An index run that dies halfway leaves every blob it
+  finished intact, and the next run resumes exactly where it stopped.

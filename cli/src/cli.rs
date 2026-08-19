@@ -239,6 +239,29 @@ plannotator is (null when absent), and the viewer URL — plannotator is
 interactive, and an agent asking for JSON does not want an editor opening.")]
     Annotate(AnnotateArgs),
 
+    /// Rebuild the viewer's code index for a repository.
+    #[command(long_about = "\
+Ask the viewer to rebuild a repository's code index, and report what it holds.
+
+The viewer indexes by itself, every time a merge lands on the default branch, so
+this is for the two cases it does not cover: the first index of a repository
+pushed before the viewer knew how to index one, and a rebuild after a change to
+how indexing works.
+
+It queues and returns. Indexing runs on the viewer's own job queue, never on a
+request, so the answer is `queued` rather than `done`. Run it again with --status
+to see whether it finished, or read GET /<repo>/code yourself.
+
+The first index run on a fresh box downloads the embedding model, which is a few
+hundred megabytes. Until that lands, semantic search reports itself unavailable
+and text search carries on working.
+
+Three indexes come out of it: `git grep` for exact text (no stored index at all),
+vectors for `what is this about`, and a symbol graph for `who calls this`. Query
+them at GET /<repo>/code/text, /code/similar, /code/def, /code/refs, and
+/code/callers, or ask POST /brain/ask, which can call all five.")]
+    Index(IndexArgs),
+
     /// Read the human comments left on a plan in the viewer.
     #[command(long_about = "\
 Read the human comments left on a plan in the viewer.
@@ -565,6 +588,16 @@ pub struct PlanNewArgs {
 pub struct AnnotateArgs {
     /// Path to the plan, e.g. plans/rewrite-the-parser.md.
     pub file: String,
+}
+
+#[derive(Debug, Args)]
+pub struct IndexArgs {
+    /// Repository on the viewer. Defaults to the name `origin` points at.
+    pub repo: Option<String>,
+
+    /// Report what the index holds without queueing a new run.
+    #[arg(long)]
+    pub status: bool,
 }
 
 #[derive(Debug, Args)]

@@ -1,5 +1,6 @@
 //! Command implementations, plus the small amount of state they share.
 
+pub mod code;
 pub mod doctor;
 pub mod invite;
 pub mod plan;

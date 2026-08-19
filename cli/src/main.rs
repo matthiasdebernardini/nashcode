@@ -1,6 +1,6 @@
 use clap::Parser;
 use nashcode_cli::cli::{Cli, Command, PlanCommand};
-use nashcode_cli::commands::{Ctx, doctor, invite, plan, profiles, repo, setup};
+use nashcode_cli::commands::{Ctx, code, doctor, invite, plan, profiles, repo, setup};
 use nashcode_cli::output::Out;
 
 fn main() {
@@ -29,6 +29,7 @@ fn main() {
         Command::Plan(PlanCommand::New(a)) => plan::new(&ctx, a),
         Command::Annotate(a) => plan::annotate(&ctx, a),
         Command::Comments(a) => plan::comments(&ctx, a),
+        Command::Index(a) => code::run(&ctx, a),
     };
 
     if let Err(e) = result {

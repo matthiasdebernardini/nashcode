@@ -314,6 +314,20 @@ impl Client {
                 .with_context(|| format!("GET {url}"))?,
         )
     }
+
+    /// A plain POST to a full URL, used for the viewer's action endpoints.
+    ///
+    /// The viewer authenticates through Tailscale's identity headers, not through
+    /// dgit's token, so no credential is attached here. The tailnet is the perimeter.
+    pub fn post_url(&self, url: &str, body: &str) -> Result<Reply> {
+        Self::finish(
+            self.agent
+                .post(url)
+                .header("content-type", "application/json")
+                .send(body)
+                .with_context(|| format!("POST {url}"))?,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

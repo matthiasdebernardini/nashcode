@@ -393,9 +393,9 @@ mod tests {
         // `ort` does exactly this when libonnxruntime is missing, which is the state
         // of every box before the runtime is installed.
         let slot = Embeddings::new();
-        let error = slot
-            .load_with(|| panic!("Failed to load ONNX Runtime dylib"))
-            .expect_err("a panicking builder yields no embedder");
+        let Err(error) = slot.load_with(|| panic!("Failed to load ONNX Runtime dylib")) else {
+            panic!("a panicking builder must yield no embedder");
+        };
         assert!(error.to_string().contains("Failed to load ONNX Runtime dylib"), "{error}");
         assert!(slot.ready().is_none());
         assert!(slot.why_not().contains("ONNX"), "the reason is remembered");
@@ -408,9 +408,9 @@ mod tests {
 
         // A second attempt inside the retry window never reaches the builder, so a
         // missing dependency cannot put a download in front of every merge.
-        let error = slot
-            .load_with(|| panic!("the builder must not run again"))
-            .expect_err("still unavailable");
+        let Err(error) = slot.load_with(|| panic!("the builder must not run again")) else {
+            panic!("the slot must still be empty");
+        };
         assert!(error.to_string().contains("no runtime"), "{error}");
     }
 
