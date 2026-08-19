@@ -1052,15 +1052,52 @@ mean two repos that both depend on celld each keeping a copy, and no way to ask 
 in the tailnet depends on this". The URL is the identity; the short `name` is display
 only, which is why it is validated as a plain name and then never used for a path.
 
-Normalization is small and written down: the parser lowers scheme and host, a
-trailing `/` and a trailing `.git` come off, and the port is part of the key because
-two servers on one host are two upstreams.
+Normalization is small and written down: the parser lowers scheme and host, one
+trailing `/` and then a trailing `.git` come off, query and fragment are dropped, and
+the port is part of the key because two servers on one host are two upstreams.
 
 Every path component is *checked*, not cleaned: a segment outside
 `[A-Za-z0-9._~-]`, or one that is `.`, `..` or leading-dash, refuses the whole URL
 with an error in the stanza. Cleaning would be the more forgiving choice and the
 wrong one — two different URLs could clean down to one directory, and a shared mirror
 is a shared answer.
+
+Review found three ways the first version of that rule still let two URLs land on one
+directory. Each is now a refusal with a test:
+
+- **`.../a/.git` became `.../a`**, which belongs to a different URL. The `.git` suffix
+  now comes off before any trailing-slash trimming, so the last segment is left empty
+  and refused rather than quietly disappearing.
+- **`.../a/b.git/c` put a plain directory at `up/<host>/a/b.git`** — exactly where
+  `.../a/b`'s mirror goes. Every clone there afterwards fails with "not a git
+  repository", forever, with no self-heal. Any path segment ending in `.git` is
+  refused.
+- **A URL carrying credentials** keyed a mirror that repos share and that is fetched
+  anonymously. Refused, and git is handed the parser's normalized URL rather than the
+  manifest's own string.
+
+The third defence is `is_repo`, which decides clone-versus-fetch by looking for a
+`HEAD` file rather than for a directory. A stray directory at a mirror's address now
+fails one clone and says so, instead of being fetched into forever.
+
+### Plain `http` is for this box only
+
+`http://` and `https://` of one host share one mirror directory by design — the scheme
+is not in the key. That means an `http` spelling in one repo's manifest would silently
+downgrade the transport of a mirror another repo declared over `https`. Adding the
+scheme to the key would fix the downgrade by doubling the mirrors, which is the wrong
+trade. Instead plain `http` is allowed only for loopback (127.0.0.0/8, `::1`,
+`localhost`) — what the tests and a local dgit use — and everything else must be
+`https`, refused in the same words a bad scheme gets.
+
+It also closes most of a port-scan oracle: a manifest can no longer aim the fetcher at
+arbitrary hosts on the private network over plain http and read the outcome out of the
+stanza.
+
+This is the one place the implementation is *stricter* than SPEC was, so SPEC moved
+with it: the manifest bullet now says `https`, or `http` to loopback, and names the
+credential and directory-collision refusals alongside it. Tightening a contract still
+changes it, and a contract nobody updated is a contract nobody can trust.
 
 ### The stack stanza sits outside brain's tip cache
 
@@ -1072,9 +1109,12 @@ computing that state to decide whether to use the cache, which is the whole cost
 anyway. So the stanza is built fresh on every `/brain`, beside `code` and `activity`.
 
 The cost is two local git calls per repo per request (default branch, then `git show`
-of the manifest) plus one `rev-parse` per dep. A repo with no `.nashcode/stack.toml`
-pays the first two and grows no `stack` key at all — absent, not null, the way
-`architecture` is absent for a repo nobody has drawn.
+of the manifest), plus one `rev-parse` per dep and a second `cat-file` for a pinned
+one. A repo with no `.nashcode/stack.toml` pays the first two and grows no `stack` key
+at all — absent, not null, the way `architecture` is absent for a repo nobody has
+drawn. A repo whose *git* failed is a different answer again: the stanza appears with
+a manifest-level error, because a mirror having a bad minute must not look like a repo
+that never declared anything.
 
 ### Upstream fetches are anonymous
 
@@ -1087,23 +1127,48 @@ offered to github.com. Our own mirrors keep the token; these do not.
 A pin is fetched until `git cat-file -e <pin>^{commit}` says the commit is on disk,
 and then never again — upstream cannot change what a commit says. The fetch itself
 asks for `refs/heads/*` and `refs/tags/*`, which is every commit a normal upstream
-publishes; a pin that upstream has since orphaned is simply never found, and says so
-in `error` rather than retrying forever. Retries are on the same 30-minute interval a
-`track` dep uses, for the same reason: hammering a server that does not have the
-commit will not conjure it.
+publishes. A pin upstream does not publish on any of them is therefore never found,
+and the stanza says exactly that: *pin `<rev>` is not in the upstream's branches or
+tags*. The first version of this left `error: null` there, which read as "still
+loading" forever; being wrong and being behind are different states and now say so.
+Retries stay on the 30-minute interval a `track` dep uses, for the same reason:
+hammering a server that does not have the commit will not conjure it.
 
-A `pin` must look like a commit id (4 to 40 hex digits) and a `track` must look like
-a branch name. That is stricter than git — a tag is a legal pin to a person — and it
-is what lets both go straight into a git argument without an escape hatch.
+"Then never again" also means a satisfied pin does not inherit its neighbours'
+trouble. Two deps can name one URL — one pinned, one tracking a branch — and share one
+mirror and one fetch state. If the branch goes dark, the tracked dep is stale and the
+pinned one is not: it already has its commit, and there is nothing left it could want.
 
-### `Repo::rev_parse` echoes its own flag
+A `pin` must look like a commit id (7 to 40 hex digits) and a `track` must look like a
+branch name. That is stricter than git — a tag is a legal pin to a person, and git
+takes a 4-digit abbreviation — and it is what lets both go straight into a git
+argument without an escape hatch. Seven is the floor because four is ambiguous in any
+repo worth pinning, and a pin that quietly resolves to the wrong commit is worse than
+one that will not parse.
 
-`git rev-parse --end-of-options <rev>` prints `--end-of-options` on its own line
-before the id, so `Repo::rev_parse` returns two lines and the second one is the
-answer. Nothing in this work stream owns `git.rs`, so `upstream.rs` calls
-`rev-parse --verify --end-of-options` itself, which prints one line and exits nonzero
-for a revision that is not there. The shared helper is left as found; it is worth a
-look from whoever owns it.
+### Sync has a budget
+
+`POST /{repo}/stack/sync` exists because half an hour is sometimes too long. Without a
+limit it is also an amplifier: one endpoint anyone on the tailnet can call in a loop,
+aimed at a third party's server. So a mirror will not go back to the wire twice inside
+`SYNC_DEBOUNCE` (60s); inside the window sync answers from disk. The pin rule is
+checked first, so a satisfied pin still short-circuits for its own reason rather than
+looking rate-limited.
+
+The window is an atomic on the shared handle rather than a constant, so a test can
+stand on both sides of it without sleeping for a minute. That is the only reason it is
+a knob.
+
+### `Repo::rev_parse` was echoing its own flag
+
+`git rev-parse` echoes back every argument it does not recognise as a revision, and
+`--end-of-options` is one of them — so `Repo::rev_parse` was returning two lines with
+the commit on the second. The one caller in tree (`pages.rs` `current_blob`) was
+unharmed only because both sides of its comparison carried the same pollution. Fixed
+in `git.rs` by adding `--verify`, which promises exactly one object id and nothing
+else. A revision that does not exist was always an error — git exits 128 with or
+without the flag; the echo was the whole bug. `upstream.rs` uses the fixed helper;
+`git.rs` is on the claim row and the other agents have a note.
 
 ### The clock, and why the stanza also pokes it
 
@@ -1122,7 +1187,7 @@ door, and the only one that waits for the wire.
   in the stanza with its own error while its neighbours are fetched normally. Only
   TOML that will not parse at all becomes the manifest-level `error`, and then `deps`
   is empty.
-- **A refused dep is stripped of its mode and its path**, not merely flagged, so
+- **A refused dep is stripped of its mode and its location**, not merely flagged, so
   there is nothing for a later code path to act on by accident.
 - **The first `[[dep]]` of a repeated name is the one that works.** The duplicate is
   the one refused, which reads the way a person writing the file would expect.
@@ -1135,3 +1200,26 @@ door, and the only one that waits for the wire.
   plus `git update-server-info` plus a 40-line static file server on a loopback port.
   The fetches are real fetches with no network, and the server's request counter is
   what proves a satisfied pin stops asking.
+
+### Known, deliberately not fixed in phase 1
+
+Each of these came out of the phase-1 review, was weighed, and was left. None of them
+is a correctness bug; all three are shapes that only start to hurt at a size this does
+not have yet.
+
+- **The stanza is uncached.** Every `/brain` costs two local git calls per repo plus
+  one or two per dep. That is the same cost class as unclaimed open-work item 2 in
+  `COORDINATION.md` (cache `StackGraph::infer` per set of tips), and it wants the same
+  answer: a manifest cache keyed by the default-branch tip, and dep state keyed by the
+  mirror's own tips. Worth doing when the repo count or the dep count grows, not
+  before — the cache would have to be invalidated by the very fetches it is trying to
+  avoid observing.
+- **`watch` is fully serial.** One task walks every repo and every dep in order, so one
+  blackholed host stretches the whole 30-minute cadence by its timeout. Git's
+  low-speed timeout bounds it at 30s per fetch, so the cadence degrades rather than
+  stalls, and with two upstreams it is invisible. Bounded fan-out — a `JoinSet` with a
+  small limit — is the fix when a real stack has ten deps and one of them is slow.
+- **Two repos sharing one mirror is tested for the outcome, not for the race.** The
+  dedup test syncs them one after the other, so the per-mirror lock is exercised but
+  the contention on it is not. Proving that a concurrent pair produces one clone and
+  one fetch needs a barrier the test bed does not have.

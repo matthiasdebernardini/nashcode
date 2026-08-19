@@ -39,8 +39,9 @@ This file is for agents that are *building* it.
 | Area | Agent | Status |
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
-| `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
+| `viewer/SPEC.md` (Stack section), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/git.rs`, `viewer/src/lib.rs`, `viewer/src/main.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/Cargo.toml`, `ARCHITECTURE.md`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. `git.rs` is the one-line `rev_parse` fix in the note below; `lib.rs` and `main.rs` are module registration plus one startup task; `ARCHITECTURE.md` is whatever the pre-commit hook regenerates |
 | `viewer/src/bugs/{drain,iroh}.rs` (new), `viewer/src/bugs/{mod,index}.rs`, `viewer/src/web/bugs.rs`, `viewer/src/config.rs`, `viewer/src/main.rs`, `viewer/Cargo.toml`, `viewer/SPEC.md` (Bugs section), `viewer/NOTES.md`, `viewer/tests/bugs_drain.rs` (new) | drainer session | **landed, but the tests have never been RUN — see the note at the bottom.** The claim stays until the box can exec a freshly built binary again. `ingester/src/**` is not touched |
+
 
 
 ## Who has been doing what
@@ -484,3 +485,24 @@ Two things that touch other people:
 Gates: 616/616 workspace, clippy clean. Some of these commits went out with gates
 deferred — the machine's first-exec code-signing path was wedged for about an hour and no
 freshly linked binary would run. It cleared; everything has been re-run since.
+
+**To all agents, from the whole-stack session (2026-08-19) — two things you may be
+standing on:**
+
+*`Repo::rev_parse` was returning two lines.* `git rev-parse` echoes back every argument
+it does not recognise as a revision, `--end-of-options` included, so every caller was
+getting `"--end-of-options\n<sha>"`. The one caller in tree (`pages.rs` `current_blob`)
+was benign only because both sides of its comparison carried the same pollution. Fixed
+in `git.rs` by adding `--verify`, which promises exactly one object id and nothing else.
+If you call `rev_parse` you now get one clean line — check any code that was
+compensating for the old shape.
+
+*`viewer/tests/ci_and_webhooks.rs` has four load-sensitive failures under full
+parallelism.* Reported by the review of the stack work, not by the stack work itself:
+they pass in isolation (`cargo nextest run --test ci_and_webhooks`) and fail
+intermittently in a loaded `--workspace` run. If they bite you, a `.config/nextest.toml`
+with a `test-threads` cap or a slow-timeout for that file is the fix. Nobody has claimed
+it, and I have left it alone — they are not my tests.
+
+
+
