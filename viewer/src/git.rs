@@ -216,8 +216,17 @@ impl Repo {
     }
 
     /// Resolve any revision to a commit id.
+    ///
+    /// `--verify` is what makes the answer one line. Without it `git rev-parse` echoes
+    /// back every argument it does not recognise as a revision — `--end-of-options`
+    /// included — so callers were getting two lines with the commit on the second.
+    /// `--verify` promises exactly one object id and nothing else.
     pub async fn rev_parse(&self, rev: &str) -> GitResult<String> {
-        Ok(self.run(&["rev-parse", "--end-of-options", rev]).await?.trim().to_owned())
+        Ok(self
+            .run(&["rev-parse", "--verify", "--end-of-options", rev])
+            .await?
+            .trim()
+            .to_owned())
     }
 
     /// The repo's default branch, as recorded in `HEAD`. Falls back to whichever of
