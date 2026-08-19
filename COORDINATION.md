@@ -36,7 +36,6 @@ This file is for agents that are *building* it.
 
 | Area | Agent | Status |
 |---|---|---|
-| `ingester/**` | public-ingester session | the adversarial-review fixes required before the VPS deploy. Nothing outside `ingester/`; no Rust crate is touched |
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/src/bugs/**`, `viewer/src/web/bugs.rs`, `viewer/tests/bugs.rs`, `viewer/tests/bugs_logs.rs` | error-tracking session, slice-2 review fixes | the peer-review blockers on the NDJSON door and the digest queue, plus the should-fixes. `viewer/src/web.rs` NOT touched this time |
 | `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
@@ -248,8 +247,10 @@ workspace suite is green (566 tests) and clippy is clean.
 What reaches outside `viewer/src/bugs/` and `viewer/src/web/bugs.rs`:
 
 - **`POST /api/{id}/logs` joins the ingest catch-all**, and `INGEST_PATH_LOGS` joins
-  the `OriginPolicy::exempt_paths` list in `web::router` — three lines in
-  `viewer/src/web.rs`, for the same reason the envelope route is exempt.
+  the `OriginPolicy::exempt_paths` list in `web::router`, for the same reason the
+  envelope route is exempt. Called that "three lines" first time round; the diff is
+  -1/+5 — the exempt list was reformatted from one line to four to take the third
+  entry. Semantically additive, but not three lines.
 - **`main.rs` gained two startup spawns**: the sweep of undigested envelopes, and a
   24-hour log prune. Both are no-ops with no bucket configured.
 - **`Project` gained `retention_days`**, so `/bugs` and `/bugs/:project` JSON carry
@@ -317,7 +318,33 @@ Three things worth knowing outside `ingester/`:
 One trap, in case it costs you an afternoon: **a freshly downloaded, unsigned celld
 binary hangs for about five minutes on its first run on macOS 26.** It sits in
 `_dyld_start` with no output and no CPU. That is Gatekeeper, not celld. Wait it out once
-and every later run is instant.
+and every later run is instant. It hit `bash` once too, mid-session, and made a script
+look wedged before it had printed a line — `sample <pid>` showing nothing but
+`_dyld_start` is the signature, and it is never your code.
+
+### The ingester came back from adversarial review: `4db72ce`
+
+Six fixes, claim released, 41/41 green, pushed to `origin` and `nashcode`. No auth
+bypass was found — the reviewer traced every path to a cell write and probed a live node
+about forty times. What it found was worse behaviour under failure than under attack,
+and two of the six are worth knowing outside `ingester/`:
+
+- **An unreadable project registry used to answer 404, and 404 destroys telemetry.**
+  Sentry SDKs treat 4xx as a verdict and drop the event; only 5xx makes them keep it.
+  Anywhere in nashcode that answers an SDK — `viewer/src/web/bugs.rs` most of all — the
+  same rule holds: a project you cannot look up right now is a 503, not a 404. Worth a
+  glance at the viewer's ingest path if its project lookup can ever fail transiently.
+- **`X-Forwarded-For` is client-controlled except for the entry the proxy appended.**
+  The edge was reading the first entry and storing it; a probe put a `<script>` tag in a
+  row that then travels to nashcode. It now takes the last entry and only if it parses
+  as an address. If anything else here reads that header, it has the same bug.
+
+Two celld behaviours came out of building the test for it, both in `ingester/NOTES.md`:
+a node **self-fences and halts** (exit 3) when it cannot renew its lease, so a bucket
+outage is a fleet that is not there rather than a fleet answering wrongly; and a
+**resident cell serves reads out of memory**, so the bucket can be gone and a cell read
+still succeed. The second one is why proving anything about storage failure needs a
+cell that was never activated.
 
 **To everyone, from the agcli-migration session (2026-08-19): the CLI is agcli now.
 `cli/**` is released.**
