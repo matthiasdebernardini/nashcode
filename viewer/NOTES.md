@@ -1260,13 +1260,24 @@ that says so, because that is a slow upstream, not a reader's mistake.
 
 The rev in a query string reaches a git argv, so it is held to `upstream::is_commit_id` —
 the same 7-to-40 hex-digit rule a `pin` in the manifest is held to, exported rather than
-written twice. Then the mirror is asked whether it has the commit (`cat-file -e`), and a
-commit it does not have is a 404.
+written twice. Then one question for the mirror: `rev-parse --verify <rev>^{commit}` both
+asks whether the commit is on disk and answers with its full id, since peeling to
+`^{commit}` has to read the object to do it. One call, not a `cat-file -e` followed by a
+resolve. A commit the mirror does not have fails it, and that is the 404.
 
 Never a fetch. Browsing is a read of what has been mirrored; if a page load could pull a
 new commit, any link on any page would be a request aimed at somebody else's server, and
-`SYNC_DEBOUNCE` would be a budget with a hole in it. The tests hold the upstream's
-request counter across the whole browse surface, including the 404s.
+`SYNC_DEBOUNCE` would be a budget with a hole in it. The dep tree and blob routes hold to
+that absolutely; the column page is the one surface that starts anything, and only in the
+background, exactly as the brain stanza does.
+
+Counting requests is how the tests hold it, and a counted claim is only worth its
+arming: a dep is not due for half an hour after its last attempt, so a test that syncs
+and then asserts "no more requests" would pass no matter what the pages did.
+`Upstreams::set_track_interval` drops the interval to zero and every counting test first
+proves the column page *does* reach the upstream under exactly those conditions. A
+regression that gave a dep's tree page the column page's refresh would then show up as a
+number that moved.
 
 The full commit id is what travels on the links out of a page, not the abbreviation the
 reader typed: one canonical URL per tree, whatever spelling got them there. Browsing at
@@ -1321,8 +1332,54 @@ sometimes there is worse than a link that says "not here" when followed.
   over git's dumb HTTP protocol on a loopback port, with a request counter — and
   `bed_declaring` are now shared by `stack_deps.rs` and `stack_browse.rs` instead of
   copied. Additive to the common harness; no `Config` fields changed.
+- **`sync` is not a dep name.** `POST /{repo}/stack/sync` is a static route, so
+  `/{repo}/stack/sync` can never be a dep's page. A manifest using the name would get a
+  link on the column page that answers "not with this method". Validation refuses the
+  name where the manifest is read, with an error that says why, rather than letting the
+  collision surface as a dead link.
+- **Refused is not stale.** A dep whose declaration was refused has no mode after
+  validation, which is exactly how the column page tells the two apart: an upstream
+  nobody could reach is behind and reads "stale"; a URL that was never going to be
+  fetched reads "refused", in danger colours, with the reason underneath. Calling both
+  of them stale would suggest the second one is one good minute away from working.
 - **The gitlink fixtures are written straight into the index** with `update-index
   --cacheinfo 160000,<sha>,<path>`. A real `git submodule add` would clone the upstream
   into the fixture and prove nothing extra: the tree entry plus `.gitmodules` is the
   whole of what the viewer reads, and this way a gitlink can point at a commit that is
   deliberately absent.
+
+### Known, deliberately not fixed in phase 2
+
+Each came out of the phase-2 review, was weighed, and was left. None is a correctness
+bug in what phase 2 promises; each is worth doing when the shape it assumes stops
+holding.
+
+- **A manifest read error wears the parse error's clothes.** `Upstreams::manifest`
+  reports a git failure as a manifest whose `error` is `cannot read ...: <git stderr>`,
+  which the column page renders under "this manifest will not parse". Two problems in
+  one: a reader cannot tell a broken TOML file from a mirror having a bad minute, and
+  git's stderr can carry a server-side path onto a page that needs no authentication.
+  The fix is a second error kind on `Manifest`, rendered as a different card, with the
+  git text logged rather than shown. It is a small change with a brain-shape decision
+  attached, which is why it is not folded into a browse commit.
+- **Two deps declaring one URL: the first wins a gitlink.** `submodule_links` matches on
+  the mirror directory and takes the first dep whose path matches, so if a manifest
+  names one upstream twice the gitlink links to whichever was declared first. Manifest
+  order is at least stable and explains itself; naming one upstream twice is already
+  odd. A rule that prefers the dep whose commit is on disk would be the better answer if
+  it ever comes up.
+- **The `.gitmodules` read is uncapped.** `show_file` reads the whole blob, so a repo
+  carrying a hostile `.gitmodules` makes the viewer hold it in memory for one render.
+  Same class as the README the code tab already reads at full size, and it wants the
+  same answer: a byte cap on the page reads, in one place, rather than a special case
+  here.
+- **A gitlink-bearing tree re-reads the manifest.** Rendering a tree with submodules in
+  it costs `column()`: the default branch, the manifest blob, and one `rev-parse` per
+  dep, plus one more per matched gitlink. Trees with submodules are rare and columns are
+  short, so it is invisible today; a wide column under a repo that vendors everything is
+  where it starts to hurt, and the answer is the manifest cache the phase-1 notes
+  already want for the brain stanza.
+- **The read-only POST assertion covers one path of four.** The test posts to a dep blob
+  URL and takes a 404 or 405. `/{repo}/stack`, `/{repo}/stack/{dep}` and the tree route
+  are not posted to. There is no handler that could accept them — the router only knows
+  the pages — so this is coverage, not a hole.
