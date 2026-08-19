@@ -72,16 +72,20 @@ pub async fn shell(
     }
 }
 
-/// GitHub-style tab nav for a repo: Code / Docs / Stacks / Plans / Board / CI / Agent /
-/// Architecture.
+/// GitHub-style tab nav for a repo: Code / Docs / Stacks / Stack / Plans / Board / CI /
+/// Agent / Architecture.
 #[component]
 pub async fn repo_tabs(#[into] repo: String, active: &'static str) -> Result {
-    let tabs: [(&str, &str, &str, String); 8] = [
+    let tabs: [(&str, &str, &str, String); 9] = [
         ("code", "Code", "ph-code", format!("/{repo}")),
         // The wiki reads the repo's own markdown, so it sits beside the code it
         // describes rather than off with the planning tabs.
         ("docs", "Docs", "ph-book-open", format!("/{repo}/docs")),
         ("stacks", "Stacks", "ph-stack", format!("/{repo}/stacks")),
+        // Two tabs, one word, nothing in common: "Stacks" is branch stacks, "Stack" is
+        // the upstream dependency column. They sit side by side and each page says in
+        // one line what the other one is.
+        ("stack", "Stack", "ph-cube", format!("/{repo}/stack")),
         ("plans", "Plans", "ph-file-text", format!("/{repo}/plans")),
         ("board", "Board", "ph-kanban", format!("/{repo}/board")),
         ("ci", "CI", "ph-play", format!("/{repo}/ci")),

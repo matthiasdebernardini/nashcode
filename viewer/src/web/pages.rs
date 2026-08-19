@@ -164,6 +164,11 @@ async fn tree_page(cx: &Cx, dir: String) -> Result {
     // Directories first, then files, each alphabetical — the GitHub order.
     entries.sort_by(|a, b| b.is_dir().cmp(&a.is_dir()).then_with(|| a.name.cmp(&b.name)));
 
+    // A gitlink whose `.gitmodules` URL is one of this repo's mirrored deps opens that
+    // dep at the gitlink's commit; every other one keeps the inert label below. Free on
+    // a tree with no submodules, which is nearly every tree.
+    let links = crate::web::stack::submodule_links(cx, &name, &repo, &tip, &entries).await;
+
     let readme = entries
         .iter()
         .find(|entry| {
@@ -194,10 +199,11 @@ async fn tree_page(cx: &Cx, dir: String) -> Result {
                     <div class="Box-row color-fg-muted">"This directory is empty."</div>
                 }
                 let n = &name;
+                let links_ref = &links;
                 for entry in entries {
                     <div key=(entry.path.clone()) class="Box-row d-flex flex-items-center gap-2">
                         <i class=(entry_icon(&entry))></i>
-                        match entry_url(n, &entry) {
+                        match entry_url(n, &entry).or_else(|| links_ref.get(&entry.path).cloned()) {
                             Some(url) => <a class="Link--primary" href=(url)>(entry.name.clone())</a>,
                             None => <span>(entry.name.clone()) <span class="Label">"submodule"</span></span>,
                         }
@@ -370,7 +376,7 @@ fn entry_url(repo: &str, entry: &TreeEntry) -> Option<String> {
     }
 }
 
-fn entry_icon(entry: &TreeEntry) -> &'static str {
+pub(super) fn entry_icon(entry: &TreeEntry) -> &'static str {
     match entry.kind {
         EntryKind::Dir => "ph ph-folder color-fg-accent",
         EntryKind::Symlink => "ph ph-link color-fg-muted",
@@ -414,7 +420,7 @@ const GUTTER_LINE_LIMIT: usize = 50_000;
 /// The name is what the server knows; the browser turns it into one dynamic
 /// `import()`, so an id nobody's repo uses costs nothing. `None` means the plain
 /// `<pre>` stands, which is also what happens with JS off.
-fn shiki_lang(name: &str) -> Option<&'static str> {
+pub(super) fn shiki_lang(name: &str) -> Option<&'static str> {
     let lower = name.to_ascii_lowercase();
     let by_name = match lower.rsplit('/').next().unwrap_or(&lower) {
         "dockerfile" | "containerfile" => Some("dockerfile"),
@@ -497,7 +503,7 @@ fn shiki_lang(name: &str) -> Option<&'static str> {
 /// `#L10` and `#L10-L20` work with JS off and survive highlighting: `app.js` swaps the
 /// *contents* of each line, never the gutter around it. `data-lang`, when present,
 /// names the shiki grammar the browser should fetch.
-fn numbered_code(text: &str, lang: Option<&str>) -> String {
+pub(super) fn numbered_code(text: &str, lang: Option<&str>) -> String {
     let mut lines: Vec<&str> = text.split('\n').collect();
     // A trailing newline ends the last line; it does not start another one.
     if lines.len() > 1 && lines.last() == Some(&"") {
@@ -530,7 +536,7 @@ fn numbered_code(text: &str, lang: Option<&str>) -> String {
     html
 }
 
-fn human_size(bytes: u64) -> String {
+pub(super) fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut size = bytes as f64;
     let mut unit = 0;
@@ -1046,7 +1052,11 @@ async fn repo_stacks(cx: &Cx) -> Result {
 
     view! {
         shell(title: format!("{name} · stacks"), repo: name.clone(), active: "stacks", status: Some(ctx.status.clone()),
-            <h3 class="mb-2"><i class="ph ph-stack"></i>" Stacks"</h3>
+            <h3 class="mb-1"><i class="ph ph-stack"></i>" Stacks"</h3>
+            <p class="color-fg-muted text-small mb-3">
+                "Branches stacked on branches. The upstream dependency column is the "
+                <a href=(format!("/{name}/stack"))>"Stack"</a>" tab."
+            </p>
             <div class="d-flex flex-wrap gap-3 mb-4">
                 let n = &name;
                 for (i, chain) in chains.into_iter().enumerate() {
