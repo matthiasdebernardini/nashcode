@@ -1433,7 +1433,135 @@ CREATE TABLE IF NOT EXISTS code_runs (
 );
 CREATE INDEX IF NOT EXISTS code_runs_repo ON code_runs (repo, created_at);
 
+CREATE TABLE IF NOT EXISTS architecture_submissions (
+    id         INTEGER PRIMARY KEY,
+    repo       TEXT NOT NULL,
+    mermaid    TEXT NOT NULL,
+    title      TEXT,
+    note       TEXT,
+    author     TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS architecture_repo ON architecture_submissions (repo, created_at, id);
+
 "#;
+
+// ---- architecture ----------------------------------------------------------------
+
+/// A submitted diagram. Exactly the JSON `GET /{repo}/architecture` returns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchitectureSubmission {
+    pub id: i64,
+    pub repo: String,
+    /// The diagram source, stored verbatim. Untrusted: never splice it into HTML.
+    pub mermaid: String,
+    pub title: Option<String>,
+    pub note: Option<String>,
+    pub author: String,
+    pub created_at: String,
+}
+
+/// One line of the history list — everything but the diagram itself.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArchitectureEntry {
+    pub id: i64,
+    pub title: Option<String>,
+    pub author: String,
+    pub created_at: String,
+}
+
+/// A submission on its way in.
+#[derive(Debug, Clone)]
+pub struct NewArchitecture {
+    pub repo: String,
+    pub mermaid: String,
+    pub title: Option<String>,
+    pub note: Option<String>,
+    pub author: String,
+}
+
+impl Db {
+    /// Store a diagram and hand back the stored row. Append-only: nothing updates.
+    pub fn add_architecture(&self, new: NewArchitecture) -> DbResult<ArchitectureSubmission> {
+        let created_at = now();
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO architecture_submissions (repo, mermaid, title, note, author, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![new.repo, new.mermaid, new.title, new.note, new.author, created_at],
+            )?;
+            Ok(ArchitectureSubmission {
+                id: conn.last_insert_rowid(),
+                repo: new.repo.clone(),
+                mermaid: new.mermaid.clone(),
+                title: new.title.clone(),
+                note: new.note.clone(),
+                author: new.author.clone(),
+                created_at: created_at.clone(),
+            })
+        })
+    }
+
+    /// The newest submission for a repo, which is what the tab renders.
+    pub fn latest_architecture(&self, repo: &str) -> DbResult<Option<ArchitectureSubmission>> {
+        self.with(|conn| {
+            conn.query_row(
+                "SELECT id, repo, mermaid, title, note, author, created_at
+                 FROM architecture_submissions WHERE repo = ?1
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![repo],
+                read_architecture,
+            )
+            .optional()
+        })
+    }
+
+    /// One submission by id, scoped to its repo.
+    pub fn architecture(&self, repo: &str, id: i64) -> DbResult<Option<ArchitectureSubmission>> {
+        self.with(|conn| {
+            conn.query_row(
+                "SELECT id, repo, mermaid, title, note, author, created_at
+                 FROM architecture_submissions WHERE repo = ?1 AND id = ?2",
+                params![repo, id],
+                read_architecture,
+            )
+            .optional()
+        })
+    }
+
+    /// Every submission, newest first, without the diagram sources.
+    pub fn architecture_history(&self, repo: &str) -> DbResult<Vec<ArchitectureEntry>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, title, author, created_at FROM architecture_submissions
+                 WHERE repo = ?1 ORDER BY created_at DESC, id DESC",
+            )?;
+            let rows = statement
+                .query_map(params![repo], |row| {
+                    Ok(ArchitectureEntry {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        author: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                })?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+}
+
+fn read_architecture(row: &rusqlite::Row<'_>) -> DbResult<ArchitectureSubmission> {
+    Ok(ArchitectureSubmission {
+        id: row.get(0)?,
+        repo: row.get(1)?,
+        mermaid: row.get(2)?,
+        title: row.get(3)?,
+        note: row.get(4)?,
+        author: row.get(5)?,
+        created_at: row.get(6)?,
+    })
+}
 
 #[cfg(test)]
 mod tests {

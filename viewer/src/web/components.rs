@@ -72,10 +72,11 @@ pub async fn shell(
     }
 }
 
-/// GitHub-style tab nav for a repo: Code / Docs / Stacks / Plans / Board / CI / Agent.
+/// GitHub-style tab nav for a repo: Code / Docs / Stacks / Plans / Board / CI / Agent /
+/// Architecture.
 #[component]
 pub async fn repo_tabs(#[into] repo: String, active: &'static str) -> Result {
-    let tabs: [(&str, &str, &str, String); 7] = [
+    let tabs: [(&str, &str, &str, String); 8] = [
         ("code", "Code", "ph-code", format!("/{repo}")),
         // The wiki reads the repo's own markdown, so it sits beside the code it
         // describes rather than off with the planning tabs.
@@ -87,6 +88,7 @@ pub async fn repo_tabs(#[into] repo: String, active: &'static str) -> Result {
         // Traces and Prompts were two tabs over the same sessions. One tab reads them
         // as the conversation they were.
         ("agent", "Agent", "ph-robot", format!("/{repo}/agent")),
+        ("architecture", "Architecture", "ph-graph", format!("/{repo}/architecture")),
     ];
     view! {
         <nav class="UnderlineNav container-lg px-3" aria-label="Repository">

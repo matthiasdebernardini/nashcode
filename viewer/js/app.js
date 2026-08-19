@@ -8,7 +8,8 @@
  *  2. blob pages: line anchors (always) and shiki highlighting (when the server
  *     named a language), loading one grammar chunk on demand;
  *  3. native drag-and-drop on the board, POSTing moves to the server;
- *  4. small conveniences: toasts.
+ *  4. the architecture tab: mermaid, loaded on demand, over server-escaped text;
+ *  5. small conveniences: toasts.
  */
 import { FileDiff, parsePatchFiles } from "@pierre/diffs";
 
@@ -266,6 +267,52 @@ async function highlightBlob(pre, lines) {
   }
 }
 
+/* ---- architecture ------------------------------------------------------------ */
+
+/*
+ * Mermaid is bigger than the rest of the bundle put together, so it lives behind a
+ * dynamic import that only the architecture tab ever reaches.
+ *
+ * The diagram source is whatever an agent posted. It arrives in the DOM as escaped
+ * text inside the fallback <pre>; reading `textContent` is what makes it text again,
+ * so no server escaping ever has to be undone by hand. `securityLevel: "strict"` is
+ * what keeps mermaid from honouring HTML or click handlers inside that text.
+ */
+function mountMermaid() {
+  const blocks = [...document.querySelectorAll(".nashcode-mermaid")];
+  if (!blocks.length) return;
+  renderMermaid(blocks).catch((error) => {
+    // The source is already on the page; the picture was the optional part.
+    console.warn("nashcode: mermaid failed", error);
+  });
+}
+
+async function renderMermaid(blocks) {
+  const { default: mermaid } = await import("mermaid");
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default",
+  });
+
+  for (let i = 0; i < blocks.length; i += 1) {
+    const block = blocks[i];
+    const source = block.querySelector(".nashcode-mermaid-source");
+    const out = block.querySelector(".nashcode-mermaid-out");
+    if (!source || !out) continue;
+    try {
+      const { svg } = await mermaid.render(`nashcode-mermaid-${i}`, source.textContent);
+      out.innerHTML = svg;
+      // The source was the fallback; the picture replaces it.
+      source.hidden = true;
+    } catch (error) {
+      // Mermaid's own message, above the source that produced it.
+      out.className = "nashcode-mermaid-out flash flash-error";
+      out.textContent = String(error && error.message ? error.message : error);
+    }
+  }
+}
+
 /* ---- board ------------------------------------------------------------------ */
 
 function toast(message, tone) {
@@ -340,7 +387,7 @@ function mountBoard() {
 // Each enhancement stands alone: one that throws must not take the others with it.
 // The server-rendered page underneath every one of them is already correct.
 function mountAll() {
-  for (const mount of [mountDiffs, mountBlob, mountBoard]) {
+  for (const mount of [mountDiffs, mountBlob, mountBoard, mountMermaid]) {
     try {
       mount();
     } catch (error) {

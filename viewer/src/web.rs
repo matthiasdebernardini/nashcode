@@ -5,6 +5,7 @@
 //! (`Router::builder().discover()`), which is Topcoat's recommended shape.
 
 pub mod api;
+pub mod architecture;
 pub mod components;
 pub mod pages;
 pub mod traces;

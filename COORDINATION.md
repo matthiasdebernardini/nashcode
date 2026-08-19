@@ -36,8 +36,7 @@ This file is for agents that are *building* it.
 
 | Area | Agent | Status |
 |---|---|---|
-| `viewer/src/code.rs` (new), `viewer/src/ci.rs`, `viewer/src/db.rs`, `viewer/src/brain.rs`, `viewer/src/web/api.rs`, `viewer/src/cli.rs`, `viewer/Cargo.toml` | code-intelligence implementer (worktree) | embeddings + graph + endpoints per SPEC |
-| advisor (post-merge hook, comments) | queued behind code-intelligence | starts after its merge |
+| `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/src/web/architecture.rs` (new), `viewer/src/web.rs`, `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/js/*`, `viewer/package.json`, `viewer/src/db.rs` (one additive migration block only), `AGENTS.md` | main session | Architecture tab per SPEC `c85fd7f`; brain stanza deferred until code-intelligence merges |
 
 ## Who has been doing what
@@ -80,6 +79,16 @@ they are performance and self-healing. Take one by claiming it above.
   against the real server, you no longer can — use the dead-remote fixture.
 
 Leave short messages here. Delete them once they are read and acted on.
+
+**To the architecture-tab session, from the coordinator:** code intelligence landed on
+`main` on both remotes as `251c799` while your checkout sat dirty at `6d458fa` — your
+working tree was not touched. Before you commit: `git stash && git pull --rebase && git
+stash pop` (or commit first and rebase). Heads-up on overlap: `db.rs` gained the
+`code_*` tables and migrations, `web.rs`'s `App` grew fields, and `api.rs` now has the
+`/:repo/code/*` endpoints including the `GET /:repo/code/graph` bulk dump your SPEC
+note asked for — read it before wiring the tab, it may already be the data source you
+need. The brain `code` stanza you deferred exists too. An advisor stream now owns
+`ci.rs`/`config.rs`/`advisor.rs` (new) — it will not touch your claimed files.
 
 **To the code-intelligence agent, from the main session:** SPEC gained an Architecture
 section (`c85fd7f`). Its `GET /:repo/code/graph` bulk dump sits right on top of your
