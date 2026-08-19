@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use nashcode::brain::Brain;
 use nashcode::ci::CiQueue;
+use nashcode::code::{EmbedError, Embedder, Embeddings, Indexer};
 use nashcode::config::Config;
 use nashcode::db::Db;
 use nashcode::docs::DocIndexCache;
@@ -146,6 +147,8 @@ pub struct TestBed {
     pub mirrors: Mirrors,
     pub app: App,
     pub router: Router,
+    pub embeddings: Embeddings,
+    pub indexer: Indexer,
 }
 
 impl TestBed {
@@ -161,6 +164,13 @@ impl TestBed {
     pub fn remote_tip(&self, repo: &str, branch: &str) -> String {
         let bare = self.remote_root().join(format!("{repo}.git"));
         git(&bare, &["rev-parse", &format!("refs/heads/{branch}")]).trim().to_owned()
+    }
+
+    /// Bring the mirror up to date and index the default branch, the way the CI
+    /// worker does when a merge lands.
+    pub async fn index(&self, repo: &str) -> nashcode::db::CodeRun {
+        self.mirrors.refresh_now(repo).await;
+        self.indexer.index_default_branch(repo).await.expect("the index run starts")
     }
 }
 
@@ -239,6 +249,15 @@ fn testbed_build(root: tempfile::TempDir, config: Arc<Config>, observe: bool) ->
         mirrors: mirrors.clone(),
         hooks: hooks.clone(),
     };
+    // Every bed gets a working embedder, so the semantic path is exercised without a
+    // model download. Tests that want the "no model" behaviour build an empty slot.
+    let embeddings = Embeddings::with(Arc::new(WordBag::default()));
+    let indexer = Indexer {
+        config: config.clone(),
+        db: db.clone(),
+        mirrors: mirrors.clone(),
+        embeddings: embeddings.clone(),
+    };
     let app = App {
         config: config.clone(),
         db: db.clone(),
@@ -247,9 +266,54 @@ fn testbed_build(root: tempfile::TempDir, config: Arc<Config>, observe: bool) ->
         ci,
         ops,
         brain: Brain::new(),
+        embeddings: embeddings.clone(),
     };
     let router = web::router(app.clone());
-    TestBed { root, config, db, mirrors, app, router }
+    TestBed { root, config, db, mirrors, app, router, embeddings, indexer }
+}
+
+/// A deterministic stand-in for the real encoder.
+///
+/// Each vector counts how often a fixed vocabulary appears in the text, so text that
+/// talks about the same things scores high and unrelated text scores low. No model, no
+/// download, no network — which is what makes the whole pipeline testable.
+#[derive(Debug, Clone)]
+pub struct WordBag {
+    vocabulary: Vec<String>,
+}
+
+impl Default for WordBag {
+    fn default() -> Self {
+        Self::new(&[
+            "retry", "backoff", "connect", "socket", "parse", "config", "render",
+            "widget", "draw", "sleep", "error", "log",
+        ])
+    }
+}
+
+impl WordBag {
+    pub fn new(words: &[&str]) -> Self {
+        Self { vocabulary: words.iter().map(|w| (*w).to_owned()).collect() }
+    }
+}
+
+impl Embedder for WordBag {
+    fn model(&self) -> &str {
+        "word-bag-test"
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                let lower = text.to_ascii_lowercase();
+                self.vocabulary
+                    .iter()
+                    .map(|word| lower.matches(word.as_str()).count() as f32)
+                    .collect()
+            })
+            .collect())
+    }
 }
 
 /// One remote named `demo` built by `build`, then a testbed over it.
@@ -376,6 +440,66 @@ pub async fn post_form_from(
 pub struct StubServer {
     pub url: String,
     pub received: tokio::sync::mpsc::UnboundedReceiver<String>,
+}
+
+/// A stub that answers each request with the next body in the list, repeating the
+/// last one once the list runs out. Enough to drive a multi-turn tool conversation.
+pub async fn spawn_stub_seq(status_line: &'static str, bodies: Vec<String>) -> StubServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let bodies = Arc::new(bodies);
+    let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else { break };
+            let tx = tx.clone();
+            let bodies = bodies.clone();
+            let served = served.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let (headers_end, content_length) = loop {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = find_headers_end(&buf) {
+                        let headers = String::from_utf8_lossy(&buf[..pos]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.trim()
+                                    .eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        break (pos + 4, length);
+                    }
+                };
+                while buf.len() < headers_end + content_length {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let _ = tx.send(String::from_utf8_lossy(&buf[headers_end..]).into_owned());
+                let index = served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body = bodies[index.min(bodies.len() - 1)].clone();
+                let reply = format!(
+                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    StubServer { url: format!("http://{addr}"), received: rx }
 }
 
 pub async fn spawn_stub(status_line: &'static str, response_body: String) -> StubServer {

@@ -122,6 +122,8 @@ impl Brain {
             object.insert("stale".to_owned(), serde_json::json!(status.stale));
             object.insert("activity".to_owned(), activity_json(db, name, since));
             object.insert("open_comment_counts".to_owned(), comment_counts(db, name));
+            // How much the repo is queryable as code, and how old that answer is.
+            object.insert("code".to_owned(), crate::code::brain_stanza(db, name));
         }
         value
     }
@@ -252,6 +254,10 @@ fn comment_counts(db: &Db, repo: &str) -> serde_json::Value {
 pub struct Answer {
     pub answer: String,
     pub model: String,
+    /// Which code-intelligence tools the model reached for, in order. Visible so an
+    /// agent reading the reply can see what it was actually grounded in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_used: Vec<String>,
 }
 
 /// Why an ask failed, mapped onto responses by the route.
@@ -264,14 +270,193 @@ pub enum AskError {
 
 const SYSTEM_PROMPT: &str = "You are the work-state brain for a small personal git \
     forge. Answer from the STATE JSON and the documents given; be terse and concrete; \
-    name branches, plans, and cards by their real identifiers.";
+    name branches, plans, and cards by their real identifiers. The STATE JSON \
+    describes plans, cards, branches, and activity, but not the source code. To answer \
+    anything about the code itself, call the tools: code_text for an exact string, \
+    code_similar for a description of behaviour, and code_def, code_refs, and \
+    code_callers for a named symbol. Cite the file and line you got an answer from. A \
+    tool that answers with an empty list has answered: say so rather than guessing.";
 
-/// Send exactly one request to the Claude API and shape the reply.
+/// How many tool round trips one question may take before the loop gives up and asks
+/// for a final answer. Enough for "find it, then find who calls it, then read it";
+/// short enough that a model stuck in a loop still returns.
+const MAX_TOOL_TURNS: usize = 6;
+
+/// Everything the code-intelligence tools need. Held by the route, passed in whole so
+/// `ask` has one parameter for "the repos you may look at" rather than four.
+#[derive(Clone)]
+pub struct Tools {
+    pub db: Db,
+    pub mirrors: Mirrors,
+    pub embeddings: crate::code::Embeddings,
+    /// The repos the question was scoped to. A tool call naming anything else is
+    /// refused: `/brain/ask?repo=x` must not become a way to read repo `y`.
+    pub repos: Vec<String>,
+}
+
+impl std::fmt::Debug for Tools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Tools")
+    }
+}
+
+impl Tools {
+    /// The tool definitions, as the Claude API wants them.
+    fn definitions(&self) -> serde_json::Value {
+        let repo = serde_json::json!({
+            "type": "string",
+            "description": format!("The repository to search. One of: {}.", self.repos.join(", ")),
+        });
+        let limit = serde_json::json!({
+            "type": "integer",
+            "description": "How many results to return. Defaults to 10.",
+        });
+        serde_json::json!([
+            {
+                "name": "code_text",
+                "description": "Exact full-text search over a repository's default \
+                    branch, the way `git grep` does it. Use it when you know the \
+                    literal string: an error message, a config key, an identifier you \
+                    are unsure is a symbol.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "repo": repo, "q": {
+                        "type": "string",
+                        "description": "The literal text to find. Not a regular expression.",
+                    }, "limit": limit },
+                    "required": ["repo", "q"],
+                },
+            },
+            {
+                "name": "code_similar",
+                "description": "Semantic search: find the code that is *about* \
+                    something, by meaning rather than by spelling. Use it when you can \
+                    describe the behaviour but not name it — 'where retries are backed \
+                    off', 'the code that parses the config file'.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "repo": repo, "q": {
+                        "type": "string",
+                        "description": "A description of the behaviour you are looking for.",
+                    }, "limit": limit },
+                    "required": ["repo", "q"],
+                },
+            },
+            {
+                "name": "code_def",
+                "description": "Where a named symbol is defined: its file, its line \
+                    range, and what kind of thing it is.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "repo": repo, "symbol": {
+                        "type": "string",
+                        "description": "The bare name, without a module path: `retry`, not `net::retry`.",
+                    } },
+                    "required": ["repo", "symbol"],
+                },
+            },
+            {
+                "name": "code_refs",
+                "description": "Every place a named symbol is used, with the function \
+                    each use sits inside.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "repo": repo, "symbol": { "type": "string" }, "limit": limit },
+                    "required": ["repo", "symbol"],
+                },
+            },
+            {
+                "name": "code_callers",
+                "description": "The functions that call a named symbol. This is the \
+                    'who depends on this' question.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "repo": repo, "symbol": { "type": "string" }, "limit": limit },
+                    "required": ["repo", "symbol"],
+                },
+            },
+        ])
+    }
+
+    /// Run one tool call. Every failure is a result the model can read and recover
+    /// from, never an error that ends the conversation.
+    async fn call(&self, name: &str, input: &serde_json::Value) -> serde_json::Value {
+        let repo = input["repo"].as_str().unwrap_or_default().to_owned();
+        if !self.repos.iter().any(|known| known == &repo) {
+            return serde_json::json!({
+                "error": format!(
+                    "no repository named {repo} is in scope; ask about one of: {}",
+                    self.repos.join(", ")
+                ),
+            });
+        }
+        let limit = input["limit"]
+            .as_u64()
+            .map(|n| n as usize)
+            .unwrap_or(crate::code::DEFAULT_LIMIT)
+            .clamp(1, crate::code::MAX_LIMIT);
+        let symbol = input["symbol"].as_str().unwrap_or_default().trim().to_owned();
+        let query = input["q"].as_str().unwrap_or_default().trim().to_owned();
+
+        match name {
+            "code_text" => {
+                let handle = self.mirrors.repo(&repo);
+                let rev = handle.default_branch().await.unwrap_or_else(|_| "HEAD".to_owned());
+                match crate::code::grep(&handle, &rev, &query, limit).await {
+                    Ok(hits) => serde_json::json!({ "hits": hits }),
+                    Err(error) => serde_json::json!({ "error": error.to_string() }),
+                }
+            }
+            "code_similar" => match self.embeddings.ready() {
+                None => serde_json::json!({
+                    "error": format!(
+                        "semantic search is unavailable: {}. Use code_text instead.",
+                        self.embeddings.why_not()
+                    ),
+                }),
+                Some(embedder) => {
+                    let one = vec![query];
+                    match tokio::task::spawn_blocking(move || embedder.embed(&one)).await {
+                        Ok(Ok(vectors)) if !vectors.is_empty() => {
+                            let chunks = self.db.code_chunks(&repo).unwrap_or_default();
+                            serde_json::json!({
+                                "hits": crate::code::rank(&chunks, &vectors[0], limit),
+                            })
+                        }
+                        Ok(Ok(_)) => serde_json::json!({ "error": "the model returned no vector" }),
+                        Ok(Err(error)) => serde_json::json!({ "error": error.to_string() }),
+                        Err(error) => serde_json::json!({ "error": error.to_string() }),
+                    }
+                }
+            },
+            "code_def" => serde_json::json!({
+                "definitions": crate::code::definitions(&self.db, &repo, &symbol),
+            }),
+            "code_refs" => serde_json::json!({
+                "references": crate::code::references(&self.db, &repo, &symbol)
+                    .into_iter().take(limit).collect::<Vec<_>>(),
+            }),
+            "code_callers" => serde_json::json!({
+                "callers": crate::code::callers(&self.db, &repo, &symbol)
+                    .into_iter().take(limit).collect::<Vec<_>>(),
+            }),
+            other => serde_json::json!({ "error": format!("no tool named {other}") }),
+        }
+    }
+}
+
+/// Ask the Claude API, letting it call the code-intelligence tools until it has what
+/// it needs.
+///
+/// The deterministic state and the plan documents go in the first message, as before.
+/// What is new is that the source itself does not: a repo's code is far too large to
+/// paste, and the tools are how the model reaches the part of it that matters.
 pub async fn ask(
     config: &Config,
     state: serde_json::Value,
     documents: BTreeMap<String, String>,
     question: &str,
+    tools: Option<&Tools>,
 ) -> Result<Answer, AskError> {
     let key = config.anthropic_key.as_deref().unwrap_or_default();
 
@@ -288,24 +473,111 @@ pub async fn ask(
     }
     user.push_str(&format!("QUESTION: {question}"));
 
-    let body = serde_json::json!({
-        "model": config.brain_model,
-        "max_tokens": 16000,
-        "system": SYSTEM_PROMPT,
-        "messages": [{ "role": "user", "content": user }],
-    });
-
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .build()
         .expect("reqwest client builds");
 
+    // The opening message stays a plain string. Only the tool-result turns need the
+    // block form, and keeping the first one as it always was means the request an
+    // operator sees on the wire has not changed shape.
+    let mut messages = vec![serde_json::json!({ "role": "user", "content": user })];
+    let mut tools_used: Vec<String> = Vec::new();
+    let mut model = config.brain_model.clone();
+
+    for turn in 0..=MAX_TOOL_TURNS {
+        let mut body = serde_json::json!({
+            "model": config.brain_model,
+            "max_tokens": 16000,
+            "system": SYSTEM_PROMPT,
+            "messages": messages,
+        });
+        // The last turn goes without tools, so the model has to answer with what it
+        // already found instead of asking for one more thing forever.
+        if let Some(tools) = tools
+            && turn < MAX_TOOL_TURNS
+        {
+            body["tools"] = tools.definitions();
+        }
+
+        let parsed = send(&client, config, key, &body).await?;
+        model = parsed["model"].as_str().unwrap_or(&model).to_owned();
+
+        let blocks: Vec<serde_json::Value> =
+            parsed["content"].as_array().cloned().unwrap_or_default();
+        let answer: String = blocks
+            .iter()
+            .filter(|block| block["type"] == "text")
+            .filter_map(|block| block["text"].as_str())
+            .collect();
+
+        match parsed["stop_reason"].as_str() {
+            Some("refusal") => {
+                return Err(AskError::Upstream {
+                    status: 502,
+                    message: format!("the model refused: {answer}"),
+                });
+            }
+            Some("max_tokens") => {
+                return Ok(Answer {
+                    answer: format!("{answer}\n\n[truncated: the reply hit max_tokens]"),
+                    model,
+                    tools_used,
+                });
+            }
+            Some("tool_use") => {}
+            _ => return Ok(Answer { answer, model, tools_used }),
+        }
+
+        let Some(tools) = tools else {
+            // Asked for a tool in a build that offered none. Nothing to run, so the
+            // text it did produce is the answer.
+            return Ok(Answer { answer, model, tools_used });
+        };
+
+        let calls: Vec<&serde_json::Value> =
+            blocks.iter().filter(|block| block["type"] == "tool_use").collect();
+        if calls.is_empty() {
+            return Ok(Answer { answer, model, tools_used });
+        }
+
+        let mut results = Vec::with_capacity(calls.len());
+        for call in &calls {
+            let name = call["name"].as_str().unwrap_or_default();
+            let output = tools.call(name, &call["input"]).await;
+            tools_used.push(format!("{name}({})", call["input"]["repo"].as_str().unwrap_or("?")));
+            results.push(serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": call["id"],
+                "content": output.to_string(),
+            }));
+        }
+        messages.push(serde_json::json!({ "role": "assistant", "content": blocks }));
+        messages.push(serde_json::json!({ "role": "user", "content": results }));
+    }
+
+    Ok(Answer {
+        answer: format!("[gave up after {MAX_TOOL_TURNS} tool round trips]"),
+        model,
+        tools_used,
+    })
+}
+
+/// One request to the Claude API, with the status mapping the spec asks for: a 429
+/// passes through as actionable rate-limit information; everything else is a 502
+/// carrying the API's own message.
+async fn send(
+    client: &reqwest::Client,
+    config: &Config,
+    key: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, AskError> {
     let response = client
         .post(format!("{}/v1/messages", config.anthropic_url))
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
-        .json(&body)
+        .json(body)
         .send()
         .await
         .map_err(|error| AskError::Upstream { status: 502, message: error.to_string() })?;
@@ -318,34 +590,12 @@ pub async fn ask(
             .ok()
             .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
             .unwrap_or(text);
-        // 429 passes through untouched; anything else is a bad gateway.
         let ours = if status == 429 { 429 } else { 502 };
         return Err(AskError::Upstream { status: ours, message });
     }
 
-    let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
-        AskError::Upstream { status: 502, message: format!("unparseable API reply: {error}") }
-    })?;
-
-    let mut answer = String::new();
-    for block in parsed["content"].as_array().into_iter().flatten() {
-        if block["type"] == "text"
-            && let Some(chunk) = block["text"].as_str()
-        {
-            answer.push_str(chunk);
-        }
-    }
-    let model = parsed["model"].as_str().unwrap_or(&config.brain_model).to_owned();
-
-    match parsed["stop_reason"].as_str() {
-        Some("refusal") => Err(AskError::Upstream {
-            status: 502,
-            message: format!("the model refused: {answer}"),
-        }),
-        Some("max_tokens") => Ok(Answer {
-            answer: format!("{answer}\n\n[truncated: the reply hit max_tokens]"),
-            model,
-        }),
-        _ => Ok(Answer { answer, model }),
-    }
+    serde_json::from_str(&text).map_err(|error| AskError::Upstream {
+        status: 502,
+        message: format!("unparseable API reply: {error}"),
+    })
 }

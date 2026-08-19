@@ -1,10 +1,15 @@
-//! Polling CI: one global worker runs `.nashcode/ci` for each newly seen branch tip.
+//! Polling CI: one global worker runs `.nashcode/ci` for each newly seen branch tip,
+//! and rebuilds the code index for each new tip of a default branch.
 //! // ponytail: serial queue; parallelize per-repo if it ever backs up
 //!
-//! A job checks the commit out into a scratch clone, runs `.nashcode/ci` from the repo
-//! root when it is present and executable, captures the combined output to a log file,
-//! and records the result in SQLite. CD is not a separate system: the script deploys if
-//! it wants to.
+//! A CI job checks the commit out into a scratch clone, runs `.nashcode/ci` from the
+//! repo root when it is present and executable, captures the combined output to a log
+//! file, and records the result in SQLite. CD is not a separate system: the script
+//! deploys if it wants to.
+//!
+//! Code indexing shares this queue rather than getting one of its own. Both are slow,
+//! both are triggered by a commit arriving, and neither may ever run on a request
+//! path; a second queue would only be a second way to fall behind.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -13,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
+use crate::code::Indexer;
 use crate::config::Config;
 use crate::db::{Db, status};
 use crate::git::{Repo, clone_local};
@@ -32,11 +38,30 @@ pub struct Job {
     pub commit: String,
 }
 
+/// A code index rebuild.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexJob {
+    pub repo: String,
+    /// The branch whose tip this is. The worker indexes only the default branch;
+    /// deciding that needs git, and the enqueue side must stay synchronous.
+    pub branch: Option<String>,
+    /// The commit to index, or `None` for "whatever the default branch points at",
+    /// which is what a manual run asks for.
+    pub commit: Option<String>,
+}
+
+/// What the worker takes off the queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Task {
+    Ci(Job),
+    Index(IndexJob),
+}
+
 /// The enqueue side. Cheap to clone; shared through the app context.
 #[derive(Clone)]
 pub struct CiQueue {
     db: Db,
-    tx: mpsc::UnboundedSender<Job>,
+    tx: mpsc::UnboundedSender<Task>,
 }
 
 impl std::fmt::Debug for CiQueue {
@@ -46,7 +71,7 @@ impl std::fmt::Debug for CiQueue {
 }
 
 impl CiQueue {
-    pub fn new(db: Db) -> (Self, mpsc::UnboundedReceiver<Job>) {
+    pub fn new(db: Db) -> (Self, mpsc::UnboundedReceiver<Task>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (Self { db, tx }, rx)
     }
@@ -66,10 +91,27 @@ impl CiQueue {
             branch: branch.to_owned(),
             commit: commit.to_owned(),
         };
-        if self.tx.send(job).is_err() {
+        if self.tx.send(Task::Ci(job)).is_err() {
             tracing::warn!(repo, branch, "CI worker is gone; run stays queued");
         }
         Some(run_id)
+    }
+
+    /// Queue a code index rebuild. `branch` narrows it to the default branch — pass
+    /// `None` for a manual run, which always indexes whatever the default branch
+    /// points at now.
+    ///
+    /// Nothing is recorded here: an index run records itself when it finishes, and a
+    /// row saying "queued" that no query reads would only be a second source of truth.
+    pub fn enqueue_index(&self, repo: &str, branch: Option<&str>, commit: Option<&str>) {
+        let job = IndexJob {
+            repo: repo.to_owned(),
+            branch: branch.map(str::to_owned),
+            commit: commit.map(str::to_owned),
+        };
+        if self.tx.send(Task::Index(job)).is_err() {
+            tracing::warn!(repo, "CI worker is gone; the index run is dropped");
+        }
     }
 }
 
@@ -79,12 +121,66 @@ pub struct CiWorker {
     pub db: Db,
     pub hooks: Webhooks,
     pub timeout: Duration,
+    /// `None` compiles the code index out of the loop entirely, which is what the
+    /// tests that only care about CI use.
+    pub indexer: Option<Indexer>,
 }
 
 impl CiWorker {
-    pub async fn run(self, mut rx: mpsc::UnboundedReceiver<Job>) {
-        while let Some(job) = rx.recv().await {
-            self.run_job(&job).await;
+    pub async fn run(self, mut rx: mpsc::UnboundedReceiver<Task>) {
+        while let Some(task) = rx.recv().await {
+            match task {
+                Task::Ci(job) => self.run_job(&job).await,
+                Task::Index(job) => self.run_index(&job).await,
+            }
+        }
+    }
+
+    /// Rebuild a repo's code index. Every failure is one log line: nothing downstream
+    /// of this waits on it, and a stale index answers queries perfectly well.
+    pub async fn run_index(&self, job: &IndexJob) {
+        let Some(indexer) = &self.indexer else { return };
+
+        let mirror = indexer.mirrors.repo(&job.repo);
+        let Ok(default_branch) = mirror.default_branch().await else {
+            tracing::warn!(repo = %job.repo, "cannot index: the mirror has no branches");
+            return;
+        };
+        // A tip on some other branch is not the indexed history. Skipping here rather
+        // than at the enqueue side keeps the enqueue side synchronous, which is what
+        // lets the mirror's tip observer call it.
+        if let Some(branch) = &job.branch
+            && branch != &default_branch
+        {
+            return;
+        }
+
+        let commit = match &job.commit {
+            Some(commit) => commit.clone(),
+            None => match mirror.tip(&default_branch).await {
+                Ok(tip) => tip,
+                Err(error) => {
+                    tracing::warn!(repo = %job.repo, %error, "cannot index: no tip");
+                    return;
+                }
+            },
+        };
+
+        let started = Instant::now();
+        match indexer.index(&job.repo, &commit).await {
+            Ok(run) => tracing::info!(
+                repo = %job.repo,
+                commit = %commit,
+                files = run.files_indexed,
+                chunks = run.chunks,
+                symbols = run.symbols,
+                embedded = run.embedded,
+                ms = started.elapsed().as_millis() as u64,
+                "code index updated"
+            ),
+            Err(error) => {
+                tracing::warn!(repo = %job.repo, commit = %commit, %error, "code index failed")
+            }
         }
     }
 

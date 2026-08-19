@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use nashcode::ci::{CiQueue, CiWorker, DEFAULT_TIMEOUT};
+use nashcode::code::{Embeddings, Indexer};
 use nashcode::config::Config;
 use nashcode::db::Db;
 use nashcode::docs::DocIndexCache;
@@ -90,12 +91,16 @@ async fn serve() {
     let hooks = Webhooks::new(config.webhooks.clone());
     let (ci_queue, ci_rx) = CiQueue::new(db.clone());
 
-    // Every newly seen branch tip queues a CI job and fires the push webhook.
+    // Every newly seen branch tip queues a CI job, queues a code index run, and fires
+    // the push webhook. The index job carries the branch so the worker can drop it
+    // unless it is the default branch: that is the post-merge trigger, and routing it
+    // through the same observer means a merge made outside the viewer indexes too.
     let observer = {
         let ci = ci_queue.clone();
         let hooks = hooks.clone();
         Arc::new(move |tip: NewTip| {
             ci.enqueue(&tip.repo, &tip.branch, &tip.commit);
+            ci.enqueue_index(&tip.repo, Some(&tip.branch), Some(&tip.commit));
             hooks.send(
                 hooks::PUSH,
                 serde_json::json!({
@@ -108,12 +113,19 @@ async fn serve() {
     };
     let mirrors = Mirrors::new(config.clone(), db.clone()).with_observer(observer);
 
+    let embeddings = Embeddings::new();
     tokio::spawn(
         CiWorker {
             config: config.clone(),
             db: db.clone(),
             hooks: hooks.clone(),
             timeout: DEFAULT_TIMEOUT,
+            indexer: Some(Indexer {
+                config: config.clone(),
+                db: db.clone(),
+                mirrors: mirrors.clone(),
+                embeddings: embeddings.clone(),
+            }),
         }
         .run(ci_rx),
     );
@@ -139,6 +151,7 @@ async fn serve() {
         docs: DocIndexCache::new(),
         ci: ci_queue,
         brain: brain::Brain::new(),
+        embeddings,
     };
 
     let router = web::router(app);
@@ -169,5 +182,20 @@ fn doctor(config: &Config) {
     }
     if config.git_token.is_empty() {
         eprintln!("doctor: GIT_TOKEN is empty; pushes to dgit will be anonymous");
+    }
+    if cfg!(not(feature = "embeddings")) {
+        eprintln!(
+            "doctor: built without the `embeddings` feature; GET /:repo/code/similar \
+             will report itself unavailable. Text search and the symbol graph are \
+             unaffected."
+        );
+    } else {
+        eprintln!(
+            "doctor: semantic search needs the ONNX Runtime shared library at run time \
+             (set ORT_DYLIB_PATH, or install libonnxruntime), and downloads the {} \
+             model on the first index run. Missing either one degrades \
+             /:repo/code/similar and nothing else.",
+            nashcode::code::embed::configured_model()
+        );
     }
 }

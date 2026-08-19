@@ -417,6 +417,237 @@ async fn branch_action(cx: &Cx, body: topcoat::router::request::Bytes) -> Result
     }
 }
 
+// ---- code intelligence -------------------------------------------------------------
+
+/// Every code endpoint answers JSON and none of them ever indexes: indexing runs on
+/// the CI queue. A repo that has never been indexed answers with an empty list and
+/// says so, which is an answer an agent can act on.
+fn json_ok(value: serde_json::Value) -> Result<Response> {
+    let mut response = Response::new(topcoat::router::Body::from(value.to_string()));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    Ok(response)
+}
+
+#[topcoat::router::query_params(error = bad_request)]
+struct CodeQuery {
+    q: Option<String>,
+    symbol: Option<String>,
+    limit: Option<String>,
+    /// Which revision to search. Defaults to the default branch.
+    rev: Option<String>,
+}
+
+impl CodeQuery {
+    /// The result cap, clamped. A missing or unparseable value is the default rather
+    /// than an error: an agent that guesses `limit=all` deserves results, not a 400.
+    fn limit(&self) -> usize {
+        self.limit
+            .as_deref()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(crate::code::DEFAULT_LIMIT)
+            .min(crate::code::MAX_LIMIT)
+    }
+
+    fn required(&self, field: &str, value: Option<&String>) -> Result<String> {
+        match value.map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            Some(text) => Ok(text.to_owned()),
+            None => Err(bad_request(format!("{field} is required")).into()),
+        }
+    }
+}
+
+/// `GET /{repo}/code/text?q=&rev=&limit=` — full text, straight out of git.
+///
+/// There is no stored index behind this. `git grep` reads the mirror's packed objects
+/// at query time, so the answer is exact and can never be stale.
+#[route(GET "/{repo}/code/text")]
+async fn code_text(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    let query = query_params::<CodeQuery>(cx)?;
+    let text = query.required("q", query.q.as_ref())?;
+    if !ctx.status.available {
+        return json_ok(serde_json::json!({
+            "query": text, "hits": [], "error": "no mirror for this repo yet",
+        }));
+    }
+
+    let repo = app(cx).mirrors.repo(&name);
+    let rev = match query.rev.clone().filter(|r| !r.trim().is_empty()) {
+        Some(rev) => rev,
+        None => repo.default_branch().await.unwrap_or_else(|_| "HEAD".to_owned()),
+    };
+    let hits = crate::code::grep(&repo, &rev, &text, query.limit())
+        .await
+        .unwrap_or_default();
+    json_ok(serde_json::json!({ "query": text, "rev": rev, "hits": hits }))
+}
+
+/// `GET /{repo}/code/similar?q=&limit=` — semantic search over the stored chunks.
+///
+/// The query is embedded with the model the index used, then scored against every
+/// chunk by brute force. The model is loaded by the index run, never by this handler:
+/// loading downloads hundreds of megabytes, and a request must never wait for that.
+#[route(GET "/{repo}/code/similar")]
+async fn code_similar(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    if !app(cx).config.knows_repo(&name) {
+        return Err(topcoat::router::error::not_found().into());
+    }
+    let query = query_params::<CodeQuery>(cx)?;
+    let text = query.required("q", query.q.as_ref())?;
+
+    let Some(embedder) = app(cx).embeddings.ready() else {
+        // Not an outage and not a 500: the machinery is simply not loaded. Say why,
+        // and say what makes it loaded.
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!(
+                "semantic search is unavailable: {}. Text search still works: \
+                 GET /{name}/code/text?q=",
+                app(cx).embeddings.why_not()
+            ),
+        );
+    };
+
+    let one = vec![text.clone()];
+    let embedded = tokio::task::spawn_blocking(move || embedder.embed(&one)).await;
+    let vector = match embedded {
+        Ok(Ok(mut vectors)) if !vectors.is_empty() => vectors.remove(0),
+        Ok(Ok(_)) => return json_error(StatusCode::BAD_GATEWAY, "the model returned no vector"),
+        Ok(Err(error)) => return json_error(StatusCode::BAD_GATEWAY, &error.to_string()),
+        Err(error) => {
+            return json_error(
+                StatusCode::BAD_GATEWAY,
+                &format!("the embedding task did not finish: {error}"),
+            );
+        }
+    };
+
+    let chunks = app(cx).db.code_chunks(&name).unwrap_or_default();
+    let hits = crate::code::rank(&chunks, &vector, query.limit());
+    json_ok(serde_json::json!({
+        "query": text,
+        "scanned": chunks.len(),
+        "hits": hits,
+    }))
+}
+
+/// `GET /{repo}/code/def?symbol=` — where a name is defined.
+#[route(GET "/{repo}/code/def")]
+async fn code_def(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    if !app(cx).config.knows_repo(&name) {
+        return Err(topcoat::router::error::not_found().into());
+    }
+    let query = query_params::<CodeQuery>(cx)?;
+    let symbol = query.required("symbol", query.symbol.as_ref())?;
+    let hits = crate::code::definitions(&app(cx).db, &name, &symbol);
+    json_ok(graph_answer(&name, &symbol, "definitions", hits, query.limit()))
+}
+
+/// `GET /{repo}/code/refs?symbol=` — every use of a name.
+#[route(GET "/{repo}/code/refs")]
+async fn code_refs(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    if !app(cx).config.knows_repo(&name) {
+        return Err(topcoat::router::error::not_found().into());
+    }
+    let query = query_params::<CodeQuery>(cx)?;
+    let symbol = query.required("symbol", query.symbol.as_ref())?;
+    let hits = crate::code::references(&app(cx).db, &name, &symbol);
+    json_ok(graph_answer(&name, &symbol, "references", hits, query.limit()))
+}
+
+/// `GET /{repo}/code/callers?symbol=` — the functions that call a name.
+#[route(GET "/{repo}/code/callers")]
+async fn code_callers(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    if !app(cx).config.knows_repo(&name) {
+        return Err(topcoat::router::error::not_found().into());
+    }
+    let query = query_params::<CodeQuery>(cx)?;
+    let symbol = query.required("symbol", query.symbol.as_ref())?;
+    let hits = crate::code::callers(&app(cx).db, &name, &symbol);
+    json_ok(graph_answer(&name, &symbol, "callers", hits, query.limit()))
+}
+
+/// The shared body of the three graph endpoints.
+///
+/// An empty result from an unindexed repo and an empty result from a symbol that does
+/// not exist are different facts, so the answer says which: no index means "index it",
+/// an index means "it is not there". Neither is an error — a language the graph cannot
+/// parse is expected to fall through to `/code/text`.
+fn graph_answer<T: serde::Serialize>(
+    repo: &str,
+    symbol: &str,
+    field: &str,
+    hits: Vec<T>,
+    limit: usize,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({ "symbol": symbol });
+    let object = value.as_object_mut().expect("built as an object");
+    let indexed = hits.is_empty();
+    object.insert(
+        field.to_owned(),
+        serde_json::json!(hits.into_iter().take(limit).collect::<Vec<_>>()),
+    );
+    if indexed {
+        object.insert(
+            "hint".to_owned(),
+            serde_json::json!(format!(
+                "nothing under that name; the graph covers Rust, Python, and \
+                 TypeScript — try GET /{repo}/code/text?q={symbol}"
+            )),
+        );
+    }
+    value
+}
+
+/// `POST /{repo}/code/index` — queue an index run. This is what `nashcode index` calls.
+///
+/// It queues and returns; it never indexes inline. The run happens on the CI queue
+/// behind whatever is already there, which is the only place indexing is allowed to
+/// happen at all.
+#[route(POST "/{repo}/code/index")]
+async fn code_index(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    if !ctx.status.available {
+        return json_error(StatusCode::BAD_GATEWAY, "no mirror for this repo yet");
+    }
+    // No branch and no commit: index whatever the default branch points at when the
+    // job comes off the queue, which is what a person asking for a rebuild means.
+    app(cx).ci.enqueue_index(&name, None, None);
+    json_ok(serde_json::json!({ "ok": true, "repo": name, "queued": true }))
+}
+
+/// `GET /{repo}/code` — what the index holds and when it last ran.
+#[route(GET "/{repo}/code")]
+async fn code_status(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    if !app(cx).config.knows_repo(&name) {
+        return Err(topcoat::router::error::not_found().into());
+    }
+    let mut stanza = crate::code::brain_stanza(&app(cx).db, &name);
+    if let Some(object) = stanza.as_object_mut() {
+        object.insert("repo".to_owned(), serde_json::json!(name));
+        object.insert(
+            "embeddings_ready".to_owned(),
+            serde_json::json!(app(cx).embeddings.ready().is_some()),
+        );
+        let why = app(cx).embeddings.why_not();
+        if !why.is_empty() {
+            object.insert("embeddings_note".to_owned(), serde_json::json!(why));
+        }
+    }
+    json_ok(stanza)
+}
+
 // ---- brain -----------------------------------------------------------------------
 
 #[topcoat::router::query_params(error = bad_request)]
@@ -490,7 +721,19 @@ async fn brain_ask(cx: &Cx, Json(input): Json<AskIn>) -> Result<Response> {
         }
     }
 
-    match crate::brain::ask(&app.config, state, documents, &input.question).await {
+    // The tools reach only the repos the question was scoped to, so `?repo=` is a
+    // real boundary rather than a hint.
+    let tools = crate::brain::Tools {
+        db: app.db.clone(),
+        mirrors: app.mirrors.clone(),
+        embeddings: app.embeddings.clone(),
+        repos: match &input.repo {
+            Some(only) => vec![only.clone()],
+            None => app.config.repos.clone(),
+        },
+    };
+
+    match crate::brain::ask(&app.config, state, documents, &input.question, Some(&tools)).await {
         Ok(answer) => {
             let body = serde_json::to_string(&answer)?;
             let mut response = Response::new(topcoat::router::Body::from(body));

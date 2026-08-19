@@ -28,7 +28,13 @@ fn with_ci_script(root: &std::path::Path, script: &str) -> Work {
 }
 
 fn worker(bed: &common::TestBed, hooks: Webhooks, timeout: Duration) -> CiWorker {
-    CiWorker { config: bed.config.clone(), db: bed.db.clone(), hooks, timeout }
+    CiWorker {
+        config: bed.config.clone(),
+        db: bed.db.clone(),
+        hooks,
+        timeout,
+        indexer: Some(bed.indexer.clone()),
+    }
 }
 
 async fn run_tip(bed: &common::TestBed, hooks: Webhooks, timeout: Duration, branch: &str) -> i64 {

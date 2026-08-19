@@ -19,6 +19,7 @@ use topcoat::router::{
 
 use crate::brain::Brain;
 use crate::ci::CiQueue;
+use crate::code::Embeddings;
 use crate::config::Config;
 use crate::db::Db;
 use crate::docs::DocIndexCache;
@@ -35,6 +36,9 @@ pub struct App {
     pub ci: CiQueue,
     pub ops: Ops,
     pub brain: Brain,
+    /// The embedding model, shared with the indexer so a query and an index run use
+    /// the one loaded copy. Empty until the first index run fills it.
+    pub embeddings: Embeddings,
 }
 
 impl std::fmt::Debug for App {
