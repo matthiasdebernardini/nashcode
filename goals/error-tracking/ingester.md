@@ -38,9 +38,18 @@ listener.
 
 ## The Worker (dispatcher)
 
-One route is public. Caddy forwards only `POST` and `OPTIONS` on
-`/api/*/envelope/` and 404s everything else, so the drain and registry routes
-never exist on the public side at all.
+Two routes are public, the same two the viewer answers on the tailnet side:
+`POST`/`OPTIONS` on `/api/<project_id>/envelope/` and `POST /api/<project_id>/logs`,
+the NDJSON door for journald, Vector, curl, and cron. Caddy forwards those and
+404s everything else, so the drain and registry routes never exist on the public
+side at all.
+
+(Amendment, 2026-08-19: this document predates slice 2, which grew the NDJSON
+log door in the viewer. An edge that carries only envelopes would send every
+non-SDK log producer straight at the tailnet, which is the thing phase 3 exists
+to stop. The two doors buffer into the same cell and drain through the same
+protocol; only the stored `kind` differs, so the drainer knows which viewer door
+to replay each row into.)
 
 Per envelope POST:
 
@@ -75,8 +84,8 @@ only for logging and per-IP throttling.
 **IngestCell** (one per project) is a plain FIFO in SQLite via
 `ctx.storage.sql.exec`:
 
-- `envelopes(seq INTEGER PRIMARY KEY, received_at, content_encoding, remote_ip,
-  bytes INTEGER, body BLOB)`
+- `envelopes(seq INTEGER PRIMARY KEY, received_at, kind, content_encoding,
+  remote_ip, bytes INTEGER, body BLOB)`, where `kind` is `envelope` or `logs`
 - quota counters with window timestamps, reset lazily on write
 - `GET /drain?after=<seq>&max_bytes=<n>` → NDJSON of rows, body base64
 - `POST /ack {"up_to": seq}` → `DELETE WHERE seq <= ?`
@@ -122,7 +131,7 @@ see errors and retry; nothing is silently dropped.
 | Where | Setting |
 |---|---|
 | VPS | `celld --bucket s3://nashcode-ingest --listen 127.0.0.1:8080` |
-| VPS | caddy: TLS for the ingest domain, allowlist `/api/*/envelope/` |
+| VPS | caddy: TLS for the ingest domain, allowlist `/api/*/envelope/` and `/api/*/logs` |
 | VPS | `iroh-ingress --allow <nashcode EndpointId> --forward 127.0.0.1:8080` |
 | Worker vars | `CELLD_VAR_DRAIN_TOKEN` |
 | nashcode | `NASHCODE_BUGS_DRAIN=<ingester EndpointId>`, drain token, iroh key path |
