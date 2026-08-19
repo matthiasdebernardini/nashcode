@@ -1278,6 +1278,197 @@ async fn doc_ref(
     }
 }
 
+// ---- /{repo}/docs and /{repo}/docs/{*path} — the wiki ----------------------------
+
+/// One level of the wiki sidebar. Directories nest; files are leaves.
+#[derive(Default)]
+struct WikiNode {
+    dirs: BTreeMap<String, WikiNode>,
+    /// `(display name, repo-relative path)`, alphabetical.
+    files: Vec<(String, String)>,
+}
+
+impl WikiNode {
+    /// Build the tree from every markdown path in the repo.
+    fn of(paths: &[&str]) -> Self {
+        let mut root = Self::default();
+        for path in paths {
+            let mut node = &mut root;
+            let segments: Vec<&str> = path.split('/').collect();
+            let (name, dirs) = segments.split_last().expect("a path has a last segment");
+            for dir in dirs {
+                node = node.dirs.entry((*dir).to_owned()).or_default();
+            }
+            node.files.push(((*name).to_owned(), (*path).to_owned()));
+        }
+        root
+    }
+
+    /// Does this subtree hold the page being read? Answers whether a `<details>` opens.
+    fn holds(&self, path: &str) -> bool {
+        self.files.iter().any(|(_, file)| file == path)
+            || self.dirs.values().any(|dir| dir.holds(path))
+    }
+}
+
+/// The sidebar, as HTML.
+///
+/// Recursion, not a component: a `#[component]` cannot call itself without boxing its
+/// own future, and the markup is a plain nested list. Every value here is escaped on
+/// the way in — the paths come from git, and git will carry any byte a filename can.
+fn wiki_sidebar(repo: &str, node: &WikiNode, current: &str, pinned: Option<&str>) -> String {
+    let mut html = String::new();
+    if let Some(pinned) = pinned {
+        html.push_str(&wiki_link(repo, pinned, pinned, current, "ph-push-pin"));
+    }
+    for (name, dir) in &node.dirs {
+        html.push_str(&format!(
+            "<details class=\"nashcode-wiki-dir\"{}><summary>{}</summary><div class=\"nashcode-wiki-children\">",
+            if dir.holds(current) { " open=\"\"" } else { "" },
+            render::escape_text(name)
+        ));
+        html.push_str(&wiki_sidebar(repo, dir, current, None));
+        html.push_str("</div></details>");
+    }
+    for (name, path) in &node.files {
+        if Some(path.as_str()) == pinned {
+            continue;
+        }
+        html.push_str(&wiki_link(repo, name, path, current, "ph-file-text"));
+    }
+    html
+}
+
+fn wiki_link(repo: &str, label: &str, path: &str, current: &str, icon: &str) -> String {
+    format!(
+        "<a class=\"nashcode-wiki-link{}\" href=\"{}\"{}><i class=\"ph {icon}\"></i>{}</a>",
+        if path == current { " is-current" } else { "" },
+        render::escape_attr(&render::docs_url(repo, path)),
+        if path == current { " aria-current=\"page\"" } else { "" },
+        render::escape_text(label)
+    )
+}
+
+#[page("/{repo}/docs")]
+async fn repo_docs_home(cx: &Cx) -> Result {
+    wiki_page(cx, None).await
+}
+
+#[page("/{repo}/docs/{*rest}")]
+async fn repo_docs_page(cx: &Cx) -> Result {
+    let path = join_rest(cx);
+    wiki_page(cx, Some(path)).await
+}
+
+/// One wiki page, in the frame the whole wiki shares.
+///
+/// `None` asks for the home page: `docs/index.md` if the repo has one, else the root
+/// README. The renderer is the plans renderer, so escaping and autolinking are
+/// identical; only the relative-link pass is extra.
+async fn wiki_page(cx: &Cx, requested: Option<String>) -> Result {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    if !ctx.status.available {
+        return view! { cx =>
+            shell(title: name.clone(), repo: name.clone(), active: "docs",
+                unavailable_card(repo: name.clone(), status: ctx.status.clone()))
+        };
+    }
+    let repo = app(cx).mirrors.repo(&name);
+    let Ok(branch) = repo.default_branch().await else {
+        return view! { cx =>
+            shell(title: format!("{name} · wiki"), repo: name.clone(), active: "docs", status: Some(ctx.status.clone()),
+                <div class="Box"><div class="Box-body color-fg-muted">
+                    "Nothing pushed here yet."
+                </div></div>)
+        };
+    };
+    let tip = repo.tip(&branch).await?;
+    let index = app(cx).docs.get(&name, &repo, &tip).await;
+
+    let pages = index.wiki_pages();
+    // A path from the URL only reaches a markdown file that exists. Everything else
+    // belongs to /blob/, which is a 404 away from here on purpose.
+    let current = match &requested {
+        Some(path) => {
+            let Some(path) = safe_repo_path(path).filter(|p| pages.contains(&p.as_str())) else {
+                return Err(topcoat::router::error::not_found().into());
+            };
+            Some(path)
+        }
+        None => index.wiki_home().map(str::to_owned),
+    };
+
+    let tree = WikiNode::of(&pages);
+    let pinned = pages.contains(&docs::WIKI_PINNED).then_some(docs::WIKI_PINNED);
+    let sidebar = wiki_sidebar(&name, &tree, current.as_deref().unwrap_or_default(), pinned);
+
+    let article = match &current {
+        Some(path) => {
+            let source = repo
+                .show_file(&tip, path)
+                .await?
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
+            let document = docs::parse_document(path, &source);
+            let branches = repo.branches().await.unwrap_or_default();
+            let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+            let body =
+                render::markdown_in_docs(&document.body, &name, Some(&index), &branches, dir);
+            Some((path.clone(), document.title, body))
+        }
+        None => None,
+    };
+
+    let title = match &article {
+        Some((_, doc_title, _)) => format!("{name} · {doc_title}"),
+        None => format!("{name} · wiki"),
+    };
+    let empty_message = if pages.is_empty() {
+        "No markdown in this repo yet. Every .md file it gains becomes a wiki page."
+    } else {
+        "No docs/index.md and no README at the root. Pick a page from the sidebar."
+    };
+
+    view! { cx =>
+        shell(title: title, repo: name.clone(), active: "docs", status: Some(ctx.status.clone()),
+            <div class="nashcode-wiki">
+                <nav class="nashcode-wiki-nav Box" aria-label="Wiki pages">
+                    <div class="Box-header d-flex flex-items-center gap-2">
+                        <i class="ph ph-book-open"></i>
+                        <a class="Link--primary no-underline nashcode-display" href=(format!("/{name}/docs"))>"Wiki"</a>
+                        <span class="Counter">(pages.len())</span>
+                    </div>
+                    <div class="Box-body">
+                        if pages.is_empty() {
+                            <span class="color-fg-muted text-small">"No pages."</span>
+                        }
+                        (Raw(sidebar))
+                    </div>
+                </nav>
+                <article class="nashcode-wiki-page">
+                    match &article {
+                        Some((path, doc_title, body)) => <div class="Box">
+                            <div class="Box-header d-flex flex-items-center gap-2">
+                                <i class="ph ph-file-text"></i>
+                                <strong>(doc_title.clone())</strong>
+                                <span class="ml-auto d-flex flex-items-center gap-2 text-small">
+                                    <a class="Link--secondary" href=(format!("/{name}/blob/{path}"))>"source"</a>
+                                    <a class="Link--secondary" href=(format!("/{name}/raw/{branch}/{path}"))>"raw"</a>
+                                </span>
+                            </div>
+                            <div class="Box-body markdown-body">(Raw(body.clone()))</div>
+                        </div>,
+                        None => <div class="Box"><div class="Box-body color-fg-muted">
+                            (empty_message)
+                        </div></div>,
+                    }
+                </article>
+            </div>
+        )
+    }
+}
+
 // ---- /{repo}/board ---------------------------------------------------------------
 
 #[page("/{repo}/board")]

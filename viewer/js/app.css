@@ -205,6 +205,73 @@ h6,
   overflow-x: auto;
 }
 
+/* ---- wiki -------------------------------------------------------------------- */
+
+/*
+ * Sidebar plus page, one frame. The sidebar sticks so a long document does not
+ * scroll the map away; below 900px it stacks on top instead.
+ */
+.nashcode-wiki {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .nashcode-wiki {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.nashcode-wiki-nav {
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+
+.nashcode-wiki-link {
+  display: block;
+  padding: 3px 6px;
+  border-radius: 6px;
+  color: var(--fgColor-default);
+  font-size: 13px;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.nashcode-wiki-link:hover {
+  background-color: var(--bgColor-neutral-muted);
+  text-decoration: none;
+}
+
+.nashcode-wiki-link.is-current {
+  background-color: var(--bgColor-accent-muted);
+  color: var(--fgColor-accent);
+  font-weight: 600;
+}
+
+.nashcode-wiki-dir > summary {
+  padding: 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--fgColor-muted);
+  font-family: var(--nashcode-font-display);
+}
+
+.nashcode-wiki-dir > summary:hover {
+  background-color: var(--bgColor-neutral-muted);
+}
+
+/* Nesting reads as depth, not as a second list. */
+.nashcode-wiki-children {
+  margin-left: 10px;
+  padding-left: 6px;
+  border-left: 1px solid var(--borderColor-muted);
+}
+
 /* ---- stack graph ------------------------------------------------------------ */
 
 /*

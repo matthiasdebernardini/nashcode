@@ -11,9 +11,17 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::git::{GitResult, Repo};
+use crate::render::is_markdown_path;
 
 pub const PLANS_DIR: &str = "plans";
 pub const TASKS_DIR: &str = "tasks";
+
+/// The wiki's home page when the repo has one.
+pub const WIKI_INDEX: &str = "docs/index.md";
+
+/// The contract agents load before they touch anything. When a repo has one it sits at
+/// the top of the wiki sidebar, because it is the page a person re-reads most.
+pub const WIKI_PINNED: &str = "lat.md";
 
 /// The column a card with unreadable front matter falls into. Never a real status.
 pub const NEEDS_ATTENTION: &str = "needs-attention";
@@ -353,6 +361,36 @@ impl DocIndex {
 
     pub fn plan_for_branch(&self, branch: &str) -> Option<&Document> {
         self.documents_for_branch(branch).into_iter().find(|d| !d.is_card())
+    }
+
+    /// Every markdown file in the repo: the wiki's whole surface, in path order.
+    ///
+    /// There is no separate wiki store — the pages are the files already in git, so
+    /// this is the tree filtered by extension and nothing more.
+    pub fn wiki_pages(&self) -> Vec<&str> {
+        self.all_paths
+            .iter()
+            .map(String::as_str)
+            .filter(|path| is_markdown_path(path))
+            .collect()
+    }
+
+    /// The wiki's home: `docs/index.md` when it exists, else the root README.
+    ///
+    /// README casing varies by repo and by author; the match ignores it. A README in
+    /// a subdirectory is that directory's, not the wiki's.
+    pub fn wiki_home(&self) -> Option<&str> {
+        if let Some(index) = self.all_paths.get(WIKI_INDEX) {
+            return Some(index.as_str());
+        }
+        self.all_paths
+            .iter()
+            .map(String::as_str)
+            .find(|path| {
+                !path.contains('/')
+                    && is_markdown_path(path)
+                    && path.rsplit_once('.').is_some_and(|(stem, _)| stem.eq_ignore_ascii_case("readme"))
+            })
     }
 
     /// Cards and plans that point at this plan, in either direction.
