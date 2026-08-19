@@ -53,7 +53,9 @@ Four flags work on every command without being declared:
 - `--select=a,b,c` — project the result to those fields. Lists advertise their own paths
   in `result.fields` (`items.id,items.body`); paste them back unedited.
 - `--compact` — drop null and empty fields.
-- `--quiet` — no `next_actions`, no progress on stderr.
+- `--quiet` — empties `next_actions` on a successful envelope and silences the progress
+  notes on stderr. It does **not** strip them from an error envelope in agcli 0.15.0;
+  the trail on a failure is the fix, so that is no great loss, but do not count on it.
 - `--json` — accepted and ignored. Output is always JSON; the flag survives so calls you
   already have memorised keep working.
 
@@ -61,8 +63,13 @@ Four flags work on every command without being declared:
 (there is no prompt to answer), and `nashcode setup --dry-run` returns every remote script
 it would have run in `result.scripts` instead of running any.
 
-`--profile <name>` acts on a saved profile other than the active one. Progress notes go to
-stderr; stdout is only ever the envelope.
+`--profile <name>` acts on a saved profile other than the active one — on every command
+except `doctor`, which always checks the active profile. `doctor` is agcli's own command
+and declares no flags of its own, so `nashcode --profile x doctor` comes back as
+`UNKNOWN_FLAG` (exit 2). Temporary: it lifts when agcli lets a caller finish building the
+doctor command. Until then, `nashcode use <name>` first.
+
+Progress notes go to stderr; stdout is only ever the envelope.
 
 Two commands are deliberately different:
 

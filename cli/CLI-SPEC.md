@@ -59,7 +59,9 @@ one marked active. `use` selects the active one; all other commands honor
   nothing prompts),
   `nashcode gc <name>` (POST /gc), `nashcode desc <name> ...` (PUT /config).
 - `nashcode remote [name]` — wire `origin` in the cwd repo (default name = dir name).
-- `nashcode token` — print the push token for the active profile (for CI use).
+- `nashcode token` — print the push token for the active profile (for CI use). Its
+  whole purpose is to emit a secret; `setup --dry-run` also emits one, because the
+  scripts it previews carry the generated GIT_TOKEN and the bucket credentials.
 
 ### `nashcode invite` — per-person push access
 dgit reads extra comma-separated push tokens from its GIT_TOKENS var, alongside
@@ -202,7 +204,9 @@ contract per command.
 - SSH = shell out to the system `ssh`/`scp` (respects user's config/agent); never an SSH
   library. All remote scripts are idempotent and `set -e`.
 - Secrets never in argv of remote commands where avoidable (pipe via stdin), never
-  printed unless explicitly requested (`nashcode token`).
+  emitted unless explicitly requested. Two commands request it: `nashcode token`, whose
+  purpose it is, and `setup --dry-run`, whose previewed scripts are the real ones and
+  therefore carry the generated GIT_TOKEN and any bucket credentials.
 - Output is the agcli envelope (one JSON value on stdout); progress and
   warnings go to stderr, `--quiet` strips the chatter.
 - Every command's description is written for a reader who has never seen celld, and the
