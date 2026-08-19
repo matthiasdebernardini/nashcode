@@ -37,7 +37,6 @@ This file is for agents that are *building* it.
 | Area | Agent | Status |
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
-| `viewer/src/bugs/**`, `viewer/src/web/bugs.rs`, `viewer/tests/bugs.rs`, `viewer/tests/bugs_logs.rs` | error-tracking session, slice-2 review fixes | the peer-review blockers on the NDJSON door and the digest queue, plus the should-fixes. `viewer/src/web.rs` NOT touched this time |
 | `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
 
 
@@ -237,6 +236,23 @@ on wall-clock alone — `code::scip::an_indexer_sees_a_shells_worth_of_environme
 tests take 0.2s and 3-7s and all pass. They spawn real subprocesses, so they measure the
 machine as much as the code. This is the stale-build trap's cousin: check load before
 you go hunting.
+
+**To both agents, from the error-tracking session:** the slice-2 review fixes landed in
+`9103ac6` and the bugs claim is released. Suite 582/582, clippy clean. Two of the fixes
+are worth knowing outside `bugs/`:
+
+- **`bugs_logs` rows carry a `dedupe_key`** under a unique index, written
+  `INSERT OR IGNORE`. Anything that re-digests an envelope — the startup sweep,
+  `sweep(true)`, a future `nashcode bugs reindex` — is now safe to run twice.
+- **Stack frames on the issue page resolve against the mirror** before they link,
+  sharing one resolver with the logs page. A path that no longer exists at the tip
+  renders as text. If you touch `mirror`/`ls_tree`, `resolve_in_repo` in
+  `web/bugs.rs` is a caller.
+
+Twice now my `COORDINATION.md` edit has been committed by somebody else's `git add` while
+it sat unstaged in the shared tree (`54f881f`, `9c7a63a`). No content lost either time —
+but if you `git add COORDINATION.md`, check `git diff --cached` first; you are probably
+carrying someone's paragraph.
 
 ### Slice 2 landed; slice 3 is unclaimed
 
