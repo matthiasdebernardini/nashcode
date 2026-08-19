@@ -1223,3 +1223,106 @@ not have yet.
   dedup test syncs them one after the other, so the per-mirror lock is exercised but
   the contention on it is not. Proving that a concurrent pair produces one clone and
   one fetch needs a barrier the test bed does not have.
+
+## The upstream column, phase 2: browsing it (2026-08-19)
+
+Phase 1 mirrored the column and reported it in the brain. Phase 2 opens it: one page
+that is the column, and a read-only code browser over each dep's mirror.
+
+### One page, N trees — and never a merged one
+
+`/{repo}/stack` is the repo followed by each dep at the commit its mirror answers with.
+Every entry opens that dep's own tree at `/{repo}/stack/{dep}`, and nothing is ever
+spliced into a single tree that pretends the column is one repository. A merged tree
+would have to invent an answer for two deps that both carry `src/lib.rs`, and the
+answer it invented would be wrong at exactly the moment somebody relied on it.
+
+The page is built from `Upstreams::stack`, which is the same call the brain stanza
+makes: it reports what is on disk and starts whatever is overdue behind the caller's
+back. A dep whose mirror is absent, or whose declaration was refused, renders as a
+danger-bordered card carrying the reason — the shape `unavailable_card` uses for a repo
+whose first clone has not landed. It is a state, not an error, and the rest of the page
+is unaffected.
+
+### `{dep}` is a name in one manifest, not a name on the box
+
+Mirrors are shared: two repos declaring the same upstream share one directory. Names are
+not. `{dep}` is looked up in the *declaring* repo's manifest, so `/other/stack/dgit` is a
+404 even when `demo` declares `dgit` and its mirror is right there on disk. Nothing about
+a URL a repo never named is reachable through that repo's routes.
+
+A dep the manifest refused — bad URL, both `pin` and `track`, a name that is not a name —
+has no mode and no mirror path after validation, so it has nothing to open: 404 as well.
+A dep that is fine but whose commit has not been fetched yet is neither; it gets a card
+that says so, because that is a slow upstream, not a reader's mistake.
+
+### `?rev=` is the pin grammar first, then a question for the mirror
+
+The rev in a query string reaches a git argv, so it is held to `upstream::is_commit_id` —
+the same 7-to-40 hex-digit rule a `pin` in the manifest is held to, exported rather than
+written twice. Then the mirror is asked whether it has the commit (`cat-file -e`), and a
+commit it does not have is a 404.
+
+Never a fetch. Browsing is a read of what has been mirrored; if a page load could pull a
+new commit, any link on any page would be a request aimed at somebody else's server, and
+`SYNC_DEBOUNCE` would be a budget with a hole in it. The tests hold the upstream's
+request counter across the whole browse surface, including the 404s.
+
+The full commit id is what travels on the links out of a page, not the abbreviation the
+reader typed: one canonical URL per tree, whatever spelling got them there. Browsing at
+the declared commit keeps the clean URL — the `?rev=` only sticks when it was asked for.
+
+### Read-only, visibly
+
+No pencil, no "New file", no comment composer, no raw download, and no POST route under
+any dep path. The markup is the code browser's minus every affordance that writes.
+Markdown is the one non-obvious cut: `render::markdown` autolinks against the *viewing*
+repo's document index and branch list, so a dep's README would grow links to plans and
+files that live somewhere else entirely. Upstream source reads as source.
+
+### Gitlinks: `.gitmodules` at the tree's own commit, through the one normalizer
+
+A gitlink records a commit and nothing else. The URL lives in `.gitmodules`, which is
+read at the same commit as the tree being rendered — a submodule's URL can move between
+commits like any other file, and reading it at the tip would attribute today's URL to a
+year-old tree.
+
+The URL is then put through `upstream::locate`, the same function that keys the mirrors,
+and matched on the mirror *directory* rather than on the string. That is what makes
+`https://GitHub.com/a/b.git/` in `.gitmodules` find the dep the manifest declared as
+`https://github.com/a/b`. A gitlink that lands on a mirrored dep of the same repo becomes
+a link to that dep at the gitlink's own commit, via `?rev=`; everything else keeps the
+inert label it has always had, including relative URLs (`../sibling.git`), which have no
+host to key a mirror by.
+
+This works in any tree the viewer renders — the repo's own code tab and a dep's tree
+alike — and the column consulted is always the declaring repo's. A tree with no submodule
+entries costs nothing: the function returns before it reads anything.
+
+**The link is drawn from the tree, not from a fetch, and is not gated on the commit being
+present.** A gitlink pinning a commit the mirror has not fetched still renders as a link,
+which then 404s. The alternative — one `cat-file -e` per gitlink before deciding whether
+to draw a link — makes the affordance flicker with the mirror's state, and a link that is
+sometimes there is worse than a link that says "not here" when followed.
+
+### Smaller choices
+
+- **The code browser's helpers are exported, not copied.** `numbered_code`, `entry_icon`,
+  `human_size` and `shiki_lang` became `pub(super)` in `pages.rs` — four one-word
+  changes, versus 150 lines of duplicated highlighting that would drift. The page bodies
+  and the breadcrumb component *are* duplicated in `stack.rs`, deliberately: the dep
+  pages differ in every URL they build and in everything they refuse to show, and
+  parameterizing `pages.rs` for a second caller would have touched history other agents
+  are working in.
+- **Two tabs, one word.** "Stacks" (branch stacks) and "Stack" (the dependency column)
+  sit side by side in the nav, and each page carries a one-line pointer at the other. A
+  reader who lands on the wrong one finds out in a sentence.
+- **The upstream test fixtures moved to `tests/common`.** `Origin` — bare repos published
+  over git's dumb HTTP protocol on a loopback port, with a request counter — and
+  `bed_declaring` are now shared by `stack_deps.rs` and `stack_browse.rs` instead of
+  copied. Additive to the common harness; no `Config` fields changed.
+- **The gitlink fixtures are written straight into the index** with `update-index
+  --cacheinfo 160000,<sha>,<path>`. A real `git submodule add` would clone the upstream
+  into the fixture and prove nothing extra: the tree entry plus `.gitmodules` is the
+  whole of what the viewer reads, and this way a gitlink can point at a commit that is
+  deliberately absent.
