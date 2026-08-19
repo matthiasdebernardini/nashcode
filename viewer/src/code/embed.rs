@@ -129,6 +129,11 @@ impl Embeddings {
         match (&slot.embedder, &slot.last_error) {
             (Some(_), _) => String::new(),
             (None, Some(error)) => error.clone(),
+            // A build with the feature compiled out can never fill this slot, so
+            // telling its operator to run an index would be advice that cannot work.
+            (None, None) if cfg!(not(feature = "embeddings")) => {
+                EmbedError::NotBuilt.to_string()
+            }
             (None, None) => {
                 "the model is not loaded yet; it loads on the first index run \
                  (POST /:repo/code/index)"
@@ -357,10 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_slot_explains_itself() {
+    fn an_empty_slot_explains_itself_in_terms_this_build_can_act_on() {
         let slot = Embeddings::new();
         assert!(slot.ready().is_none());
-        assert!(slot.why_not().contains("index run"));
+        if cfg!(feature = "embeddings") {
+            assert!(slot.why_not().contains("index run"), "{}", slot.why_not());
+        } else {
+            // "run an index" is advice that cannot work in this build.
+            assert!(!slot.why_not().contains("index run"), "{}", slot.why_not());
+            assert!(slot.why_not().contains("embeddings` feature"), "{}", slot.why_not());
+        }
     }
 
     #[test]

@@ -481,10 +481,15 @@ async fn code_text(cx: &Cx) -> Result<Response> {
         Some(rev) => rev,
         None => repo.default_branch().await.unwrap_or_else(|_| "HEAD".to_owned()),
     };
-    let hits = crate::code::grep(&repo, &rev, &text, query.limit())
+    let found = crate::code::grep(&repo, &rev, &text, query.limit())
         .await
         .unwrap_or_default();
-    json_ok(serde_json::json!({ "query": text, "rev": rev, "hits": hits }))
+    json_ok(serde_json::json!({
+        "query": text,
+        "rev": rev,
+        "hits": found.hits,
+        "truncated": found.truncated,
+    }))
 }
 
 /// `GET /{repo}/code/similar?q=&limit=` — semantic search over the stored chunks.
@@ -528,12 +533,11 @@ async fn code_similar(cx: &Cx) -> Result<Response> {
         }
     };
 
-    let chunks = app(cx).db.code_chunks(&name).unwrap_or_default();
-    let hits = crate::code::rank(&chunks, &vector, query.limit());
+    let found = crate::code::similar(&app(cx).db, &name, vector, query.limit()).await;
     json_ok(serde_json::json!({
         "query": text,
-        "scanned": chunks.len(),
-        "hits": hits,
+        "scanned": found.scanned,
+        "hits": found.hits,
     }))
 }
 
@@ -547,7 +551,7 @@ async fn code_def(cx: &Cx) -> Result<Response> {
     let query = query_params::<CodeQuery>(cx)?;
     let symbol = query.required("symbol", query.symbol.as_ref())?;
     let hits = crate::code::definitions(&app(cx).db, &name, &symbol);
-    json_ok(graph_answer(&name, &symbol, "definitions", hits, query.limit()))
+    json_ok(graph_answer(cx, &name, &symbol, "definitions", hits, query.limit()))
 }
 
 /// `GET /{repo}/code/refs?symbol=` — every use of a name.
@@ -560,7 +564,7 @@ async fn code_refs(cx: &Cx) -> Result<Response> {
     let query = query_params::<CodeQuery>(cx)?;
     let symbol = query.required("symbol", query.symbol.as_ref())?;
     let hits = crate::code::references(&app(cx).db, &name, &symbol);
-    json_ok(graph_answer(&name, &symbol, "references", hits, query.limit()))
+    json_ok(graph_answer(cx, &name, &symbol, "references", hits, query.limit()))
 }
 
 /// `GET /{repo}/code/callers?symbol=` — the functions that call a name.
@@ -573,7 +577,7 @@ async fn code_callers(cx: &Cx) -> Result<Response> {
     let query = query_params::<CodeQuery>(cx)?;
     let symbol = query.required("symbol", query.symbol.as_ref())?;
     let hits = crate::code::callers(&app(cx).db, &name, &symbol);
-    json_ok(graph_answer(&name, &symbol, "callers", hits, query.limit()))
+    json_ok(graph_answer(cx, &name, &symbol, "callers", hits, query.limit()))
 }
 
 /// The shared body of the three graph endpoints.
@@ -583,6 +587,7 @@ async fn code_callers(cx: &Cx) -> Result<Response> {
 /// an index means "it is not there". Neither is an error — a language the graph cannot
 /// parse is expected to fall through to `/code/text`.
 fn graph_answer<T: serde::Serialize>(
+    cx: &Cx,
     repo: &str,
     symbol: &str,
     field: &str,
@@ -591,18 +596,35 @@ fn graph_answer<T: serde::Serialize>(
 ) -> serde_json::Value {
     let mut value = serde_json::json!({ "symbol": symbol });
     let object = value.as_object_mut().expect("built as an object");
-    let indexed = hits.is_empty();
+    let empty = hits.is_empty();
     object.insert(
         field.to_owned(),
         serde_json::json!(hits.into_iter().take(limit).collect::<Vec<_>>()),
     );
-    if indexed {
+    if empty {
+        // "Never indexed" and "indexed, not there" are different facts and want
+        // different next steps. Reporting one hint for both sent a caller looking for
+        // a symbol that was never going to be there yet.
+        let indexed = app(cx)
+            .db
+            .code_last_run(repo)
+            .ok()
+            .flatten()
+            .is_some();
+        object.insert("indexed".to_owned(), serde_json::json!(indexed));
         object.insert(
             "hint".to_owned(),
-            serde_json::json!(format!(
-                "nothing under that name; the graph covers Rust, Python, and \
-                 TypeScript — try GET /{repo}/code/text?q={symbol}"
-            )),
+            serde_json::json!(if indexed {
+                format!(
+                    "indexed, but nothing is defined under that name; the graph covers \
+                     Rust, Python, and TypeScript — try GET /{repo}/code/text?q={symbol}"
+                )
+            } else {
+                format!(
+                    "this repo has never been indexed, so the graph is empty; run \
+                     POST /{repo}/code/index (or `nashcode index {repo}`) and ask again"
+                )
+            }),
         );
     }
     value
@@ -620,7 +642,7 @@ async fn code_graph(cx: &Cx) -> Result<Response> {
     if !app(cx).config.knows_repo(&name) {
         return Err(topcoat::router::error::not_found().into());
     }
-    let mut graph = crate::code::graph(&app(cx).db, &name);
+    let mut graph = crate::code::graph(&app(cx).db, &name).await;
     if let Some(object) = graph.as_object_mut() {
         object.insert("repo".to_owned(), serde_json::json!(name));
     }
@@ -639,9 +661,9 @@ async fn code_index(cx: &Cx) -> Result<Response> {
     if !ctx.status.available {
         return json_error(StatusCode::BAD_GATEWAY, "no mirror for this repo yet");
     }
-    // No branch and no commit: index whatever the default branch points at when the
-    // job comes off the queue, which is what a person asking for a rebuild means.
-    app(cx).ci.enqueue_index(&name, None, None);
+    // The run reads the default branch tip when it comes off the queue, which is what
+    // a person asking for a rebuild means. A run already queued absorbs this one.
+    app(cx).ci.enqueue_index(&name);
     json_ok(serde_json::json!({ "ok": true, "repo": name, "queued": true }))
 }
 

@@ -34,6 +34,7 @@ fn worker(bed: &common::TestBed, hooks: Webhooks, timeout: Duration) -> CiWorker
         hooks,
         timeout,
         indexer: Some(bed.indexer.clone()),
+        queue: Some(bed.app.ci.clone()),
     }
 }
 

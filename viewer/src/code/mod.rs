@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::db::{
-    CodeBlob, CodeCounts, CodeRun, CodeRunRow, Db, RefHit, StoredChunk, SymbolHit,
+    ChunkVector, CodeBlob, CodeCounts, CodeRun, CodeRunRow, Db, RefHit, SymbolHit,
 };
 use crate::git::Repo;
 use crate::mirror::Mirrors;
@@ -54,6 +54,14 @@ pub const DEFAULT_LIMIT: usize = 10;
 
 /// The most any query endpoint will return, however large `limit` asks for.
 pub const MAX_LIMIT: usize = 100;
+
+/// The ceiling on `/code/graph`, the one endpoint with no `limit` of its own. A repo
+/// past it gets `truncated: true` and is expected to ask the per-symbol endpoints for
+/// the rest; a diagram drawn from a hundred thousand edges was never going to render.
+pub const MAX_GRAPH_EDGES: usize = 100_000;
+
+/// The most total matches `/code/text` will read out of `git grep`.
+pub const MAX_TEXT_MATCHES: usize = 1_000;
 
 /// Why an index run could not start. A run that starts always finishes with a record,
 /// however much of it degraded.
@@ -158,6 +166,20 @@ impl Indexer {
             )
             .1;
 
+        // Nothing new, and this exact commit is what the last run read: there is no
+        // work of any kind to do. Worth checking explicitly because the expensive part
+        // is not the parse — it is the SCIP overlay, which clones the repo and runs a
+        // language indexer over it. Without this, a merge that only moved a card would
+        // pay for a rust-analyzer pass.
+        if fresh.is_empty()
+            && self
+                .db
+                .code_last_run(repo)?
+                .is_some_and(|last| last.run.commit == commit)
+        {
+            return Ok(run);
+        }
+
         // The encoder is loaded once per run, on a blocking thread, and only when
         // there is something to embed. A failure is a note; the chunks are still
         // stored, still searchable by text, and pick up vectors on a later run.
@@ -180,6 +202,10 @@ impl Indexer {
 
         for entry in fresh {
             let Some(source) = read_source(&mirror, &entry.blob).await? else {
+                // Binary, or gone. Record that it was looked at so the next run does
+                // not read it again; a repo full of images would otherwise re-read
+                // every one of them on every merge.
+                self.db.code_mark_seen(repo, &entry.blob)?;
                 continue;
             };
             let parsed = lang::parse(Lang::of_path(&entry.path), &source);
@@ -322,7 +348,7 @@ async fn read_tree(mirror: &Repo, commit: &str) -> Result<Vec<TreeEntry>, IndexE
 
 /// A blob's text, or `None` when it is not text at all.
 async fn read_source(mirror: &Repo, blob: &str) -> Result<Option<String>, IndexError> {
-    let Some(bytes) = mirror.read_blob(blob).await? else {
+    let Some(bytes) = mirror.read_blob(blob, MAX_FILE_BYTES).await? else {
         // The object went away between the ls-tree and now. Not fatal, and not a
         // reason to abandon the rest of the run.
         return Ok(None);
@@ -353,35 +379,66 @@ pub struct SimilarHit {
 /// Deliberately a scan. The whole table for a personal repo is a few thousand short
 /// vectors; the scan costs less than the round trip that asked for it, and it has no
 /// index to rebuild, no recall cliff, and no tuning.
-pub fn rank(chunks: &[StoredChunk], query: &[f32], limit: usize) -> Vec<SimilarHit> {
-    let mut scored: Vec<(f32, &StoredChunk)> = chunks
+pub fn rank(chunks: &[ChunkVector], query: &[f32], limit: usize) -> Vec<(f32, i64)> {
+    let mut scored: Vec<(f32, &ChunkVector)> = chunks
         .iter()
         .filter_map(|chunk| {
-            let vector = chunk.vector.as_ref()?;
-            let score = cosine(vector, query);
+            let score = cosine(&chunk.vector, query);
             (score > 0.0).then_some((score, chunk))
         })
         .collect();
-    // Highest score first; ties break on path then line, so the order is stable
-    // across runs rather than whatever the scan happened to visit first.
+    // Highest score first; ties break on path then id, so the order is stable across
+    // runs rather than whatever the scan happened to visit first.
     scored.sort_by(|a, b| {
         b.0.partial_cmp(&a.0)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.1.path.cmp(&b.1.path))
-            .then_with(|| a.1.start_line.cmp(&b.1.start_line))
+            .then_with(|| a.1.id.cmp(&b.1.id))
     });
-    scored
-        .into_iter()
-        .take(limit)
-        .map(|(score, chunk)| SimilarHit {
-            path: chunk.path.clone(),
-            symbol: chunk.symbol.clone(),
-            start_line: chunk.start_line,
-            end_line: chunk.end_line,
-            score,
-            snippet: chunk.snippet.clone(),
-        })
-        .collect()
+    scored.into_iter().take(limit).map(|(score, chunk)| (score, chunk.id)).collect()
+}
+
+/// What a semantic search answered, and how much it had to look at.
+#[derive(Debug, Clone, Default)]
+pub struct Similar {
+    pub hits: Vec<SimilarHit>,
+    pub scanned: usize,
+}
+
+/// Score a query vector against a repo's chunks and return the top-k, snippets and all.
+///
+/// Two passes on purpose. The scan reads only ids, paths, and vectors, because it
+/// touches every chunk and a snippet runs to eight kilobytes; the snippets are then
+/// fetched for the handful of rows that placed. The whole thing runs on a blocking
+/// thread: it holds the global connection mutex and does real arithmetic, and neither
+/// belongs on a runtime worker serving other requests.
+pub async fn similar(db: &Db, repo: &str, query: Vec<f32>, limit: usize) -> Similar {
+    let db = db.clone();
+    let repo = repo.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let chunks = db.code_chunk_vectors(&repo).unwrap_or_default();
+        let scanned = chunks.len();
+        let placed = rank(&chunks, &query, limit);
+        let ids: Vec<i64> = placed.iter().map(|(_, id)| *id).collect();
+        let rows = db.code_chunks_by_id(&repo, &ids).unwrap_or_default();
+        let hits = placed
+            .into_iter()
+            .filter_map(|(score, id)| {
+                let chunk = rows.get(&id)?;
+                Some(SimilarHit {
+                    path: chunk.path.clone(),
+                    symbol: chunk.symbol.clone(),
+                    start_line: chunk.start_line,
+                    end_line: chunk.end_line,
+                    score,
+                    snippet: chunk.snippet.clone(),
+                })
+            })
+            .collect();
+        Similar { hits, scanned }
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// One line matched by the text search.
@@ -392,46 +449,75 @@ pub struct TextHit {
     pub text: String,
 }
 
+/// What the text search found, and whether it stopped early.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TextResults {
+    pub hits: Vec<TextHit>,
+    /// True when git had more to say than the caps allowed.
+    pub truncated: bool,
+}
+
+/// The output cap on one `git grep`. Generous next to any `limit` a caller asks for,
+/// and small enough that a one-letter query against a large repo cannot be a memory
+/// event. A matched line is also clipped, so one minified bundle line is not the
+/// whole response.
+const GREP_MAX_BYTES: usize = 4 * 1024 * 1024;
+const GREP_MAX_LINE: usize = 500;
+
 /// `git grep` against the mirror at a revision.
 ///
 /// There is no stored full-text index and there should not be: git already holds
 /// every byte, `git grep` reads packed objects directly, and an index would only be
 /// a second copy that can disagree with the first.
+/// Three caps, because git's own one is not enough. `--max-count` is *per file*, so a
+/// common word in a large repo yields that many matches in each of thousands of files;
+/// the output is therefore also capped in bytes, and the parse stops at
+/// [`MAX_TEXT_MATCHES`] whatever the caller asked for. Whenever any of them bites, the
+/// answer says `truncated: true` rather than looking complete.
 pub async fn grep(
     mirror: &Repo,
     rev: &str,
     query: &str,
     limit: usize,
-) -> Result<Vec<TextHit>, IndexError> {
+) -> Result<TextResults, IndexError> {
     if query.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(TextResults::default());
     }
-    let out = mirror
-        .try_run(&[
-            "grep",
-            // Line numbers, skip binaries, literal text, NUL-separated fields so a
-            // path containing a colon cannot be misread as a field boundary.
-            "-n",
-            "-I",
-            "--fixed-strings",
-            "--null",
-            "--no-color",
-            "--max-count",
-            &limit.to_string(),
-            "-e",
-            query,
-            "--end-of-options",
-            rev,
-        ])
+    let wanted = limit.min(MAX_TEXT_MATCHES);
+    let (out, capped) = mirror
+        .run_capped(
+            &[
+                "grep",
+                // Line numbers, skip binaries, literal text, NUL-separated fields so a
+                // path containing a colon cannot be misread as a field boundary.
+                "-n",
+                "-I",
+                "--fixed-strings",
+                "--null",
+                "--no-color",
+                "--max-count",
+                &wanted.to_string(),
+                "-e",
+                query,
+                "--end-of-options",
+                rev,
+            ],
+            GREP_MAX_BYTES,
+        )
         .await?;
     // Exit 1 is "no matches", which is an answer. Anything else with no output is
     // treated the same way: an empty list beats a 500.
-    if !out.ok() && out.code != Some(1) && out.stdout.is_empty() {
-        return Ok(Vec::new());
+    if out.stdout.is_empty() {
+        return Ok(TextResults::default());
     }
 
     let mut hits = Vec::new();
+    let mut more = capped;
     for line in out.stdout.lines() {
+        if hits.len() >= wanted {
+            more = true;
+            break;
+        }
         // `<rev>:<path>\0<line>\0<text>` — the revision prefix ends at the first colon
         // and the path ends at the first NUL.
         let Some((_rev, rest)) = line.split_once(':') else { continue };
@@ -442,12 +528,25 @@ pub async fn grep(
             continue;
         };
         let Ok(number) = number.trim().parse::<i64>() else { continue };
-        hits.push(TextHit { path: path.to_owned(), line: number, text: text.to_owned() });
-        if hits.len() >= limit {
-            break;
-        }
+        hits.push(TextHit {
+            path: path.to_owned(),
+            line: number,
+            text: clip(text, GREP_MAX_LINE),
+        });
     }
-    Ok(hits)
+    Ok(TextResults { hits, truncated: more })
+}
+
+/// Cut a string to a byte budget on a character boundary.
+fn clip(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &text[..cut])
 }
 
 /// One edge of the whole-repo graph dump.
@@ -470,43 +569,67 @@ pub struct Edge {
 /// needs the shape of the whole system, and paging through `?symbol=` calls to
 /// assemble it would be a request per node. Absent indexes degrade the document, not
 /// the request: worst case is the file inventory with `symbols: []`.
-pub fn graph(db: &Db, repo: &str) -> serde_json::Value {
-    let files = db.code_file_list(repo).unwrap_or_default();
-    let symbols = db.code_all_symbols(repo).unwrap_or_default();
-    let references = db.code_all_refs(repo).unwrap_or_default();
+pub async fn graph(db: &Db, repo: &str) -> serde_json::Value {
+    let db = db.clone();
+    let repo = repo.to_owned();
+    // Three whole tables and a JSON tree built from them. On a real-sized repo that is
+    // seconds of allocation under the connection mutex, which must not sit on a
+    // runtime worker that other requests are waiting on.
+    tokio::task::spawn_blocking(move || {
+        let symbols = db.code_all_symbols(&repo).unwrap_or_default();
+        let references = db.code_all_refs(&repo).unwrap_or_default();
 
-    let mut edges: Vec<Edge> = Vec::with_capacity(symbols.len() + references.len());
-    for symbol in &symbols {
-        edges.push(Edge {
-            kind: "defines",
-            from: symbol.path.clone(),
-            to: symbol.name.clone(),
-            file: symbol.path.clone(),
-            line: symbol.start_line,
-            source: symbol.source.clone(),
-        });
-    }
-    for reference in &references {
-        edges.push(Edge {
-            // The graph layer records call edges; anything else it learns is a plain
-            // reference. Both spellings are in the dump so a reader can tell them apart.
-            kind: if reference.kind == "call" { "calls" } else { "references" },
-            from: reference.caller.clone().unwrap_or_else(|| reference.path.clone()),
-            to: reference.name.clone(),
-            file: reference.path.clone(),
-            line: reference.line,
-            source: reference.source.clone(),
-        });
-    }
+        // A ceiling, because this is the one endpoint with no `limit`. A caller that
+        // hits it is told so rather than handed a silently short answer; the
+        // per-symbol endpoints are how you then ask about the rest.
+        let total = symbols.len() + references.len();
+        let mut edges: Vec<Edge> = Vec::with_capacity(total.min(MAX_GRAPH_EDGES));
+        for symbol in symbols.iter().take(MAX_GRAPH_EDGES) {
+            edges.push(Edge {
+                kind: "defines",
+                from: symbol.path.clone(),
+                to: symbol.name.clone(),
+                file: symbol.path.clone(),
+                line: symbol.start_line,
+                source: symbol.source.clone(),
+            });
+        }
+        for reference in references.iter().take(MAX_GRAPH_EDGES - edges.len()) {
+            edges.push(Edge {
+                // The graph layer records call edges; anything else it learns is a
+                // plain reference. Both spellings are in the dump so a reader can tell
+                // them apart.
+                kind: if reference.kind == "call" { "calls" } else { "references" },
+                from: reference.caller.clone().unwrap_or_else(|| reference.path.clone()),
+                to: reference.name.clone(),
+                file: reference.path.clone(),
+                line: reference.line,
+                source: reference.source.clone(),
+            });
+        }
 
-    serde_json::json!({
-        "generated_at": crate::db::now(),
-        // The commit the index was last built from, so a reader can tell whether the
-        // dump describes the tree they are looking at.
-        "commit": db.code_last_run(repo).ok().flatten().map(|row| row.run.commit),
-        "files": files,
-        "symbols": symbols,
-        "edges": edges,
+        serde_json::json!({
+            "generated_at": crate::db::now(),
+            // The commit the index was last built from, so a reader can tell whether
+            // the dump describes the tree they are looking at.
+            "commit": db.code_last_run(&repo).ok().flatten().map(|row| row.run.commit),
+            "files": db.code_file_list(&repo).unwrap_or_default(),
+            "symbols": symbols,
+            "edges": edges,
+            "truncated": total > MAX_GRAPH_EDGES,
+        })
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({
+            "generated_at": crate::db::now(),
+            "commit": serde_json::Value::Null,
+            "files": [],
+            "symbols": [],
+            "edges": [],
+            "truncated": false,
+            "error": format!("the graph could not be assembled: {error}"),
+        })
     })
 }
 
@@ -567,33 +690,35 @@ pub fn callers(db: &Db, repo: &str, symbol: &str) -> Vec<RefHit> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::StoredChunk;
+    use crate::db::ChunkVector;
 
-    fn chunk(path: &str, line: i64, vector: &[f32]) -> StoredChunk {
-        StoredChunk {
-            path: path.to_owned(),
-            symbol: None,
-            start_line: line,
-            end_line: line + 5,
-            snippet: format!("{path}:{line}"),
-            vector: Some(vector.to_vec()),
-            model: "test".to_owned(),
-        }
+    fn chunk(path: &str, id: i64, vector: &[f32]) -> ChunkVector {
+        ChunkVector { id, path: path.to_owned(), vector: vector.to_vec() }
+    }
+
+    /// The paths the ranking placed, in order.
+    fn placed<'a>(chunks: &'a [ChunkVector], query: &[f32], limit: usize) -> Vec<&'a str> {
+        rank(chunks, query, limit)
+            .into_iter()
+            .map(|(_, id)| {
+                chunks.iter().find(|c| c.id == id).expect("a ranked id is a real chunk").path.as_str()
+            })
+            .collect()
     }
 
     #[test]
     fn ranking_puts_the_closest_vector_first() {
         let chunks = vec![
             chunk("far.rs", 1, &[0.1, 1.0, 0.0]),
-            chunk("near.rs", 1, &[1.0, 0.1, 0.0]),
-            chunk("middle.rs", 1, &[0.7, 0.7, 0.0]),
+            chunk("near.rs", 2, &[1.0, 0.1, 0.0]),
+            chunk("middle.rs", 3, &[0.7, 0.7, 0.0]),
         ];
-        let hits = rank(&chunks, &[1.0, 0.0, 0.0], 10);
         assert_eq!(
-            hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(),
+            placed(&chunks, &[1.0, 0.0, 0.0], 10),
             vec!["near.rs", "middle.rs", "far.rs"]
         );
-        assert!(hits[0].score > hits[1].score);
+        let scored = rank(&chunks, &[1.0, 0.0, 0.0], 10);
+        assert!(scored[0].0 > scored[1].0);
     }
 
     #[test]
@@ -603,30 +728,30 @@ mod tests {
     }
 
     #[test]
-    fn ranking_honours_the_limit_and_skips_unembedded_chunks() {
-        let mut chunks = vec![
+    fn ranking_honours_the_limit() {
+        let chunks = vec![
             chunk("a.rs", 1, &[1.0, 0.0]),
-            chunk("b.rs", 1, &[0.9, 0.1]),
-            chunk("c.rs", 1, &[0.8, 0.2]),
+            chunk("b.rs", 2, &[0.9, 0.1]),
+            chunk("c.rs", 3, &[0.8, 0.2]),
         ];
-        chunks.push(StoredChunk { vector: None, ..chunk("never.rs", 1, &[1.0, 0.0]) });
-        let hits = rank(&chunks, &[1.0, 0.0], 2);
-        assert_eq!(hits.len(), 2);
-        assert!(hits.iter().all(|h| h.path != "never.rs"));
+        assert_eq!(rank(&chunks, &[1.0, 0.0], 2).len(), 2);
     }
 
     #[test]
-    fn ties_break_on_path_and_line_so_the_order_is_stable() {
+    fn ties_break_on_path_and_id_so_the_order_is_stable() {
         let chunks = vec![
             chunk("z.rs", 1, &[1.0, 0.0]),
             chunk("a.rs", 9, &[1.0, 0.0]),
             chunk("a.rs", 2, &[1.0, 0.0]),
         ];
-        let hits = rank(&chunks, &[1.0, 0.0], 10);
-        assert_eq!(
-            hits.iter().map(|h| (h.path.as_str(), h.start_line)).collect::<Vec<_>>(),
-            vec![("a.rs", 2), ("a.rs", 9), ("z.rs", 1)]
-        );
+        let order: Vec<(&str, i64)> = rank(&chunks, &[1.0, 0.0], 10)
+            .into_iter()
+            .map(|(_, id)| {
+                let chunk = chunks.iter().find(|c| c.id == id).expect("real");
+                (chunk.path.as_str(), chunk.id)
+            })
+            .collect();
+        assert_eq!(order, vec![("a.rs", 2), ("a.rs", 9), ("z.rs", 1)]);
     }
 
     #[test]

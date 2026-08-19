@@ -543,8 +543,12 @@ impl Db {
         }
         self.with(|conn| {
             let mut known = Vec::new();
+            // `code_seen_blobs` is what makes a blob that produces *no* chunks — a
+            // minified bundle, an empty file, a two-line stub — still count as done.
+            // Asking `code_chunks` alone would re-read and re-parse it on every run
+            // forever, which on a large repo is most of the run.
             let mut statement = conn.prepare(
-                "SELECT 1 FROM code_chunks WHERE repo = ?1 AND blob = ?2 LIMIT 1",
+                "SELECT 1 FROM code_seen_blobs WHERE repo = ?1 AND blob = ?2 LIMIT 1",
             )?;
             for blob in candidates {
                 if statement.exists(params![repo, blob])? {
@@ -572,6 +576,12 @@ impl Db {
             )?;
             tx.execute(
                 "DELETE FROM code_refs WHERE repo = ?1 AND blob = ?2",
+                params![entry.repo, entry.blob],
+            )?;
+            // Mark it read whatever came of it: a blob with no chunks is still a blob
+            // this repo has already spent a parse on.
+            tx.execute(
+                "INSERT OR IGNORE INTO code_seen_blobs (repo, blob) VALUES (?1, ?2)",
                 params![entry.repo, entry.blob],
             )?;
             for (ordinal, chunk) in entry.chunks.iter().enumerate() {
@@ -627,6 +637,19 @@ impl Db {
                 )?;
             }
             tx.commit()
+        })
+    }
+
+    /// Record that a blob has been looked at, without storing anything from it.
+    /// A binary or oversized file gets this and nothing else, so the next run knows
+    /// not to read it again.
+    pub fn code_mark_seen(&self, repo: &str, blob: &str) -> DbResult<()> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO code_seen_blobs (repo, blob) VALUES (?1, ?2)",
+                params![repo, blob],
+            )?;
+            Ok(())
         })
     }
 
@@ -698,7 +721,7 @@ impl Db {
                     params![repo, path, blob, lang],
                 )?;
             }
-            for table in ["code_chunks", "code_symbols", "code_refs"] {
+            for table in ["code_chunks", "code_symbols", "code_refs", "code_seen_blobs"] {
                 tx.execute(
                     &format!(
                         "DELETE FROM {table} WHERE repo = ?1 AND blob NOT IN
@@ -711,31 +734,76 @@ impl Db {
         })
     }
 
-    /// Every stored chunk of a repo, with the path it currently lives at.
-    /// This is what the brute-force cosine scan walks.
-    pub fn code_chunks(&self, repo: &str) -> DbResult<Vec<StoredChunk>> {
+    /// Just enough of every embedded chunk to score it: an identity, a path, and the
+    /// vector.
+    ///
+    /// Deliberately not the snippet. A snippet runs to eight kilobytes and the scan
+    /// touches every chunk, so carrying them would move megabytes of text through the
+    /// global connection mutex to rank a handful of rows. The top-k snippets are
+    /// fetched afterwards by id, which is a few rows instead of all of them.
+    pub fn code_chunk_vectors(&self, repo: &str) -> DbResult<Vec<ChunkVector>> {
         self.with(|conn| {
             let mut statement = conn.prepare(
-                "SELECT f.path, c.symbol, c.start_line, c.end_line, c.snippet, c.vector, c.model
+                "SELECT c.rowid, f.path, c.vector
                  FROM code_chunks c JOIN code_files f ON f.repo = c.repo AND f.blob = c.blob
-                 WHERE c.repo = ?1
+                 WHERE c.repo = ?1 AND c.vector IS NOT NULL
                  ORDER BY f.path, c.ordinal",
             )?;
             let rows = statement
                 .query_map(params![repo], |row| {
-                    let raw: Option<Vec<u8>> = row.get(5)?;
-                    Ok(StoredChunk {
-                        path: row.get(0)?,
-                        symbol: row.get(1)?,
-                        start_line: row.get(2)?,
-                        end_line: row.get(3)?,
-                        snippet: row.get(4)?,
-                        vector: raw.as_deref().map(decode_vector),
-                        model: row.get(6)?,
+                    let raw: Vec<u8> = row.get(2)?;
+                    Ok(ChunkVector {
+                        id: row.get(0)?,
+                        path: row.get(1)?,
+                        vector: decode_vector(&raw),
                     })
                 })?
                 .collect::<DbResult<Vec<_>>>()?;
             Ok(rows)
+        })
+    }
+
+    /// The full rows behind a handful of ids, keyed by id so the caller can put them
+    /// back in score order.
+    pub fn code_chunks_by_id(
+        &self,
+        repo: &str,
+        ids: &[i64],
+    ) -> DbResult<std::collections::HashMap<i64, StoredChunk>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT c.rowid, f.path, c.symbol, c.start_line, c.end_line, c.snippet,
+                        c.vector, c.model
+                 FROM code_chunks c JOIN code_files f ON f.repo = c.repo AND f.blob = c.blob
+                 WHERE c.repo = ?1 AND c.rowid = ?2",
+            )?;
+            let mut found = std::collections::HashMap::with_capacity(ids.len());
+            for id in ids {
+                let row = statement
+                    .query_row(params![repo, id], |row| {
+                        let raw: Option<Vec<u8>> = row.get(6)?;
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            StoredChunk {
+                                path: row.get(1)?,
+                                symbol: row.get(2)?,
+                                start_line: row.get(3)?,
+                                end_line: row.get(4)?,
+                                snippet: row.get(5)?,
+                                vector: raw.as_deref().map(decode_vector),
+                                model: row.get(7)?,
+                            },
+                        ))
+                    })
+                    .optional()?;
+                if let Some((id, chunk)) = row {
+                    found.insert(id, chunk);
+                }
+            }
+            Ok(found)
         })
     }
 
@@ -1101,6 +1169,15 @@ pub struct CodeBlob {
     pub refs: Vec<CodeRef>,
 }
 
+/// A chunk reduced to what scoring needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkVector {
+    /// The chunk row's own id, for fetching the rest of it once it has placed.
+    pub id: i64,
+    pub path: String,
+    pub vector: Vec<f32>,
+}
+
 /// A chunk read back, resolved to the path it now lives at.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredChunk {
@@ -1290,6 +1367,15 @@ CREATE TABLE IF NOT EXISTS code_files (
     PRIMARY KEY (repo, path)
 );
 CREATE INDEX IF NOT EXISTS code_files_blob ON code_files (repo, blob);
+
+-- Every blob this repo has ever parsed, including the ones that yielded nothing.
+-- Without it, a file that produces no chunks looks unindexed forever and is re-read
+-- on every run.
+CREATE TABLE IF NOT EXISTS code_seen_blobs (
+    repo TEXT NOT NULL,
+    blob TEXT NOT NULL,
+    PRIMARY KEY (repo, blob)
+);
 
 CREATE TABLE IF NOT EXISTS code_chunks (
     repo       TEXT NOT NULL,

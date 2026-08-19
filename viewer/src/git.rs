@@ -351,23 +351,106 @@ impl Repo {
         }
     }
 
+    /// Run git and stop reading after `max_bytes` of output, killing the child.
+    ///
+    /// `git grep` is the reason this exists. Its `--max-count` is *per file*, so a
+    /// common word in a large repo produces that many matches per file across every
+    /// file, and `output()` would buffer the lot before anyone could truncate it. The
+    /// bool is whether the cap was hit, which the caller reports rather than hides.
+    pub async fn run_capped<S: AsRef<OsStr>>(
+        &self,
+        args: &[S],
+        max_bytes: usize,
+    ) -> GitResult<(GitOutput, bool)> {
+        let (code, bytes, capped) = self.run_capped_bytes(args, max_bytes).await?;
+        Ok((
+            GitOutput {
+                code,
+                stdout: String::from_utf8_lossy(&bytes).into_owned(),
+                stderr: String::new(),
+            },
+            capped,
+        ))
+    }
+
+    /// [`run_capped`](Self::run_capped) without the lossy string conversion.
+    ///
+    /// Whether output is text is the caller's question here: replacing invalid
+    /// sequences with `U+FFFD` would turn "this is not text" into "this is text with
+    /// odd characters in it", which is exactly the decision the code index has to make.
+    pub async fn run_capped_bytes<S: AsRef<OsStr>>(
+        &self,
+        args: &[S],
+        max_bytes: usize,
+    ) -> GitResult<(Option<i32>, Vec<u8>, bool)> {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut command = tokio::process::Command::new("git");
+        command.args(self.base_args());
+        command.args(args);
+        command
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "true")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+
+        let mut child = command.spawn()?;
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        let deadline = tokio::time::Instant::now() + LOCAL_TIMEOUT;
+        let mut collected: Vec<u8> = Vec::new();
+        let mut buffer = [0u8; 16 * 1024];
+        let mut capped = false;
+
+        loop {
+            match tokio::time::timeout_at(deadline, stdout.read(&mut buffer)).await {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(read)) => {
+                    collected.extend_from_slice(&buffer[..read]);
+                    if collected.len() >= max_bytes {
+                        capped = true;
+                        break;
+                    }
+                }
+                Ok(Err(_)) => break,
+            }
+        }
+
+        let code = if capped {
+            // The reader has what it asked for; the writer is now talking to a closed
+            // pipe and would otherwise run to completion for nothing.
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            None
+        } else {
+            child.wait().await.ok().and_then(|status| status.code())
+        };
+
+        collected.truncate(max_bytes);
+        Ok((code, collected, capped))
+    }
+
     /// A blob's bytes by object id, with no path and no revision involved.
     ///
     /// `show_file` addresses content as `<rev>:<path>`, which is what a page needs.
     /// The code index works the other way round — it already has the object id and
     /// does not care which path it came from — so it asks git for the object itself.
     /// `None` when the object is absent or is not a blob.
-    pub async fn read_blob(&self, id: &str) -> GitResult<Option<Vec<u8>>> {
-        let mut command = tokio::process::Command::new("git");
-        command.args(self.base_args());
-        command.args(["cat-file", "blob", id]);
-        let output = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .await?;
-        Ok(output.status.success().then_some(output.stdout))
+    /// Bytes rather than a `String`, because the caller has to decide whether this is
+    /// text at all; the byte cap is the size `ls-tree` already reported plus slack.
+    pub async fn read_blob(&self, id: &str, max_bytes: usize) -> GitResult<Option<Vec<u8>>> {
+        // Through the shared runner so a blob read gets the same timeout,
+        // kill-on-drop, and GIT_TERMINAL_PROMPT=0 as every other git call: an index
+        // run walks thousands of these and must not be the one path that can hang.
+        let (code, bytes, _capped) =
+            self.run_capped_bytes(&["cat-file", "blob", id], max_bytes).await?;
+        // A missing object exits nonzero with nothing on stdout.
+        if code.is_some_and(|code| code != 0) && bytes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
     }
 
     /// One directory level at a revision, in git's own tree order. `None` when `dir`

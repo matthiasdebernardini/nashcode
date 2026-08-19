@@ -11,9 +11,10 @@
 //! both are triggered by a commit arriving, and neither may ever run on a request
 //! path; a second queue would only be a second way to fall behind.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -38,16 +39,14 @@ pub struct Job {
     pub commit: String,
 }
 
-/// A code index rebuild.
+/// A code index rebuild: "this repo moved, look at it again".
+///
+/// Deliberately carries no branch and no commit. The run resolves the default branch
+/// tip when it starts, which is what lets duplicate jobs be coalesced — a job dropped
+/// because one was already queued cannot have seen anything the survivor will miss.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexJob {
     pub repo: String,
-    /// The branch whose tip this is. The worker indexes only the default branch;
-    /// deciding that needs git, and the enqueue side must stay synchronous.
-    pub branch: Option<String>,
-    /// The commit to index, or `None` for "whatever the default branch points at",
-    /// which is what a manual run asks for.
-    pub commit: Option<String>,
 }
 
 /// What the worker takes off the queue.
@@ -62,6 +61,11 @@ pub enum Task {
 pub struct CiQueue {
     db: Db,
     tx: mpsc::UnboundedSender<Task>,
+    /// Repos with an index job already waiting. An index run reads the default branch
+    /// tip *when it starts*, so a second job queued behind the first would read the
+    /// same tip and do nothing — and a push of five branches would queue five of them.
+    /// One pending job per repo always produces the same answer as many.
+    pending_index: Arc<Mutex<HashSet<String>>>,
 }
 
 impl std::fmt::Debug for CiQueue {
@@ -73,7 +77,19 @@ impl std::fmt::Debug for CiQueue {
 impl CiQueue {
     pub fn new(db: Db) -> (Self, mpsc::UnboundedReceiver<Task>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { db, tx }, rx)
+        (Self { db, tx, pending_index: Arc::new(Mutex::new(HashSet::new())) }, rx)
+    }
+
+    /// Tell the queue an index job has been taken off it, so the next one may queue.
+    ///
+    /// Called by the worker as it starts the job, not as it finishes: work that
+    /// arrives *during* a run has to be able to queue a run that will see it.
+    pub fn index_started(&self, repo: &str) {
+        self.lock_pending().remove(repo);
+    }
+
+    fn lock_pending(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.pending_index.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Record a queued run and hand it to the worker. Returns the run id.
@@ -103,14 +119,17 @@ impl CiQueue {
     ///
     /// Nothing is recorded here: an index run records itself when it finishes, and a
     /// row saying "queued" that no query reads would only be a second source of truth.
-    pub fn enqueue_index(&self, repo: &str, branch: Option<&str>, commit: Option<&str>) {
-        let job = IndexJob {
-            repo: repo.to_owned(),
-            branch: branch.map(str::to_owned),
-            commit: commit.map(str::to_owned),
-        };
-        if self.tx.send(Task::Index(job)).is_err() {
+    pub fn enqueue_index(&self, repo: &str) {
+        // Coalesce. A push of several branches fires the observer once per branch, and
+        // a merge fires it again; queueing one job per event would run the indexer
+        // repeatedly over a tree that has not moved between them. One pending job per
+        // repo gives the same answer as many, because the run reads the tip itself.
+        if !self.lock_pending().insert(repo.to_owned()) {
+            return;
+        }
+        if self.tx.send(Task::Index(IndexJob { repo: repo.to_owned() })).is_err() {
             tracing::warn!(repo, "CI worker is gone; the index run is dropped");
+            self.lock_pending().remove(repo);
         }
     }
 }
@@ -124,6 +143,8 @@ pub struct CiWorker {
     /// `None` compiles the code index out of the loop entirely, which is what the
     /// tests that only care about CI use.
     pub indexer: Option<Indexer>,
+    /// The enqueue side, so a run can release its repo's coalescing slot as it starts.
+    pub queue: Option<CiQueue>,
 }
 
 impl CiWorker {
@@ -138,32 +159,32 @@ impl CiWorker {
 
     /// Rebuild a repo's code index. Every failure is one log line: nothing downstream
     /// of this waits on it, and a stale index answers queries perfectly well.
+    ///
+    /// A job always indexes the repo's **default branch tip as it stands right now**,
+    /// whichever branch's movement caused the job. That is what makes coalescing safe:
+    /// a job dropped because another was already queued cannot be a job that would
+    /// have seen something the survivor will not, because the survivor resolves the
+    /// tip later. A job whose tree is already indexed costs one tree read and returns.
     pub async fn run_index(&self, job: &IndexJob) {
         let Some(indexer) = &self.indexer else { return };
+        // Let the next job queue. Done as the run *starts*, not as it ends: a push
+        // that lands mid-run must be able to queue the run that will see it.
+        if let Some(queue) = &self.queue {
+            queue.index_started(&job.repo);
+        }
 
         let mirror = indexer.mirrors.repo(&job.repo);
         let Ok(default_branch) = mirror.default_branch().await else {
             tracing::warn!(repo = %job.repo, "cannot index: the mirror has no branches");
             return;
         };
-        // A tip on some other branch is not the indexed history. Skipping here rather
-        // than at the enqueue side keeps the enqueue side synchronous, which is what
-        // lets the mirror's tip observer call it.
-        if let Some(branch) = &job.branch
-            && branch != &default_branch
-        {
-            return;
-        }
 
-        let commit = match &job.commit {
-            Some(commit) => commit.clone(),
-            None => match mirror.tip(&default_branch).await {
-                Ok(tip) => tip,
-                Err(error) => {
-                    tracing::warn!(repo = %job.repo, %error, "cannot index: no tip");
-                    return;
-                }
-            },
+        let commit = match mirror.tip(&default_branch).await {
+            Ok(tip) => tip,
+            Err(error) => {
+                tracing::warn!(repo = %job.repo, %error, "cannot index: no tip");
+                return;
+            }
         };
 
         let started = Instant::now();

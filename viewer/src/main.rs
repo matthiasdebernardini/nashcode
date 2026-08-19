@@ -91,16 +91,16 @@ async fn serve() {
     let hooks = Webhooks::new(config.webhooks.clone());
     let (ci_queue, ci_rx) = CiQueue::new(db.clone());
 
-    // Every newly seen branch tip queues a CI job, queues a code index run, and fires
-    // the push webhook. The index job carries the branch so the worker can drop it
-    // unless it is the default branch: that is the post-merge trigger, and routing it
-    // through the same observer means a merge made outside the viewer indexes too.
+    // Every newly seen branch tip queues a CI job, asks for a code index run, and
+    // fires the push webhook. Routing indexing through the same observer means a merge
+    // made outside the viewer indexes too, which a call inside `merge` would miss; the
+    // queue coalesces the duplicates a multi-branch push produces.
     let observer = {
         let ci = ci_queue.clone();
         let hooks = hooks.clone();
         Arc::new(move |tip: NewTip| {
             ci.enqueue(&tip.repo, &tip.branch, &tip.commit);
-            ci.enqueue_index(&tip.repo, Some(&tip.branch), Some(&tip.commit));
+            ci.enqueue_index(&tip.repo);
             hooks.send(
                 hooks::PUSH,
                 serde_json::json!({
@@ -126,6 +126,7 @@ async fn serve() {
                 mirrors: mirrors.clone(),
                 embeddings: embeddings.clone(),
             }),
+            queue: Some(ci_queue.clone()),
         }
         .run(ci_rx),
     );

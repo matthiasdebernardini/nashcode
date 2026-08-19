@@ -119,6 +119,60 @@ async fn a_query_that_matches_nothing_is_an_empty_list_not_an_error() {
 }
 
 #[tokio::test]
+async fn text_search_reports_when_it_stopped_early() {
+    let bed = simple_bed(|root| {
+        let remote = make_remote(root, "demo");
+        let work = Work::clone_from(&remote);
+        // `git grep --max-count` is per file, so many files each holding the word is
+        // exactly the shape that used to come back unbounded.
+        for file in 0..40 {
+            let body: String = (0..40).map(|_| "needle here\n").collect();
+            work.write(&format!("src/f{file}.txt"), &body);
+        }
+        work.commit_all("initial");
+        work.push("main");
+        work
+    });
+    bed.mirrors.refresh_now("demo").await;
+
+    let (status, body) = get(&bed.router, "/demo/code/text?q=needle&limit=5").await;
+    assert_eq!(status, 200, "{body}");
+    let answer: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(answer["hits"].as_array().expect("hits").len(), 5);
+    assert_eq!(answer["truncated"], true, "1600 matches, 5 returned: {body}");
+}
+
+#[tokio::test]
+async fn a_complete_text_answer_is_not_marked_truncated() {
+    let bed = simple_bed(code_fixture);
+    bed.mirrors.refresh_now("demo").await;
+    let (_, body) = get(&bed.router, "/demo/code/text?q=open_socket").await;
+    let answer: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(answer["truncated"], false, "{body}");
+}
+
+#[tokio::test]
+async fn a_very_long_matched_line_is_clipped_rather_than_returned_whole() {
+    let bed = simple_bed(|root| {
+        let remote = make_remote(root, "demo");
+        let work = Work::clone_from(&remote);
+        // One minified bundle line: a real shape, and one that used to be the whole
+        // response body.
+        work.write("web/bundle.js", &format!("var x=\"{}\";needle\n", "a".repeat(200_000)));
+        work.commit_all("initial");
+        work.push("main");
+        work
+    });
+    bed.mirrors.refresh_now("demo").await;
+
+    let (_, body) = get(&bed.router, "/demo/code/text?q=needle").await;
+    let answer: Value = serde_json::from_str(&body).expect("json");
+    let text = answer["hits"][0]["text"].as_str().expect("text");
+    assert!(text.len() < 1000, "the line came back whole: {} bytes", text.len());
+    assert!(text.ends_with('…'), "and it says it was cut: {text:?}");
+}
+
+#[tokio::test]
 async fn text_search_without_a_query_is_a_client_error() {
     let bed = simple_bed(code_fixture);
     bed.mirrors.refresh_now("demo").await;
@@ -225,6 +279,23 @@ async fn a_repo_that_was_never_indexed_answers_empty_rather_than_failing() {
     assert_eq!(status, 200, "{body}");
     let answer: Value = serde_json::from_str(&body).expect("json");
     assert!(answer["callers"].as_array().expect("callers").is_empty());
+    // "Never indexed" and "indexed, not there" are different facts and want different
+    // next steps, so an empty answer says which one it is.
+    assert_eq!(answer["indexed"], false, "{body}");
+    assert!(answer["hint"].as_str().expect("hint").contains("never been indexed"), "{body}");
+    assert!(answer["hint"].as_str().expect("hint").contains("code/index"), "{body}");
+}
+
+#[tokio::test]
+async fn an_indexed_repo_missing_a_symbol_points_somewhere_different() {
+    let bed = simple_bed(code_fixture);
+    bed.index("demo").await;
+    let (_, body) = get(&bed.router, "/demo/code/callers?symbol=no_such_thing").await;
+    let answer: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(answer["indexed"], true, "{body}");
+    let hint = answer["hint"].as_str().expect("hint");
+    assert!(!hint.contains("never been indexed"), "{hint}");
+    assert!(hint.contains("/code/text"), "{hint}");
 }
 
 // ---- embeddings --------------------------------------------------------------------
@@ -336,6 +407,34 @@ async fn a_second_run_over_unchanged_content_parses_and_embeds_nothing() {
     assert_eq!(again.files_seen, first.files_seen, "the same tree");
     assert_eq!(again.files_indexed, 0, "no blob was new: {again:?}");
     assert_eq!(again.embedded, 0, "and so nothing was embedded again: {again:?}");
+}
+
+#[tokio::test]
+async fn a_blob_that_yields_no_chunks_is_still_only_parsed_once() {
+    let bed = simple_bed(|root| {
+        let remote = make_remote(root, "demo");
+        let work = Work::clone_from(&remote);
+        // Three shapes that store nothing: empty, binary, and whitespace.
+        work.write("src/empty.rs", "");
+        work.write_bytes("assets/logo.png", &[0x89, b'P', b'N', b'G', 0x00, 0x1a, 0x0a]);
+        work.write("docs/blank.txt", "\n\n\n");
+        work.write("src/real.rs", "pub fn kept() {}\n");
+        work.commit_all("initial");
+        work.push("main");
+        work
+    });
+
+    let first = bed.index("demo").await;
+    assert_eq!(first.files_seen, 4, "{first:?}");
+    // The binary file is read and rejected rather than parsed, so it never counts as
+    // indexed; the other three are parsed, two of them to nothing.
+    assert_eq!(first.files_indexed, 3, "{first:?}");
+
+    // Without a record of the blobs that produced nothing, all four would be re-read
+    // and re-parsed on every merge forever.
+    let again = bed.index("demo").await;
+    assert_eq!(again.files_seen, 4, "the same tree: {again:?}");
+    assert_eq!(again.files_indexed, 0, "nothing was read a second time: {again:?}");
 }
 
 #[tokio::test]
@@ -756,68 +855,122 @@ fn worker(bed: &common::TestBed) -> nashcode::ci::CiWorker {
         hooks: nashcode::hooks::Webhooks::new(Default::default()),
         timeout: std::time::Duration::from_secs(60),
         indexer: Some(bed.indexer.clone()),
+        queue: Some(bed.app.ci.clone()),
     }
 }
 
+fn job() -> nashcode::ci::IndexJob {
+    nashcode::ci::IndexJob { repo: "demo".to_owned() }
+}
+
 #[tokio::test]
-async fn the_worker_indexes_a_default_branch_tip_and_ignores_the_others() {
+async fn a_job_indexes_the_default_branch_tip_as_it_stands_when_the_job_runs() {
+    let bed = simple_bed(code_fixture);
+    bed.mirrors.refresh_now("demo").await;
+
+    worker(&bed).run_index(&job()).await;
+    let (_, body) = get(&bed.router, "/demo/code").await;
+    let answer: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(answer["indexed"], true, "{body}");
+    assert!(answer["symbols"].as_i64().expect("symbols") > 0);
+    assert_eq!(
+        answer["commit"],
+        bed.remote_tip("demo", "main"),
+        "the default branch tip, not some other branch's: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_second_job_over_an_unmoved_tree_does_no_work_at_all() {
     let bed = simple_bed(code_fixture);
     bed.mirrors.refresh_now("demo").await;
     let worker = worker(&bed);
 
-    // A tip on a branch that is not the default is not the indexed history.
-    worker
-        .run_index(&nashcode::ci::IndexJob {
-            repo: "demo".to_owned(),
-            branch: Some("some-feature".to_owned()),
-            commit: None,
-        })
-        .await;
-    let (_, before) = get(&bed.router, "/demo/code").await;
-    let before: Value = serde_json::from_str(&before).expect("json");
-    assert_eq!(before["indexed"], false, "{before}");
+    worker.run_index(&job()).await;
+    let (_, first) = get(&bed.router, "/demo/code").await;
+    let first: Value = serde_json::from_str(&first).expect("json");
 
-    // The default branch is.
-    worker
-        .run_index(&nashcode::ci::IndexJob {
-            repo: "demo".to_owned(),
-            branch: Some("main".to_owned()),
-            commit: None,
-        })
-        .await;
-    let (_, after) = get(&bed.router, "/demo/code").await;
-    let after: Value = serde_json::from_str(&after).expect("json");
-    assert_eq!(after["indexed"], true, "{after}");
-    assert!(after["symbols"].as_i64().expect("symbols") > 0);
+    // A push to a branch that is not the default one queues a job too. It must not
+    // re-run the parse, and above all must not re-run the SCIP overlay, which clones
+    // the repo and shells out to a language indexer.
+    worker.run_index(&job()).await;
+    let (_, second) = get(&bed.router, "/demo/code").await;
+    let second: Value = serde_json::from_str(&second).expect("json");
+
+    assert_eq!(second["commit"], first["commit"]);
+    assert_eq!(second["chunks"], first["chunks"]);
+    assert_eq!(
+        second["last_indexed_at"], first["last_indexed_at"],
+        "an unmoved tree records no new run: {second}"
+    );
 }
 
 #[tokio::test]
-async fn a_manual_index_job_names_no_branch_and_indexes_the_default_one() {
+async fn a_moved_tree_is_indexed_on_the_next_job() {
     let bed = simple_bed(code_fixture);
     bed.mirrors.refresh_now("demo").await;
-    worker(&bed)
-        .run_index(&nashcode::ci::IndexJob {
-            repo: "demo".to_owned(),
-            branch: None,
-            commit: None,
-        })
-        .await;
+    let worker = worker(&bed);
+    worker.run_index(&job()).await;
+
+    let work = common::Work::clone_from(&bed.remote_root().join("demo.git"));
+    work.write("src/extra.rs", "pub fn added() { connect(); }\n");
+    work.commit_all("add a file");
+    work.push("main");
+    bed.mirrors.refresh_now("demo").await;
+
+    worker.run_index(&job()).await;
     let (_, body) = get(&bed.router, "/demo/code").await;
     let answer: Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(answer["indexed"], true, "{body}");
+    assert_eq!(answer["commit"], bed.remote_tip("demo", "main"), "{body}");
+
+    let (_, def) = get(&bed.router, "/demo/code/def?symbol=added").await;
+    let def: Value = serde_json::from_str(&def).expect("json");
+    assert_eq!(def["definitions"].as_array().expect("definitions").len(), 1, "{def}");
+}
+
+#[tokio::test]
+async fn duplicate_index_jobs_for_one_repo_collapse_into_one() {
+    let db = nashcode::db::Db::in_memory().expect("db");
+    let (queue, mut rx) = nashcode::ci::CiQueue::new(db);
+
+    // A push of five branches fires the tip observer five times.
+    for _ in 0..5 {
+        queue.enqueue_index("demo");
+    }
+    let mut queued = 0;
+    while let Ok(task) = rx.try_recv() {
+        assert!(matches!(task, nashcode::ci::Task::Index(_)));
+        queued += 1;
+    }
+    assert_eq!(queued, 1, "five events, one run");
+
+    // Once the run has started, the next event may queue again — work that lands
+    // during a run must be able to ask for a run that will see it.
+    queue.index_started("demo");
+    queue.enqueue_index("demo");
+    assert!(rx.try_recv().is_ok(), "a job after the run started is not swallowed");
+}
+
+#[tokio::test]
+async fn coalescing_is_per_repo_not_global() {
+    let db = nashcode::db::Db::in_memory().expect("db");
+    let (queue, mut rx) = nashcode::ci::CiQueue::new(db);
+    queue.enqueue_index("one");
+    queue.enqueue_index("two");
+    queue.enqueue_index("one");
+
+    let mut repos = Vec::new();
+    while let Ok(nashcode::ci::Task::Index(job)) = rx.try_recv() {
+        repos.push(job.repo);
+    }
+    assert_eq!(repos, vec!["one", "two"]);
 }
 
 #[tokio::test]
 async fn an_index_job_for_a_repo_with_no_mirror_is_a_log_line_not_a_panic() {
     let bed = simple_bed(code_fixture);
     // No refresh: nothing is on disk for this repo yet.
-    worker(&bed)
-        .run_index(&nashcode::ci::IndexJob {
-            repo: "demo".to_owned(),
-            branch: None,
-            commit: None,
-        })
-        .await;
+    worker(&bed).run_index(&job()).await;
     let (status, body) = get(&bed.router, "/demo/code").await;
     assert_eq!(status, 200, "{body}");
 }

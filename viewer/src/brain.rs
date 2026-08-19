@@ -282,6 +282,13 @@ const SYSTEM_PROMPT: &str = "You are the work-state brain for a small personal g
 /// short enough that a model stuck in a loop still returns.
 const MAX_TOOL_TURNS: usize = 6;
 
+/// The whole question's budget, tool calls included.
+///
+/// SPEC gives `/brain/ask` five minutes. Before the tool loop that was also the
+/// per-request timeout and the two were the same number; now seven requests could sit
+/// behind it, so the deadline has to be around the loop rather than around each hop.
+const ASK_DEADLINE: Duration = Duration::from_secs(300);
+
 /// Everything the code-intelligence tools need. Held by the route, passed in whole so
 /// `ask` has one parameter for "the repos you may look at" rather than four.
 #[derive(Clone)]
@@ -403,7 +410,10 @@ impl Tools {
                 let handle = self.mirrors.repo(&repo);
                 let rev = handle.default_branch().await.unwrap_or_else(|_| "HEAD".to_owned());
                 match crate::code::grep(&handle, &rev, &query, limit).await {
-                    Ok(hits) => serde_json::json!({ "hits": hits }),
+                    Ok(found) => serde_json::json!({
+                        "hits": found.hits,
+                        "truncated": found.truncated,
+                    }),
                     Err(error) => serde_json::json!({ "error": error.to_string() }),
                 }
             }
@@ -417,11 +427,11 @@ impl Tools {
                 Some(embedder) => {
                     let one = vec![query];
                     match tokio::task::spawn_blocking(move || embedder.embed(&one)).await {
-                        Ok(Ok(vectors)) if !vectors.is_empty() => {
-                            let chunks = self.db.code_chunks(&repo).unwrap_or_default();
-                            serde_json::json!({
-                                "hits": crate::code::rank(&chunks, &vectors[0], limit),
-                            })
+                        Ok(Ok(mut vectors)) if !vectors.is_empty() => {
+                            let found =
+                                crate::code::similar(&self.db, &repo, vectors.remove(0), limit)
+                                    .await;
+                            serde_json::json!({ "hits": found.hits })
                         }
                         Ok(Ok(_)) => serde_json::json!({ "error": "the model returned no vector" }),
                         Ok(Err(error)) => serde_json::json!({ "error": error.to_string() }),
@@ -452,6 +462,30 @@ impl Tools {
 /// What is new is that the source itself does not: a repo's code is far too large to
 /// paste, and the tools are how the model reaches the part of it that matters.
 pub async fn ask(
+    config: &Config,
+    state: serde_json::Value,
+    documents: BTreeMap<String, String>,
+    question: &str,
+    tools: Option<&Tools>,
+) -> Result<Answer, AskError> {
+    // One deadline for the question, not one per hop: a slow model that keeps calling
+    // tools must not be able to hold a request open for seven timeouts in a row.
+    match tokio::time::timeout(ASK_DEADLINE, ask_within(config, state, documents, question, tools))
+        .await
+    {
+        Ok(answer) => answer,
+        Err(_elapsed) => Err(AskError::Upstream {
+            status: 504,
+            message: format!(
+                "the question was still running after {}s; ask something narrower, or \
+                 query the JSON endpoints directly",
+                ASK_DEADLINE.as_secs()
+            ),
+        }),
+    }
+}
+
+async fn ask_within(
     config: &Config,
     state: serde_json::Value,
     documents: BTreeMap<String, String>,
