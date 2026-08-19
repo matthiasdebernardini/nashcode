@@ -510,6 +510,19 @@ the endpoint does not care who is drawing.
   `securityLevel: "strict"`, and the source is delivered to the page as text for the
   client to render, never spliced into server HTML. Same reasoning as the markdown
   stored-XSS fix.
+- **Nodes link back to the code.** A rendered diagram is a claim about the codebase;
+  clicking a node shows where the codebase makes it true. Mermaid stays at
+  `securityLevel: "strict"` — `click` directives inside submitted text remain dead —
+  so the wiring happens after render, in the viewer's own JS, from data the server
+  resolves. `GET /:repo/code/where?names=a,b,c` batch-resolves diagram labels against
+  the code graph: for each name, exact symbol matches (name, kind, path, line) and
+  file-stem matches (`mirror` → `viewer/src/mirror.rs`) carrying that file's defined
+  symbols. Rust only for now — matches are filtered to `.rs` paths; a label from any
+  other language resolves to nothing, never to an error. At most 100 names per call;
+  more is a `400`. On the page, a node with at least one match gets a pointer
+  affordance; clicking opens a popover naming the functions and types the node is
+  made of, each a link to `/:repo/blob/<path>#L<line>`. A node with no match stays
+  inert.
 - **Brain sees it.** The per-repo stanza in `GET /brain` grows
   `architecture: {submissions, latest_at, latest_author}` so "which repos have a drawn
   design and how stale is it" is one question.

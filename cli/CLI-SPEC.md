@@ -101,6 +101,18 @@ Checks, each one line, ✓/✗: profile exists, server reachable, TLS cert valid
 accepted (auth probe), tailscale identity headers present, celld service active (via
 SSH if configured), bucket reachable from host, viewer up (if configured).
 
+### `nashcode brain [repo]`
+The viewer's `GET /brain?repo=` for one repo, digested for an agent's first read of a
+session. Repo defaults to the name `origin` points at, the way `comments` resolves it.
+The point is the transform: the raw stanza buries the useful facts under an activity
+log, so the command reshapes it — branches with tip and CI state, the code-index
+stanza (files, symbols, age), plan files, open-comment counts, latest architecture
+submission, and the last five activity entries as one line each. `--json` emits that
+digest as JSON (not the raw stanza); without it, the same facts as compact text. A
+viewer that is down prints one line saying so and exits 0 — this runs from
+session-start hooks, and a dead viewer must not break a session. Raw dump stays
+`curl /brain`; this command is the usable view.
+
 ## Implementation constraints
 
 - Rust, clap (derive), edition 2024. Prompts via `dialoguer` or equivalent
