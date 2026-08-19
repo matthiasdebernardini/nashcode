@@ -221,6 +221,43 @@ curl -s -H 'accept: application/json' "$NASHCODE/$REPO/prompts?session=<session>
 
 Each entry carries `session`, `seq`, `text`, `head`, `agent`, and `created_at`.
 
+## Architecture
+
+Read the graph, draw it, submit the drawing. The whole static analysis comes in one call:
+
+```sh
+curl -s "$NASHCODE/$REPO/code/graph"
+```
+
+That document holds `files`, `symbols`, and `edges`. Turn it into a mermaid diagram and
+post that:
+
+```sh
+curl -X POST "$NASHCODE/$REPO/architecture" \
+  -H 'content-type: application/json' \
+  -d '{"title":"Request path","note":"Where a page load goes.",
+       "mermaid":"graph TD;\n  viewer-->mirror;\n  mirror-->dgit;"}'
+```
+
+`mermaid` is required and capped at 64 KiB; `title` and `note` are optional. The server
+stores the text verbatim and never parses it — a diagram that will not render shows
+mermaid's own error box on the page. It responds 201 with the stored row.
+
+Submissions are append-only. A new drawing is a new row; nothing is edited.
+
+```sh
+curl -s -H 'accept: application/json' "$NASHCODE/$REPO/architecture"          # the latest
+curl -s -H 'accept: application/json' "$NASHCODE/$REPO/architecture?history"  # every one
+curl -s -H 'accept: application/json' "$NASHCODE/$REPO/architecture?id=7"     # one by id
+```
+
+Each row carries `id`, `mermaid`, `title`, `note`, `author`, and `created_at`; `?history`
+leaves out the sources. Without the `accept` header the same URL is the page a human
+reads.
+
+With nothing submitted, the page shows the mermaid blocks of the repo's own
+`ARCHITECTURE.md`. Committing that file is the other way to answer the question.
+
 ## Rules
 
 - Never force-push a branch a human is reviewing without saying so in a comment first.

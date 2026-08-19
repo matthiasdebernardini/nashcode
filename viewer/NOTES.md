@@ -557,3 +557,22 @@ answer when there is no function.
 The degradation the spec asks for falls out of the join: a repo with no index answers
 with empty lists, and a repo of files no grammar reads answers with the inventory and
 `symbols: []`. Neither is an error.
+
+## Architecture tab
+
+- **`architecture` joins the reserved first segments** under a repo, alongside `stacks`,
+  `plans`, `tasks`, `code`, and the rest. A branch may not be named `architecture`.
+- **The diagram never becomes markup on the server.** It goes out escaped inside the
+  fallback `<pre>` and the client reads it back with `textContent` before handing it to
+  mermaid. Nothing has to un-escape anything by hand, which is the property the markdown
+  stored-XSS fix bought and this page must not spend. `securityLevel: "strict"` is the
+  second layer, not the first.
+- **Mermaid loads behind a dynamic `import()`,** the same trick that keeps shiki's
+  grammars off every page. It is bigger than the rest of the bundle put together; adding
+  it grew the entry chunk by 701 bytes and nothing else.
+- **`GET /{repo}/architecture` with `?id=` that does not exist is a 404**, but the bare
+  URL with nothing submitted is a 200 page — an empty state is the answer to "what is the
+  shape of this system", not an error.
+- **The empty state reads `ARCHITECTURE.md` at the default tip**, extracting only its
+  ` ```mermaid ` fences. The prose around them belongs to the wiki tab, which already
+  renders that file whole.
