@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nashcode — your own forge, on your own tailnet</title>
-<meta name="description" content="A personal git forge: dgit on celld, S3-backed durable storage, stacked-diff review, plans and kanban for agents. Runs on your box, behind your tailnet.">
+<meta name="description" content="A personal git forge: dgit on celld, S3-backed durable storage, stacked-diff review, code intelligence, error tracking, plans and kanban for agents. Runs on your box, behind your tailnet.">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -193,6 +193,10 @@
       <div class="cell"><h2>plans &amp; board</h2><p>Markdown in <code>plans/</code> and <code>tasks/</code> is the database. Agents push plans, you annotate, cards flip to done on merge.</p></div>
       <div class="cell"><h2>agents welcome</h2><p>Every surface is JSON. Comments, CI, board moves, and a <code>/brain</code> endpoint that hands an agent the state of everything.</p></div>
       <div class="cell"><h2>ci that is just a script</h2><p><code>.nashcode/ci</code> at your repo root. Green dot or red dot, logs in the viewer. Deploys are the script's business.</p></div>
+      <div class="cell"><h2>code intelligence</h2><p>Every repo indexed: definitions, references, callers, the whole call graph as JSON. <code>nashcode grep</code> is rg-shaped, but hits come back annotated with kind and caller counts.</p></div>
+      <div class="cell"><h2>your error tracker</h2><p>A Sentry-compatible DSN, so your deployed apps report crashes here. Stack frames link straight into the code browser at the failing line.</p></div>
+      <div class="cell"><h2>the whole stack</h2><p>A repo declares its upstream column — server, runtime, OS — and the viewer mirrors and indexes it, so you trace a symptom across codebases like one system.</p></div>
+      <div class="cell"><h2>an architecture that answers</h2><p>A living diagram of the system where every node links back to the code, folded into <code>/brain</code> so agents start oriented.</p></div>
       <div class="cell"><h2>not a github replacement</h2><p>The private layer for work in flight. Public repos, releases, and outside collaborators stay where they are.</p></div>
     </div>
   </section>
