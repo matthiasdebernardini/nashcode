@@ -64,7 +64,13 @@ pub fn group(event: &Value) -> Grouping {
     let key = match fingerprint(event) {
         Some(parts) => parts
             .iter()
-            .map(|part| if part == "{{ default }}" { default_key.clone() } else { part.clone() })
+            .map(|part| {
+                if is_default_sentinel(part) {
+                    default_key.clone()
+                } else {
+                    part.clone()
+                }
+            })
             .collect::<Vec<_>>()
             .join(JOIN),
         None => default_key,
@@ -83,6 +89,19 @@ pub fn group(event: &Value) -> Grouping {
             .to_owned(),
         mechanism: MECHANISM,
     }
+}
+
+/// Is this fingerprint part the `{{ default }}` sentinel?
+///
+/// Upstream matches `{{ <variable> }}` with any inner whitespace, so `{{default}}`
+/// means the same thing as `{{ default }}` and SDK users write both. Comparing
+/// against one exact spelling turns the other into a *literal* part, which silently
+/// merges every event carrying that fingerprint into one issue — the worst kind of
+/// grouping bug, because it looks like it worked.
+fn is_default_sentinel(part: &str) -> bool {
+    part.strip_prefix("{{")
+        .and_then(|inner| inner.strip_suffix("}}"))
+        .is_some_and(|name| name.trim() == "default")
 }
 
 fn hash(key: &str) -> String {
@@ -299,14 +318,23 @@ pub fn parameterize(raw: &str) -> String {
                 return format!("<{name}>");
             }
         }
-        // A bare run of hex digits is only an id if it is actually hexadecimal: `beef`
-        // is a word and `1234567` is a number, and neither should read as `<hex>`.
+        // The `hex` alternative is tried before `int` and its bare form,
+        // `[0-9a-fA-F]{7,}`, also matches any run of 7+ decimal digits. So a long
+        // number reaches here, not the `int` arm, and has to be classified rather
+        // than handed back: an epoch second or a byte count that came out verbatim
+        // would put every distinct value in its own issue.
         if let Some(found) = caps.name("hex") {
             let text = found.as_str();
+            if text.bytes().all(|byte| byte.is_ascii_digit()) {
+                return "<int>".to_owned();
+            }
+            // What is left is letters, or letters and digits. `0x…` is always an
+            // address; otherwise it is only an id if digits and letters are mixed,
+            // which keeps words spelled entirely in hex letters (`defaced`,
+            // `acceded`) as the words they are.
             let hexish = text.starts_with("0x")
                 || text.starts_with("0X")
-                || (text.bytes().any(|b| b.is_ascii_digit())
-                    && text.bytes().any(|b| b.is_ascii_alphabetic()));
+                || text.bytes().any(|byte| byte.is_ascii_digit());
             return if hexish { "<hex>".to_owned() } else { text.to_owned() };
         }
         caps[0].to_owned()
@@ -377,7 +405,49 @@ mod tests {
 
     #[test]
     fn a_word_made_of_hex_letters_stays_a_word() {
-        assert_eq!(parameterize("the coffee decaffeinated"), "the coffee decaffeinated");
+        // Seven letters or more, all of them hex digits, is where the `hex` pattern
+        // and English overlap.
+        for word in ["defaced", "acceded", "deedface", "cabbaged"] {
+            assert_eq!(parameterize(&format!("the {word} thing")), format!("the {word} thing"));
+        }
+    }
+
+    #[test]
+    fn a_long_run_of_digits_is_an_int_not_a_verbatim_number() {
+        // The `hex` alternative is tried first and its bare form matches these too,
+        // so without a digits-only check they came back untouched and every distinct
+        // value opened its own issue.
+        let cases = [
+            ("epoch 1755561600", "epoch <int>"),
+            ("free 1073741824 bytes", "free <int> bytes"),
+            ("order 1234567 failed", "order <int> failed"),
+            ("id 123456 and id 12345678901234", "id <int> and id <int>"),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(parameterize(raw), expected, "{raw}");
+        }
+
+        // Which means two events that differ only in the number are one issue.
+        let one = group(&exception("TimeoutError", "no answer since 1755561600"));
+        let two = group(&exception("TimeoutError", "no answer since 1755561999"));
+        assert_eq!(one.key, two.key);
+    }
+
+    #[test]
+    fn the_default_sentinel_is_recognised_however_it_is_spelled() {
+        let key = |sentinel: &str| {
+            let mut event = exception("KeyError", "boom");
+            event["fingerprint"] = json!([sentinel, "tenant-7"]);
+            group(&event).key
+        };
+        let expected = format!("KeyError: boom{JOIN}tenant-7");
+        for spelling in ["{{ default }}", "{{default}}", "{{  default  }}", "{{\tdefault }}"] {
+            assert_eq!(key(spelling), expected, "{spelling}");
+        }
+
+        // A part that only looks like the sentinel stays a literal.
+        assert_ne!(key("{{ transaction }}"), expected);
+        assert_ne!(key("{ default }"), expected);
     }
 
     #[test]

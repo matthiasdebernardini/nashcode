@@ -195,7 +195,33 @@ Three things reach outside `viewer/src/bugs/` and `viewer/src/web/bugs.rs`:
   other route keeps the default.
 
 The bugs tables are applied by `bugs/index.rs`, not by `db.rs`, so `db.rs` did not move.
-Slice 2 (Pushover, logs, crons, quotas, eviction, mutes, `nashcode bugs reindex`,
-dogfooding, `/brain`) is unclaimed. `viewer/NOTES.md` records every choice, including
-where the implementation disagreed with the goal doc.
+`viewer/NOTES.md` records every choice, including where the implementation disagreed
+with the goal doc.
+
+### Slice 2, unclaimed
+
+The planned scope: Pushover, both log doors, crons, quotas, eviction, the escalation
+ladder, the mute rules, `nashcode bugs reindex`, dogfooding, the `/brain` stanza, and
+the README/AGENTS documentation (goal fact 20). Four more, from the peer review of
+slice 1 — each deliberately left, each with the reason:
+
+1. **Authenticate before decompressing, for the envelope-DSN path.** When auth is in
+   neither the header nor the query, the key comes from the envelope's own `dsn`
+   header, which means the body is read and expanded — up to 100 MiB — before anyone
+   is refused. On a tailnet that is a non-issue. It is a denial-of-service hole the
+   moment the phase-3 public ingester exists, so fix it before that lands: read the
+   first line, take the `dsn`, then continue.
+2. **Bound the digest queue and survive a restart.** The channel is unbounded and
+   each job carries a cloned body, so a burst is held in memory twice, and a crash
+   between the bucket write and the index write loses the index row silently. Slice 2:
+   a bounded channel with `try_send` → 429 (SDKs back off natively), a `digested_at`
+   column on `bugs_envelopes`, and a startup sweep of the undigested — which is the
+   same machinery `nashcode bugs reindex` needs, so build them together.
+3. **One bad bucket write should not abandon the rest of the envelope**
+   (`bugs/digest.rs`, the `?` in `Worker::digest`). A transient error on item two
+   currently drops item three as well. Log and continue.
+4. **`Detail::of` and `group.rs` disagree about the shape of `exception`.** Grouping
+   accepts the bare-array form as well as `{"values": [...]}`; the detail page reads
+   only `values`, so an event in the other form groups correctly and then renders
+   without its exception. One shared helper.
 

@@ -710,3 +710,89 @@ async fn in_app_stack_frames_link_into_the_declared_repo() {
     assert!(page.body.contains("probe_capture_exception.py:24"), "still shown");
     assert!(!page.body.contains("/blob/probe_capture_exception.py"), "but never linked");
 }
+
+// ---- review follow-ups ------------------------------------------------------------
+
+#[tokio::test]
+async fn an_envelope_with_no_event_id_still_gets_one_back() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+
+    // A session-only envelope: legal, carries no event, and an SDK still reads the
+    // response body.
+    let body = b"{}\n{\"type\":\"session\"}\n{\"sid\":\"9d1d\",\"status\":\"ok\"}\n".to_vec();
+    let answer = post_envelope(&bed, id, &key, body).await;
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let minted = answer.json()["id"].as_str().expect("an id, never a bare {}").to_owned();
+    assert_eq!(minted.len(), 32);
+    assert!(minted.chars().all(|c| c.is_ascii_hexdigit()));
+
+    // Nothing to group, so no issue.
+    bed.bugs.digested(1).await;
+    assert!(get(&bed, "/bugs/api", &[JSON]).await.json()["issues"]
+        .as_array()
+        .expect("issues")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn the_default_sentinel_works_without_spaces_too() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+
+    let event = |sentinel: &str, value: &str, event_id: &str| {
+        let payload = serde_json::json!({
+            "event_id": event_id,
+            "timestamp": "2026-08-19T04:05:06Z",
+            "platform": "python",
+            "fingerprint": [sentinel, "tenant-7"],
+            "exception": {"values": [{"type": "KeyError", "value": value}]},
+        })
+        .to_string();
+        format!("{{}}\n{{\"type\":\"event\"}}\n{payload}\n").into_bytes()
+    };
+
+    // Two different exceptions under the tight spelling. If `{{default}}` were taken
+    // as a literal they would collapse into one issue — a silent over-merge.
+    post_envelope(&bed, id, &key, event("{{default}}", "one", &"a".repeat(32))).await;
+    post_envelope(&bed, id, &key, event("{{default}}", "two", &"b".repeat(32))).await;
+    // And the spaced spelling reaches the same key as the tight one.
+    post_envelope(&bed, id, &key, event("{{ default }}", "one", &"c".repeat(32))).await;
+    bed.bugs.digested(3).await;
+
+    let issues = get(&bed, "/bugs/api", &[JSON]).await.json();
+    let issues = issues["issues"].as_array().expect("issues");
+    assert_eq!(issues.len(), 2, "the two exceptions stay apart: {issues:?}");
+    let one = issues.iter().find(|issue| issue["grouping_key"] == "KeyError: one ⋄ tenant-7");
+    assert_eq!(one.expect("the shared key")["events"], 2, "both spellings are one issue");
+}
+
+#[tokio::test]
+async fn a_long_number_in_a_message_does_not_open_an_issue_per_value() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+
+    let event = |epoch: u64, event_id: &str| {
+        let payload = serde_json::json!({
+            "event_id": event_id,
+            "timestamp": "2026-08-19T04:05:06Z",
+            "platform": "python",
+            "exception": {"values": [{
+                "type": "TimeoutError",
+                "value": format!("no answer since {epoch}"),
+            }]},
+        })
+        .to_string();
+        format!("{{}}\n{{\"type\":\"event\"}}\n{payload}\n").into_bytes()
+    };
+
+    post_envelope(&bed, id, &key, event(1755561600, &"a".repeat(32))).await;
+    post_envelope(&bed, id, &key, event(1755561999, &"b".repeat(32))).await;
+    bed.bugs.digested(2).await;
+
+    let issues = get(&bed, "/bugs/api", &[JSON]).await.json();
+    let issues = issues["issues"].as_array().expect("issues");
+    assert_eq!(issues.len(), 1, "a seven-digit number must not split the issue");
+    assert_eq!(issues[0]["grouping_key"], "TimeoutError: no answer since <int>");
+    assert_eq!(issues[0]["events"], 2);
+}

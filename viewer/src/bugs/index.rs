@@ -335,8 +335,14 @@ pub fn issue(db: &Db, project_id: i64, id: i64) -> DbResult<Option<Issue>> {
 pub fn set_state(db: &Db, project_id: i64, id: i64, state: &str, actor: &str) -> DbResult<Option<Issue>> {
     let acted_at = now();
     db.with(|conn| {
+        // Resolving closes the book on the regression too. Leaving the flag set would
+        // paint the issue "regression" forever, including the next time it is opened
+        // fresh, and the flag is what tells a reader "this came back after we said it
+        // was fixed".
         let changed = conn.execute(
-            "UPDATE bugs_issues SET state = ?3, actor = ?4, acted_at = ?5
+            "UPDATE bugs_issues
+             SET state = ?3, actor = ?4, acted_at = ?5,
+                 regression = CASE WHEN ?3 = 'resolved' THEN 0 ELSE regression END
              WHERE project_id = ?1 AND id = ?2",
             params![project_id, id, state, actor, acted_at],
         )?;
@@ -533,6 +539,26 @@ mod tests {
         let kept: Vec<_> =
             events(&db, issue.id, 10).unwrap().into_iter().filter(|e| e.keep).collect();
         assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn resolving_a_regression_closes_the_book_on_it() {
+        let (db, project) = bed();
+        let (issue, _) = record(&db, &event(&project, &"a".repeat(32), "Boom")).unwrap();
+        set_state(&db, project.id, issue.id, state::RESOLVED, "tester").unwrap();
+        let (reopened, _) = record(&db, &event(&project, &"b".repeat(32), "Boom")).unwrap();
+        assert!(reopened.regression);
+
+        let resolved = set_state(&db, project.id, issue.id, state::RESOLVED, "tester")
+            .unwrap()
+            .expect("the issue");
+        assert!(!resolved.regression, "the flag says 'came back after we fixed it'");
+
+        // Muting is not a fix, so it leaves the flag alone.
+        record(&db, &event(&project, &"c".repeat(32), "Boom")).unwrap();
+        let muted =
+            set_state(&db, project.id, issue.id, state::MUTED, "tester").unwrap().expect("issue");
+        assert!(muted.regression);
     }
 
     #[test]

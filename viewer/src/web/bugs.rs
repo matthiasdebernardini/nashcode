@@ -174,19 +174,19 @@ async fn accept_envelope(cx: &Cx, body: Body) -> Result<Response> {
         }
     }
 
-    let event_id = split.event_id();
+    // An envelope with no identifiable event gets one minted for it rather than a
+    // bare `{}`. Relay answers `{}` in that case, but an SDK that reads the id back
+    // has something to correlate either way, and no SDK has ever been harmed by an
+    // id it did not ask for.
+    let event_id = split.event_id().unwrap_or_else(crate::bugs::digest::new_event_id);
+
     // Durable first, understood later: the bytes are in the bucket before we answer.
     if let Err(error) = bugs.accept(project.id, body).await {
         tracing::error!(%error, project = project.name, "bugs: cannot store an envelope");
         return Ok(sentry_error(StatusCode::BAD_GATEWAY, "cannot store the envelope"));
     }
 
-    let payload = match &event_id {
-        Some(id) => serde_json::json!({ "id": id }),
-        // An envelope with nothing identifiable in it still gets a JSON object. An
-        // empty body sends some SDKs into a retry loop.
-        None => serde_json::json!({}),
-    };
+    let payload = serde_json::json!({ "id": event_id });
     let mut response = json_response(StatusCode::OK, payload.to_string());
     response
         .headers_mut()

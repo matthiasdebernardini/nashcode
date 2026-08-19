@@ -68,12 +68,22 @@ pub fn decompress(encoding: Option<&str>, raw: Vec<u8>) -> Result<Vec<u8>, Inges
     let encoding = encoding.unwrap_or("").trim().to_ascii_lowercase();
     match encoding.as_str() {
         "" | "identity" => Ok(raw),
-        "gzip" | "x-gzip" => finish(flate2::read::GzDecoder::new(&raw[..])),
+        // `MultiGzDecoder`, not `GzDecoder`: a body written as several concatenated
+        // gzip members is still one legal gzip stream, and `GzDecoder` stops after
+        // the first one — which would truncate the envelope silently rather than
+        // fail, and a truncated envelope is a lost event.
+        "gzip" | "x-gzip" => finish(flate2::read::MultiGzDecoder::new(&raw[..])),
         "deflate" | "zlib" => {
             // `deflate` officially means zlib-wrapped, but clients that send it raw
-            // exist and cost one retry to support.
-            finish(flate2::read::ZlibDecoder::new(&raw[..]))
-                .or_else(|_| finish(flate2::read::DeflateDecoder::new(&raw[..])))
+            // exist and cost one retry to support. Only a genuine format error earns
+            // that retry: falling back on *any* error would turn an over-cap body
+            // into a 400 instead of the 413 the protocol requires, and would expand
+            // the bomb a second time to get there.
+            match finish(flate2::read::ZlibDecoder::new(&raw[..])) {
+                Ok(body) => Ok(body),
+                Err(error @ IngestError::TooLarge(_)) => Err(error),
+                Err(_) => finish(flate2::read::DeflateDecoder::new(&raw[..])),
+            }
         }
         "br" => finish(brotli_decompressor::Decompressor::new(&raw[..], 8192)),
         other => Err(IngestError::Encoding(format!("unsupported content-encoding {other}"))),
@@ -148,6 +158,41 @@ mod tests {
             decompress(Some("gzip"), bomb),
             Err(IngestError::TooLarge("the decompressed body"))
         );
+    }
+
+    #[test]
+    fn an_over_cap_deflate_body_is_too_large_and_not_a_bad_encoding() {
+        // The raw-deflate fallback used to swallow this into an `Encoding` error,
+        // which the route answers 400 — and it expanded the bomb a second time on
+        // the way.
+        let bomb = zlib(&vec![0u8; MAX_DECOMPRESSED + 1024]);
+        assert_eq!(
+            decompress(Some("deflate"), bomb),
+            Err(IngestError::TooLarge("the decompressed body"))
+        );
+    }
+
+    #[test]
+    fn a_raw_deflate_body_still_gets_its_fallback() {
+        let payload = b"{}\n{\"type\":\"event\"}\n{\"event_id\":\"x\"}\n";
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(payload).unwrap();
+        let raw = encoder.finish().unwrap();
+        assert_eq!(decompress(Some("deflate"), raw).unwrap(), payload);
+    }
+
+    #[test]
+    fn concatenated_gzip_members_all_decode() {
+        // One legal gzip stream can be several members. `GzDecoder` reads the first
+        // and stops, which truncates the envelope without erroring.
+        let head = b"{}\n{\"type\":\"event\"}\n";
+        let tail = b"{\"event_id\":\"x\"}\n";
+        let mut body = gzip(head);
+        body.extend_from_slice(&gzip(tail));
+
+        let decoded = decompress(Some("gzip"), body).unwrap();
+        assert_eq!(decoded, [head.as_slice(), tail.as_slice()].concat());
     }
 
     #[tokio::test]

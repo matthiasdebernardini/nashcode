@@ -712,13 +712,27 @@ are there, as one ordered regex alternation, plus two judgement calls:
   in `Can't connect` to the next apostrophe anywhere in the message. `KeyError:
   'user_id'` therefore keeps its quotes; the type and the parameterized rest still
   group it correctly.
-- **A run of hex digits is only `<hex>` if it is really hexadecimal.** The plain
-  `\b[0-9a-fA-F]{7,}\b` pattern matches `decaffeinated` and `1234567` alike, so the
-  replacement checks the match holds both a digit and a letter and leaves it alone
-  otherwise. `1234567` stays `<int>`; English words stay words.
+- **The `hex` arm has to classify, not just accept or reject.** Its bare form,
+  `\b[0-9a-fA-F]{7,}\b`, is tried before `int` and also matches a run of seven or more
+  *decimal* digits, so `1755561600` never reaches the `int` arm — the `hex` branch is
+  the only place it can be dealt with. The first version there returned an
+  unrecognised match verbatim, which meant every epoch second and byte count opened
+  its own issue. Peer review caught it. Now: all digits → `<int>`; `0x…` or a mix of
+  digits and letters → `<hex>`; letters only → left alone, which is what keeps words
+  that happen to be spelled in hex letters (`defaced`, `acceded`, `deedface`) as
+  words.
 
 Sentry's float and duration classes are not implemented. `1.5` becomes
 `<int>.<int>`, which groups exactly as stably.
+
+### `{{ default }}` is matched by shape, not by spelling
+
+Upstream's fingerprint substitution is `\{\{\s*(\S+)\s*\}\}`, so `{{default}}` and
+`{{ default }}` are the same thing and SDK users write both. Comparing against one
+exact string made the other a *literal* fingerprint part, which merges every event
+carrying that fingerprint into a single issue — a failure that looks like success,
+since the issue exists and the events pile up in it. `is_default_sentinel` strips the
+braces and trims instead. Peer review caught this one too.
 
 ### In-app frames link into the code browser, conservatively
 
@@ -746,6 +760,18 @@ The log half of that amendment is slice 2.
   Slice 2's `reindex` can drop the second if the duplication ever costs anything.
 - **A bucket that will not open turns the feature off** rather than failing the
   process. The viewer's other twenty jobs are not worth refusing to start over.
+- **`deflate` falls back to raw deflate only on a format error.** Falling back on any
+  error turned an over-cap zlib body into a 400 instead of the 413 the protocol
+  requires, and expanded the bomb a second time on the way there.
+- **gzip is read with `MultiGzDecoder`.** Several concatenated gzip members are one
+  legal gzip stream; `GzDecoder` reads the first and stops, which truncates the
+  envelope without erroring, and a truncated envelope is a lost event.
+- **An envelope with no event in it still gets an id back.** Relay answers `{}` there.
+  We mint one instead: it costs nothing, and it means the response body has the same
+  shape every time.
+- **Resolving clears the regression flag.** The flag means "this came back after we
+  said it was fixed", so it belongs to the reopening, not to the issue forever.
+  Muting leaves it alone — muting is not a fix.
 - **`X-Sentry-Rate-Limits` is asserted category by category** in the tests, including
   the negative half: `error`, `default`, `log_item`, `monitor` and `session` must
   never appear, and the list must never be empty. An empty category list means
