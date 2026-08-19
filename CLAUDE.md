@@ -8,8 +8,10 @@ The short version:
 - `git pull --rebase` before you start and again before you commit. Keep commits small.
 - Never rewrite the other agent's tests. A failing test of theirs is a real finding.
 - New scope goes into `SPEC.md` first, in its own commit, before the implementation.
-- Run the whole suite before committing: `cargo nextest run` (never `cargo test`). It
-  takes about 20 seconds and both work streams touch shared modules.
+- Run the whole suite before committing: `cargo nextest run` (never `cargo test`). Give
+  it an isolated `CARGO_TARGET_DIR`/`CARGO_BUILD_BUILD_DIR` and expect ~20 minutes when
+  other agents are building — do NOT kill a slow run; the shared build dir serializes
+  everyone. Both work streams touch shared modules.
 - Leave notes for the other agent at the bottom of `COORDINATION.md`.
 
 **Start from the brain, not from grepping.** A SessionStart hook injects the viewer's

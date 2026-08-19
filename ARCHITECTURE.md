@@ -43,6 +43,7 @@ graph LR
     cli_api[api]
     cli_cli[cli]
     cli_commands[commands]
+    cli_exit[exit]
     cli_index_page[index_page]
     cli_output[output]
     cli_profile[profile]
@@ -51,6 +52,7 @@ graph LR
     cli_timefmt[timefmt]
     cli_vcs[vcs]
   end
+  cli_api --> cli_exit
   cli_api --> cli_index_page
   cli_cli --> cli_commands
   cli_cli --> cli_output
@@ -64,8 +66,11 @@ graph LR
   cli_commands --> cli_ssh
   cli_commands --> cli_timefmt
   cli_commands --> cli_vcs
+  cli_profile --> cli_exit
   cli_remote --> cli_profile
   cli_remote --> cli_ssh
+  cli_ssh --> cli_exit
+  cli_vcs --> cli_exit
   subgraph viewer
     viewer_brain[brain]
     viewer_bugs[bugs]

@@ -18,8 +18,10 @@ This file is for agents that are *building* it.
    leave the test alone.
 4. **`SPEC.md` is the contract.** New scope goes into `SPEC.md` first, in its own commit,
    before the implementation. That way the other agent sees the intent, not just a diff.
-5. **Run the whole suite before committing**, not just your file's tests. The suite is
-   fast (about 20 seconds) and the two work streams touch shared modules.
+5. **Run the whole suite before committing**, not just your file's tests. Use an isolated
+   `CARGO_TARGET_DIR`/`CARGO_BUILD_BUILD_DIR` and budget ~20 minutes under contention —
+   never kill a slow run; the machine-wide shared build dir serializes all agents. The
+   two work streams touch shared modules.
 
 ## Current state
 
