@@ -1,0 +1,24 @@
+{
+  // The public ingester: one celld application, deployed with `celld deploy .`.
+  //
+  // No host, bucket, tailnet, or token belongs in this file. The bucket is a
+  // command-line flag on the node; the drain token arrives as CELLD_VAR_DRAIN_TOKEN
+  // and the empty default below is the "not configured" state, in which every
+  // control route answers 404.
+  "name": "nashcode-ingester",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  "durable_objects": {
+    "bindings": [
+      { "name": "INGEST", "class_name": "IngestCell" },
+      { "name": "REGISTRY", "class_name": "RegistryCell" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["IngestCell", "RegistryCell"] }],
+  "vars": {
+    "DRAIN_TOKEN": "",
+    "REGISTRY_TTL_MS": "60000",
+    "MAX_BUFFER_ROWS": "10000",
+    "MAX_BUFFER_BYTES": "209715200"
+  }
+}
