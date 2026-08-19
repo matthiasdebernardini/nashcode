@@ -286,6 +286,19 @@ pub async fn get(router: &Router, path: &str) -> (u16, String) {
     request(router, Method::GET, path, None).await
 }
 
+/// GET with extra request headers.
+pub async fn get_from(router: &Router, path: &str, headers: &[(&str, &str)]) -> (u16, String) {
+    let mut builder = Request::builder().method(Method::GET).uri(path);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder.body(Body::empty()).expect("request builds");
+    let response = router.handle(request).await;
+    let status = response.status().as_u16();
+    let bytes = to_bytes(response.into_body(), 64 * 1024 * 1024).await.expect("body reads");
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// GET with `Accept: application/json`, for endpoints that serve both a page and JSON.
 pub async fn get_json(router: &Router, path: &str) -> (u16, String) {
     let request = Request::builder()
@@ -327,13 +340,26 @@ pub async fn post_form(
     path: &str,
     fields: &[(&str, &str)],
 ) -> (u16, Option<String>, String) {
+    post_form_from(router, path, fields, &[]).await
+}
+
+/// The same, with extra request headers — `sec-fetch-site`, say, which is how a
+/// browser tells the server that a POST came from another page.
+pub async fn post_form_from(
+    router: &Router,
+    path: &str,
+    fields: &[(&str, &str)],
+    headers: &[(&str, &str)],
+) -> (u16, Option<String>, String) {
     let payload = serde_urlencoded::to_string(fields).expect("form encodes");
-    let request = Request::builder()
+    let mut builder = Request::builder()
         .method(Method::POST)
         .uri(path)
-        .header("content-type", "application/x-www-form-urlencoded")
-        .body(Body::from(payload))
-        .expect("request builds");
+        .header("content-type", "application/x-www-form-urlencoded");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder.body(Body::from(payload)).expect("request builds");
     let response = router.handle(request).await;
     let status = response.status().as_u16();
     let location = response
