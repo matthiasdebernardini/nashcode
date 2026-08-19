@@ -680,6 +680,13 @@ viewer-side surface; the goal doc binds protocol, grouping, and notification sem
   browser (`/:repo/blob/:path#L<n>`), and issue-detail in-app stack frames get the same
   links. Unresolvable paths render as text, never a dead link. `file:` filters log
   search.
+- **Context capture.** When a log row or stack frame resolves to `file:line` in the
+  declared repo, the server reads the surrounding source (±3 lines) from the mirror —
+  at the commit named by `sentry.release` when that is a SHA the mirror knows,
+  otherwise at the default-branch tip with a "tip, not release" marker — and shows the
+  snippet inline on the log row (expandable) and the issue frame. Read on render, not
+  at ingest: the mirror is local and the index stores only file/line/release. A path
+  or SHA the mirror cannot answer degrades to the plain link, never an error.
 - **Phasing.** 1: core loop (projects, ingest, digest, grouping, issues UI, Pushover on
   new/regression, dogfood nashcode's own errors). 2: logs, crons, quotas, retention,
   mutes, escalation. 3: public ingester per `ingester.md`. Acceptance = the 20 facts in
