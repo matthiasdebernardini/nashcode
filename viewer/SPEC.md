@@ -493,16 +493,26 @@ The two share a word and nothing else.
 
 - **The manifest is a commit.** `.nashcode/stack.toml` at the default-branch tip, read
   on refresh. Each `[[dep]]` carries: `name` (a plain name, unique in the file), `url`
-  (an `http(s)` git clone URL — any other scheme is reported in brain, never fetched),
-  exactly one of `pin` (a commit) or `track` (a branch), and an optional free-text
-  `layer`. A malformed manifest degrades: brain carries the parse error and every
-  other page is unaffected. No manifest, no stack, no cost.
+  (an `https` git clone URL, or `http` to loopback — any other scheme, plain `http` to
+  anywhere else, and any URL carrying credentials is reported in brain and never
+  fetched), exactly one of `pin` (a commit id, 7 to 40 hex digits) or `track` (a
+  branch), and an optional free-text `layer`. A malformed manifest degrades: brain
+  carries the parse error and every other page is unaffected. No manifest, no stack,
+  no cost.
 - **One mirror per URL, global.** Upstream mirrors are `git clone --mirror` copies
   under `$NASHCODE_MIRRORS/up/<host>/<path>.git`, keyed by normalized clone URL, so
-  two repos declaring the same dependency share one mirror. They are read-only
-  everywhere: no push, no CI, no plans, no board, no comments, no traces.
-- **`pin` fetches until the commit is on disk, then never again.** `track` deps
-  refresh on a 30-minute schedule, plus `POST /:repo/stack/sync` for "I need it now".
+  two repos declaring the same dependency share one mirror. `http` and `https` of one
+  host are that same mirror, which is why plain `http` off the box is refused rather
+  than left to downgrade it. A URL that cannot be spelled as a directory — an empty or
+  traversing path segment, a segment ending in `.git` — is refused for the same
+  reason: no two URLs may land on one directory. Mirrors are read-only everywhere: no
+  push, no CI, no plans, no board, no comments, no traces.
+- **`pin` fetches until the commit is on disk, then never again.** A pin the upstream
+  publishes on no branch or tag says so in brain rather than reading as merely behind,
+  and a pin already on disk is not marked stale by a sibling dep's fetch failing.
+  `track` deps refresh on a 30-minute schedule, plus `POST /:repo/stack/sync` for "I
+  need it now" — itself limited to one fetch a minute per mirror, since a route anyone
+  can call in a loop is otherwise an amplifier aimed at somebody else's server.
   Upstream fetches follow the mirror rules: a failure degrades to stale, and never
   blocks or fails a page.
 - **Brain tells the whole story.** The per-repo `/brain` JSON grows a `stack` stanza:
