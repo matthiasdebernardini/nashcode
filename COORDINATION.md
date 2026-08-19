@@ -40,7 +40,6 @@ This file is for agents that are *building* it.
 | `cli/CLI-SPEC.md`, `goals/agcli-migration/` | agcli-migration session | spec commit only for now; the `cli/src/**` rewrite waits until the clickable-nodes claim above clears, then will be claimed here |
 | `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
 
-| `README.md`, `AGENTS.md` (bugs sections only) | error-tracking session | fact 20: document the bugs feature for users and agents |
 
 ## Who has been doing what
 
