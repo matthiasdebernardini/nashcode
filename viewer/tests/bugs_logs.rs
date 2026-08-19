@@ -37,6 +37,7 @@ fn bugs_bed() -> (TestBed, PathBuf) {
         bugs_bucket: Some(format!("file://{}", bucket.display())),
         bugs_s3_endpoint: None,
         bugs_ingest_url: "https://bugs.example.invalid".to_owned(),
+        bugs_drain: None,
     });
     let bed = common::testbed_from_config(root, config);
     (bed, bucket)

@@ -119,6 +119,7 @@ fn asking_bed(root: tempfile::TempDir, stub_url: &str, key: Option<&str>) -> com
         bugs_bucket: None,
         bugs_s3_endpoint: None,
         bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
+        bugs_drain: None,
     });
     testbed_from_config(root, config)
 }

@@ -38,6 +38,10 @@ pub struct Project {
     pub created_at: String,
     /// How long log rows stay in the hot window. The bucket archive is forever.
     pub retention_days: i64,
+    /// Does this project still authenticate? A revoked project stays here so its
+    /// issues stay readable, and goes to the public ingester's registry as
+    /// `active:false`, which that edge reads as "absent".
+    pub active: bool,
 }
 
 /// A project plus the counts the list page shows.
@@ -158,6 +162,7 @@ pub fn create_project(db: &Db, name: &str, key: &str, repo: Option<&str>) -> DbR
             repo: repo.map(str::to_owned),
             created_at,
             retention_days: DEFAULT_RETENTION_DAYS,
+            active: true,
         })
     })
 }
@@ -165,7 +170,7 @@ pub fn create_project(db: &Db, name: &str, key: &str, repo: Option<&str>) -> DbR
 pub fn project_by_name(db: &Db, name: &str) -> DbResult<Option<Project>> {
     db.with(|conn| {
         conn.query_row(
-            "SELECT id, name, key, repo, created_at, retention_days
+            "SELECT id, name, key, repo, created_at, retention_days, active
              FROM bugs_projects WHERE name = ?1",
             params![name],
             read_project,
@@ -177,7 +182,7 @@ pub fn project_by_name(db: &Db, name: &str) -> DbResult<Option<Project>> {
 pub fn project_by_id(db: &Db, id: i64) -> DbResult<Option<Project>> {
     db.with(|conn| {
         conn.query_row(
-            "SELECT id, name, key, repo, created_at, retention_days
+            "SELECT id, name, key, repo, created_at, retention_days, active
              FROM bugs_projects WHERE id = ?1",
             params![id],
             read_project,
@@ -190,7 +195,7 @@ pub fn project_by_id(db: &Db, id: i64) -> DbResult<Option<Project>> {
 pub fn projects(db: &Db) -> DbResult<Vec<ProjectSummary>> {
     db.with(|conn| {
         let mut statement = conn.prepare(
-            "SELECT p.id, p.name, p.key, p.repo, p.created_at, p.retention_days,
+            "SELECT p.id, p.name, p.key, p.repo, p.created_at, p.retention_days, p.active,
                     COALESCE(SUM(i.state = 'unresolved'), 0),
                     COUNT(i.id),
                     COALESCE(SUM(i.events), 0)
@@ -202,11 +207,36 @@ pub fn projects(db: &Db) -> DbResult<Vec<ProjectSummary>> {
         let rows = statement.query_map([], |row| {
             Ok(ProjectSummary {
                 project: read_project(row)?,
-                unresolved: row.get(6)?,
-                issues: row.get(7)?,
-                events: row.get(8)?,
+                unresolved: row.get(7)?,
+                issues: row.get(8)?,
+                events: row.get(9)?,
             })
         })?;
+        rows.collect()
+    })
+}
+
+/// Revoke a project's key, or give it back. The rows stay: an issue that has already
+/// been filed is history, and history does not stop being true when a DSN is retired.
+pub fn set_project_active(db: &Db, id: i64, active: bool) -> DbResult<bool> {
+    db.with(|conn| {
+        let changed = conn.execute(
+            "UPDATE bugs_projects SET active = ?2 WHERE id = ?1",
+            params![id, active],
+        )?;
+        Ok(changed > 0)
+    })
+}
+
+/// Every project as the public ingester's registry wants it: id, key, and whether the
+/// key still opens the door. Deliberately lean — the registry is pushed on a timer and
+/// has no use for issue counts.
+pub fn registry(db: &Db) -> DbResult<Vec<(i64, String, bool)>> {
+    db.with(|conn| {
+        let mut statement =
+            conn.prepare("SELECT id, key, active FROM bugs_projects ORDER BY id")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect()
     })
 }
@@ -219,6 +249,7 @@ fn read_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         repo: row.get(3)?,
         created_at: row.get(4)?,
         retention_days: row.get(5)?,
+        active: row.get(6)?,
     })
 }
 
@@ -501,6 +532,9 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("bugs_envelopes", "digested_at", "TEXT"),
     // How long a project's log rows stay in the hot window.
     ("bugs_projects", "retention_days", RETENTION_COLUMN),
+    // Whether the project still authenticates. Every project that existed before this
+    // column did was authenticating, so the default has to be 1.
+    ("bugs_projects", "active", "INTEGER NOT NULL DEFAULT 1"),
 ];
 
 /// Add a column if the table does not have it yet.

@@ -961,3 +961,80 @@ takes at most 32 terms, because SQLite refuses an expression tree past
 `severity_number` through `scalar_number` like the envelope door does. The retention
 default lives in two places — a Rust constant and a DDL string — pinned by a test rather
 than by pulling in a const-formatting crate for one line.
+
+## The drain (phase 3, the nashcode half)
+
+`viewer/src/bugs/drain.rs` pulls buffered rows off the public ingester and replays them
+into the doors they arrived at. The protocol is `ingester/README.md`; SPEC's Bugs
+section binds the configuration surface and the ack rule. What follows is what the
+implementation had to decide.
+
+**The transport is a trait, and the TCP one is not a test fixture.** `NASHCODE_BUGS_DRAIN`
+takes an iroh EndpointId or an `http://host:port` URL, and both are first-class. That is
+not generosity: the design doc's hedge is that five hundred lines of axum could replace
+celld without the drainer noticing, and a drainer that can only speak iroh cannot be
+pointed at the replacement. It is also what makes the contract testable, because the
+tests reach a real celld node over loopback.
+
+**Ack after digest, and the one exception.** `Bugs::accept` returns once the bytes are in
+the bucket and a queue slot is held, which is the durable point — the digest itself runs
+later and can be redone from the object. So the ack follows `accept`, not the digest
+task. A 429 off the byte-budget queue ends the project's cycle with no ack; the rows come
+back next cycle and dedupe eats the duplicates. The exception is a row nothing can ever
+take: a body that will not decompress, an envelope that will not split, a `kind` no door
+serves. Those are acked and counted, because the alternative is a project wedged for ever
+behind one bad row, and the buffer filling until the edge starts answering 429 to
+everything the project sends. `Drainer::poison_count` is the number to watch; it should
+be zero, and it is in the log at `warn` with the seq and the reason.
+
+**The cursor is belt and braces.** Acked rows are deleted at the edge, so `after=0` would
+also fetch exactly the unacked tail. The cursor exists because the loop needs one inside
+a cycle, because a restart should not re-ask for rows it has finished with, and because
+`seq` is documented never to rewind — so a cursor is the cheapest way to notice if it
+ever does. It only ever moves forwards: the upsert has a `WHERE acked_seq < ?` on it.
+
+**Projects grew an `active` column, and the tailnet door reads it too.** The registry the
+edge wants is `(project_id, key, active)`, and nothing here could produce the third
+field — there was no way to revoke a project at all. `active` defaults to 1, so every
+project that existed before the column keeps working. Revoking one leaves its issues and
+logs readable and closes both doors: the edge stops authenticating it on the next
+registry push, and `viewer/src/web/bugs.rs` answers 404 immediately. A revoked key is
+absent, not wrong — the same thing the edge says.
+
+**An empty registry is never pushed automatically.** The edge refuses one without
+`?allow_empty=1`, and the drainer does not reach for that parameter. Emptying the set
+takes every project on the fleet offline, and an SDK reads the resulting 404 as a verdict
+rather than as weather, so it destroys events instead of delaying them. An empty set here
+is far more likely to be a serialisation bug than an intention. It logs a warning naming
+the manual `PUT` instead.
+
+**The drain refuses to start without a bucket.** `NASHCODE_BUGS_DRAIN` set and
+`NASHCODE_BUGS_BUCKET` unset exits 1 rather than warning. Everything acked is gone from
+the edge; a drainer with nowhere durable to put a payload would delete real events off a
+box we do not control.
+
+**iroh is written, unverified, and behind a feature.** `viewer/src/bugs/iroh.rs` is the
+connector for an EndpointId target: dial the EndpointId on ALPN `celld/http/0`, open one
+bidirectional stream, drive HTTP/1 over it with hyper. It has never talked to a real
+`iroh-ingress`, because there is not one on this machine, and nothing here fakes one — a
+test against a stub would prove only that the stub agreed with itself. So it sits behind
+the non-default `drain-iroh` feature, and a default build that is handed an EndpointId
+refuses to start and says which flag it wants. The reason the feature exists rather than
+the dependency simply being taken: iroh is the whole QUIC stack, this is a workspace
+several agents build at once, and an unverified transport is not worth putting that on
+everyone's critical path. **Turn it on for the VPS build, watch one drain land, then make
+it default and delete this paragraph.**
+
+What the VPS needs is in `ingester/README.md`: nashcode's EndpointId — printed at startup,
+derived from the persistent secret key at `NASHCODE_BUGS_DRAIN_KEY` — has to be in
+`iroh-ingress --allow` before the first dial. Until that has been done once and watched,
+the TCP path is the proven one.
+
+**The tests are split, and the split is deliberate.** `viewer/tests/bugs_drain.rs` drives
+the real edge: MinIO, `celld deploy`, a real node, real envelopes over real HTTP. It is
+one test function because nextest gives every function its own process, and a node per
+fact would be eight containers. It skips, loudly, when docker or celld 0.2+ or esbuild is
+missing; `NASHCODE_REQUIRE_CELLD=1` turns the skip into a failure for a machine that is
+supposed to have them. Two facts are unit tests in `drain.rs` instead, because a real
+edge cannot be asked to hold still in either state: a digest queue that is exactly full,
+and an ack the edge refuses.

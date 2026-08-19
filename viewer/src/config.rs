@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Everything the viewer needs to know about the world around it.
 #[derive(Debug, Clone)]
@@ -41,6 +42,35 @@ pub struct Config {
     /// goes into a DSN. Not the bind address — the public ingest domain for projects
     /// on public infra, the tailnet URL for tailnet ones.
     pub bugs_ingest_url: String,
+    /// `NASHCODE_BUGS_DRAIN` and friends. `None` means the drainer never starts, which
+    /// is the shipped default: without a public ingester there is nothing to drain.
+    pub bugs_drain: Option<Drain>,
+}
+
+/// Where the drainer pulls buffered envelopes and log batches from.
+///
+/// The protocol is `ingester/README.md`; nothing here knows what serves it. That is the
+/// hedge the design asks for: an EndpointId dials iroh, an `http://host:port` dials TCP,
+/// and the loop above the transport cannot tell which it got.
+#[derive(Debug, Clone)]
+pub struct Drain {
+    /// `NASHCODE_BUGS_DRAIN`: an iroh EndpointId, or an `http://host:port` base URL.
+    pub target: String,
+    /// `NASHCODE_BUGS_DRAIN_TOKEN`: the bearer token every control route wants. Empty
+    /// is legal and always wrong — the routes answer 404 without it, on purpose.
+    pub token: String,
+    /// `NASHCODE_BUGS_DRAIN_KEY`: the file holding the persistent iroh secret key. Its
+    /// EndpointId is what the ingester's allow-file has to name. Unused by a TCP target.
+    pub key_path: PathBuf,
+    /// `NASHCODE_BUGS_DRAIN_INTERVAL`, seconds. The design says 15 to 30.
+    pub interval: Duration,
+}
+
+impl Drain {
+    /// True when the target is a URL rather than an iroh EndpointId.
+    pub fn is_url(&self) -> bool {
+        self.target.starts_with("http://") || self.target.starts_with("https://")
+    }
 }
 
 fn env_or(key: &str, fallback: &str) -> String {
@@ -97,6 +127,22 @@ impl Config {
             _ => BTreeMap::new(),
         };
 
+        // Seconds, floored at one rather than at fifteen: the design interval is 15 to
+        // 30, but a test that drives a cycle by hand should not have to wait for it.
+        let drain_interval = optional("NASHCODE_BUGS_DRAIN_INTERVAL")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(|seconds| Duration::from_secs(seconds.max(1)))
+            .unwrap_or_else(|| Duration::from_secs(30));
+        let bugs_drain = optional("NASHCODE_BUGS_DRAIN").map(|target| Drain {
+            target,
+            token: env_or("NASHCODE_BUGS_DRAIN_TOKEN", ""),
+            key_path: PathBuf::from(env_or(
+                "NASHCODE_BUGS_DRAIN_KEY",
+                &mirrors.join("bugs-drain.key").to_string_lossy(),
+            )),
+            interval: drain_interval,
+        });
+
         Self {
             dgit_url: env_or("DGIT_URL", "").trim_end_matches('/').to_owned(),
             git_token: env_or("GIT_TOKEN", ""),
@@ -107,6 +153,7 @@ impl Config {
             bugs_ingest_url: env_or("NASHCODE_BUGS_INGEST_URL", &format!("http://{bind}"))
                 .trim_end_matches('/')
                 .to_owned(),
+            bugs_drain,
             bind,
             db_path,
             ci_logs,

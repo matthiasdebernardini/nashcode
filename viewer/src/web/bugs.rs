@@ -141,6 +141,9 @@ async fn accept_logs(cx: &Cx, body: Body) -> Result<Response> {
     let Some(project) = bugs.project_by_id(id)? else {
         return Ok(sentry_error(StatusCode::NOT_FOUND, "unknown project"));
     };
+    if !project.active {
+        return Ok(sentry_error(StatusCode::NOT_FOUND, "unknown project"));
+    }
     match header_key(cx).or_else(|| query_key(cx)) {
         Some(key) if key == project.key => {}
         Some(_) => return Ok(sentry_error(StatusCode::FORBIDDEN, "wrong key for this project")),
@@ -206,6 +209,10 @@ async fn accept_envelope(cx: &Cx, body: Body) -> Result<Response> {
         // sender pointed at a project that does not exist should hear so.
         return Ok(sentry_error(StatusCode::NOT_FOUND, "unknown project"));
     };
+    // A revoked key says the same thing here as it does at the public edge: absent.
+    if !project.active {
+        return Ok(sentry_error(StatusCode::NOT_FOUND, "unknown project"));
+    }
 
     // Header and query auth cost nothing and can refuse before the body is read.
     let declared = header_key(cx).or_else(|| query_key(cx));

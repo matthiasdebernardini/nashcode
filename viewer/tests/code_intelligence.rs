@@ -716,6 +716,7 @@ fn asking_bed(url: &str) -> common::TestBed {
         bugs_bucket: None,
         bugs_s3_endpoint: None,
         bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
+        bugs_drain: None,
     });
     common::testbed_from_config(root, config)
 }

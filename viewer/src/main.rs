@@ -175,6 +175,36 @@ async fn serve() {
         });
     }
 
+    // The drain. Off unless an ingester is configured, and a refusal to start rather
+    // than a warning when it is configured with no bucket: a drainer that acked rows
+    // into nowhere durable would delete them off the edge and lose them for good.
+    if let Some(drain) = config.bugs_drain.clone() {
+        if !bugs.enabled() {
+            eprintln!(
+                "NASHCODE_BUGS_DRAIN is set and NASHCODE_BUGS_BUCKET is not. The drainer \
+                 acks rows off the ingester once they are durable here, and with no \
+                 bucket nothing here is durable. Set the bucket, or unset the drain."
+            );
+            std::process::exit(1);
+        }
+        match nashcode::bugs::drain::transport_for(&drain).await {
+            Ok(transport) => {
+                let drainer =
+                    nashcode::bugs::drain::Drainer::new(bugs.clone(), db.clone(), transport);
+                tracing::info!(
+                    target = %drain.target,
+                    interval = drain.interval.as_secs(),
+                    "bugs: draining the public ingester"
+                );
+                tokio::spawn(drainer.run(drain.interval));
+            }
+            Err(error) => {
+                eprintln!("cannot dial NASHCODE_BUGS_DRAIN: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let app = web::App {
         ops: Ops {
             config: config.clone(),
@@ -223,6 +253,17 @@ fn doctor(config: &Config) {
             "doctor: NASHCODE_BUGS_BUCKET is unset; error tracking is off and /bugs \
              plus /api/:project/envelope/ answer 404"
         );
+    }
+    match &config.bugs_drain {
+        None => eprintln!(
+            "doctor: NASHCODE_BUGS_DRAIN is unset; nothing is pulled from the public \
+             ingester and only projects that post straight at the tailnet are tracked"
+        ),
+        Some(drain) if !drain.is_url() && cfg!(not(feature = "drain-iroh")) => eprintln!(
+            "doctor: NASHCODE_BUGS_DRAIN looks like an iroh EndpointId and this binary \
+             was built without the `drain-iroh` feature; the drainer will refuse to start"
+        ),
+        Some(_) => {}
     }
     if config.git_token.is_empty() {
         eprintln!("doctor: GIT_TOKEN is empty; pushes to dgit will be anonymous");

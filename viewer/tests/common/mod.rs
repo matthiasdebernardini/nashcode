@@ -195,6 +195,7 @@ pub fn testbed_with(root: tempfile::TempDir, repos: &[&str], webhooks: BTreeMap<
         bugs_bucket: None,
         bugs_s3_endpoint: None,
         bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
+        bugs_drain: None,
     });
     testbed_from_config(root, config)
 }
@@ -227,6 +228,7 @@ pub fn observed_bed(build: impl FnOnce(&Path) -> Work, webhooks: BTreeMap<String
         bugs_bucket: None,
         bugs_s3_endpoint: None,
         bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
+        bugs_drain: None,
     });
     testbed_build(root, config, true)
 }

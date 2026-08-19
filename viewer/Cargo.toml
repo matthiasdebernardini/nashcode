@@ -18,6 +18,11 @@ default = ["embeddings"]
 # opened at run time rather than linked in, so this feature costs the release build
 # nothing and a box without the shared library degrades instead of failing to link.
 embeddings = ["dep:fastembed"]
+# The drain's iroh transport. Off by default: it pulls in the whole QUIC stack, and it
+# has never talked to a live `iroh-ingress` — there is not one to talk to outside the
+# VPS, and nothing here fakes one. The TCP transport is complete and tested without it.
+# Turn it on for the VPS build, watch one drain land, then make it default.
+drain-iroh = ["dep:iroh", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "tokio/io-util"]
 
 [dependencies]
 topcoat = "0.6"
@@ -58,6 +63,15 @@ futures-core = "0.3"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 globset = "0.4"
+
+# The drain's iroh transport (feature `drain-iroh`): dial the ingester's EndpointId on
+# ALPN `celld/http/0` and speak HTTP/1 over one QUIC stream. hyper is the h1 client,
+# hyper-util the adapter between tokio's IO traits and hyper's. Off by default until it
+# has talked to a live iroh-ingress once — see NOTES.
+iroh = { version = "1", optional = true }
+hyper = { version = "1", features = ["client", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
 
 [dev-dependencies]
 brotli = "8.0.4"

@@ -11,12 +11,33 @@
 //! honest answer is 404 and one line at startup.
 
 pub mod digest;
+pub mod drain;
 pub mod envelope;
 pub mod group;
 pub mod index;
 pub mod ingest;
+#[cfg(feature = "drain-iroh")]
+pub mod iroh;
 pub mod logs;
 pub mod store;
+
+/// The iroh transport with the feature off. It exists so [`drain::transport_for`] can
+/// name it unconditionally and so an operator who configured an EndpointId hears why
+/// nothing is happening, rather than watching a drainer that never drains.
+#[cfg(not(feature = "drain-iroh"))]
+pub mod iroh {
+    use std::sync::Arc;
+
+    use crate::bugs::drain::Transport;
+    use crate::config::Drain as DrainConfig;
+
+    pub async fn transport(_config: &DrainConfig) -> Result<Arc<dyn Transport>, String> {
+        Err("NASHCODE_BUGS_DRAIN looks like an iroh EndpointId, and this binary was \
+             built without the `drain-iroh` feature. Rebuild it with \
+             `--features drain-iroh`, or point NASHCODE_BUGS_DRAIN at an http:// URL."
+            .to_owned())
+    }
+}
 
 use std::sync::{Arc, Mutex};
 
@@ -106,6 +127,7 @@ impl Bugs {
     pub fn new(config: &Config, db: Db) -> DbResult<Self> {
         index::migrate(&db)?;
         logs::migrate(&db)?;
+        drain::migrate(&db)?;
         let store = match &config.bugs_bucket {
             None => None,
             Some(bucket) => match store::open(bucket, config.bugs_s3_endpoint.as_deref()) {
@@ -167,6 +189,12 @@ impl Bugs {
 
     pub fn project_by_id(&self, id: i64) -> DbResult<Option<Project>> {
         index::project_by_id(self.db(), id)
+    }
+
+    /// Revoke a project's key, or give it back. The public ingester learns about it on
+    /// the next registry push; the tailnet door sees it immediately.
+    pub fn set_project_active(&self, id: i64, active: bool) -> DbResult<bool> {
+        index::set_project_active(self.db(), id, active)
     }
 
     /// The connection string an SDK is configured with. No secret half: it has been

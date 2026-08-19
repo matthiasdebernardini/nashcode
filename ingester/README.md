@@ -154,6 +154,16 @@ wrong one, they answer `404 {"detail":"not found"}` — the same thing they say 
 stranger, so a probe cannot learn they exist. **A drainer that suddenly gets 404
 on every call has a token problem, not a routing problem.**
 
+The drainer is `viewer/src/bugs/drain.rs`. It reaches these routes two ways, and the
+loop above the transport cannot tell which: an `http://host:port` target dials TCP, and
+an iroh EndpointId dials `iroh-ingress` on ALPN `celld/http/0`. Provisioning the second
+one takes one step that is easy to forget. nashcode keeps a persistent iroh secret key
+at `NASHCODE_BUGS_DRAIN_KEY` and prints the EndpointId derived from it at startup;
+**that EndpointId has to be in `iroh-ingress --allow` before the first dial**, or the
+ingress closes the stream before celld ever sees a byte and the drainer reports the box
+as unreachable. The pinning is mutual: `NASHCODE_BUGS_DRAIN` holds the ingester's
+EndpointId on the other side.
+
 ### `GET /_nashcode/drain/<project_id>?after=<seq>&max_bytes=<n>`
 
 `200`, `content-type: application/x-ndjson`, one JSON object per line:
