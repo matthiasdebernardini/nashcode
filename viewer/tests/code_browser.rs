@@ -318,6 +318,167 @@ async fn a_new_file_is_created_by_the_same_form() {
 }
 
 #[tokio::test]
+async fn a_second_submit_of_a_stale_form_refuses_instead_of_clobbering() {
+    let bed = simple_bed(code_fixture);
+
+    // Open the form, and read the base blob it hands back.
+    let (status, form) = get(&bed.router, "/demo/edit/src/lib.rs").await;
+    assert_eq!(status, 200);
+    let base = form
+        .split("name=\"base\" value=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the form carries a base blob")
+        .to_owned();
+    assert!(!base.is_empty(), "the base field is empty:\n{form}");
+
+    // Somebody else pushes first.
+    let (status, _, _) = post_form(
+        &bed.router,
+        "/demo/edit",
+        &[("path", "src/lib.rs"), ("content", "fn main() { let x = 99; }\n"), ("message", "theirs")],
+    )
+    .await;
+    assert_eq!(status, 303);
+
+    // Now the stale form submits. It must not win.
+    let (status, location, body) = post_form(
+        &bed.router,
+        "/demo/edit",
+        &[
+            ("path", "src/lib.rs"),
+            ("base", &base),
+            ("content", "fn main() { let x = 7; }\n"),
+            ("message", "mine"),
+        ],
+    )
+    .await;
+    assert_eq!(status, 200, "the stale form was accepted");
+    assert!(location.is_none(), "the stale form redirected as if it had committed");
+    assert!(body.contains("changed since this form was opened"), "no plain refusal:\n{body}");
+    assert!(body.contains("let x = 7"), "the person's text was thrown away:\n{body}");
+
+    // The other person's commit is still what the repo has.
+    let (_, page) = get(&bed.router, "/demo/blob/src/lib.rs").await;
+    assert!(page.contains("let x = 99"), "the stale form clobbered the newer push:\n{page}");
+}
+
+#[tokio::test]
+async fn a_submit_that_changes_nothing_says_so_plainly() {
+    let bed = simple_bed(code_fixture);
+    let before = bed.remote_tip("demo", "main");
+    let (status, location, body) = post_form(
+        &bed.router,
+        "/demo/edit",
+        &[("path", "src/lib.rs"), ("content", "fn main() { let x = 1; }\n"), ("message", "no-op")],
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(location.is_none(), "an empty commit reported success");
+    assert!(body.contains("Nothing to commit"), "no plain message:\n{body}");
+    // Not dressed up as a failure, and not a raw git error either.
+    assert!(!body.contains("Nothing was committed:"), "a no-op read as an error:\n{body}");
+    assert!(!body.contains("nothing to commit, working tree clean"), "raw git error leaked:\n{body}");
+    assert_eq!(before, bed.remote_tip("demo", "main"), "an empty commit was pushed");
+}
+
+#[tokio::test]
+async fn a_file_without_a_trailing_newline_keeps_it_that_way() {
+    let bed = simple_bed(|root| {
+        let work = code_fixture(root);
+        work.write("src/nonewline.txt", "no newline at the end");
+        work.commit_all("a file that ends bare");
+        work.push("main");
+        work
+    });
+
+    // The form declares what it loaded; the commit must not quietly add a newline.
+    let (status, location, body) = post_form(
+        &bed.router,
+        "/demo/edit",
+        &[
+            ("path", "src/nonewline.txt"),
+            ("eof", "none"),
+            ("content", "still no newline"),
+            ("message", "edit"),
+        ],
+    )
+    .await;
+    assert_eq!(status, 303, "{body}");
+    assert_eq!(location.as_deref(), Some("/demo/blob/src/nonewline.txt"));
+
+    let (status, raw) = get(&bed.router, "/demo/raw/main/src/nonewline.txt").await;
+    assert_eq!(status, 200);
+    assert_eq!(raw, "still no newline", "a newline was added behind the author's back");
+
+    // The GET form reports the file's shape, so the round trip stays honest.
+    let (_, form) = get(&bed.router, "/demo/edit/src/nonewline.txt").await;
+    assert!(form.contains("name=\"eof\" value=\"none\""), "the form lost the flag:\n{form}");
+
+    // An ordinary file still gets its newline back.
+    let (status, _, _) = post_form(
+        &bed.router,
+        "/demo/edit",
+        &[("path", "src/withnewline.txt"), ("content", "has one"), ("message", "new")],
+    )
+    .await;
+    assert_eq!(status, 303);
+    let (_, raw) = get(&bed.router, "/demo/raw/main/src/withnewline.txt").await;
+    assert_eq!(raw, "has one\n", "a new file lost its trailing newline");
+}
+
+#[tokio::test]
+async fn a_filename_needing_url_escapes_is_still_reachable() {
+    let bed = simple_bed(|root| {
+        let work = code_fixture(root);
+        work.write("docs/a#b.md", "# hashed\n");
+        work.write("docs/notes v2.md", "# spaced\n");
+        work.commit_all("awkward filenames");
+        work.push("main");
+        work
+    });
+
+    // The listing links to them without truncating at the hash or the space.
+    let (status, listing) = get(&bed.router, "/demo/tree/docs").await;
+    assert_eq!(status, 200);
+    assert!(listing.contains("/demo/blob/docs/a%23b.md"), "the # was not escaped:\n{listing}");
+    assert!(listing.contains("/demo/blob/docs/notes%20v2.md"), "the space was not escaped:\n{listing}");
+
+    // And the links work.
+    for (url, heading) in [
+        ("/demo/blob/docs/a%23b.md", "hashed"),
+        ("/demo/blob/docs/notes%20v2.md", "spaced"),
+    ] {
+        let (status, body) = get(&bed.router, url).await;
+        assert_eq!(status, 200, "{url} -> {status}");
+        assert!(body.contains(heading), "{url} served the wrong file:\n{body}");
+        // Its own header links round-trip too.
+        assert!(body.contains("%23") || body.contains("%20"), "header links unescaped:\n{body}");
+    }
+}
+
+#[tokio::test]
+async fn a_generated_file_past_the_gutter_cap_serves_a_plain_pre() {
+    let bed = simple_bed(|root| {
+        let work = code_fixture(root);
+        let huge: String = (0..50_001).map(|n| format!("row {n}\n")).collect();
+        work.write("generated.txt", &huge);
+        work.commit_all("a machine wrote this");
+        work.push("main");
+        work
+    });
+    let (status, body) = get(&bed.router, "/demo/blob/generated.txt").await;
+    assert_eq!(status, 200);
+    // 50k lines of gutter markup would be tens of megabytes of HTML.
+    assert!(!body.contains("nashcode-lineno"), "the gutter was rendered anyway");
+    assert!(body.contains("data-lines=\"50001\""), "the line count is gone:\n");
+    assert!(body.contains("row 50000"), "the file itself is missing");
+    assert!(body.len() < 2_000_000, "the page is {} bytes", body.len());
+    // Raw is still the way out, exactly as the header promises.
+    assert!(body.contains("/demo/raw/main/generated.txt"), "no raw link on a huge file");
+}
+
+#[tokio::test]
 async fn a_path_that_escapes_the_repo_is_refused_and_the_text_comes_back() {
     let bed = simple_bed(code_fixture);
     let before = bed.remote_tip("demo", "main");

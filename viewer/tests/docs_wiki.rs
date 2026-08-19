@@ -173,6 +173,56 @@ async fn docs_is_reserved_and_outranks_a_branch_of_the_same_name() {
 }
 
 #[tokio::test]
+async fn a_branch_under_docs_still_reaches_its_pr_view() {
+    let bed = simple_bed(|root| {
+        let work = wiki_fixture(root);
+        work.checkout_new("docs/redesign");
+        work.write("docs/guide.md", "# Guide\n\nRewritten on a branch.\n");
+        work.commit_all("redesign the guide");
+        work.push("docs/redesign");
+        work.checkout("main");
+        work
+    });
+
+    // Reserving `docs` was meant to cost one branch name, not the whole namespace.
+    let (status, body) = get(&bed.router, "/demo/docs/redesign").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("nashcode-diff-data"), "not the branch PR view:\n{body}");
+    assert!(body.contains("Rewritten on a branch"), "the branch diff is missing:\n{body}");
+    assert!(!body.contains("nashcode-wiki-nav"), "the wiki swallowed the branch:\n{body}");
+
+    // A real wiki page at the same depth still wins.
+    let (status, page) = get(&bed.router, "/demo/docs/docs/guide.md").await;
+    assert_eq!(status, 200);
+    assert!(page.contains("nashcode-wiki-nav"), "the fall-through stole a wiki page:\n{page}");
+
+    // And a name that is neither is still a 404, not a guess.
+    let (status, _) = get(&bed.router, "/demo/docs/neither-page-nor-branch").await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn wiki_images_resolve_to_the_raw_endpoint() {
+    let bed = simple_bed(|root| {
+        let work = wiki_fixture(root);
+        work.write("docs/with-image.md", "# Shot\n\n![diagram](diagram.png)\n\n![logo](../logo.svg)\n");
+        work.write_bytes("docs/diagram.png", &[0x89, b'P', b'N', b'G']);
+        work.write_bytes("logo.svg", b"<svg/>");
+        work.commit_all("pictures");
+        work.push("main");
+        work
+    });
+    let (status, body) = get(&bed.router, "/demo/docs/docs/with-image.md").await;
+    assert_eq!(status, 200, "{body}");
+    // An <img> needs the bytes, so it points at raw, not at the blob page.
+    assert!(body.contains("src=\"/demo/raw/main/docs/diagram.png\""), "image not rewritten:\n{body}");
+    assert!(body.contains("src=\"/demo/raw/main/logo.svg\""), "../ image not rewritten:\n{body}");
+    // And those URLs really serve the file.
+    let (status, _) = get(&bed.router, "/demo/raw/main/docs/diagram.png").await;
+    assert_eq!(status, 200, "the rewritten image URL 404s");
+}
+
+#[tokio::test]
 async fn every_repo_page_offers_the_docs_tab() {
     let bed = simple_bed(wiki_fixture);
     let (status, body) = get(&bed.router, "/demo").await;

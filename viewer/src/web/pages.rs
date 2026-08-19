@@ -280,10 +280,10 @@ async fn repo_blob(cx: &Cx) -> Result {
         Ok(text) => Blob::Text(numbered_code(&text, shiki_lang(&file_name))),
         Err(_) => Blob::Binary,
     };
-    let raw_url = format!("/{name}/raw/{branch}/{path}");
+    let raw_url = raw_url(&name, &branch, &path);
     // Binaries have no pencil: a textarea cannot hold them, and git is the tool for
     // replacing one.
-    let edit_url = (!matches!(body, Blob::Binary)).then(|| format!("/{name}/edit/{path}"));
+    let edit_url = (!matches!(body, Blob::Binary)).then(|| edit_url(&name, &path));
     let wiki_url = is_markdown(&file_name).then(|| render::docs_url(&name, &path));
 
     view! { cx =>
@@ -343,7 +343,7 @@ async fn path_crumbs(#[into] repo: String, #[into] path: String) -> Result {
         let last = i + 1 == segments.len();
         crumbs.push((
             (*segment).to_owned(),
-            (!last).then(|| format!("/{repo}/tree/{walked}")),
+            (!last).then(|| format!("/{repo}/tree/{}", render::encode_path(&walked))),
         ));
     }
     view! {
@@ -364,8 +364,8 @@ async fn path_crumbs(#[into] repo: String, #[into] path: String) -> Result {
 /// Where a listing row points. Submodules have no content here, so they have no page.
 fn entry_url(repo: &str, entry: &TreeEntry) -> Option<String> {
     match entry.kind {
-        EntryKind::Dir => Some(format!("/{repo}/tree/{}", entry.path)),
-        EntryKind::File | EntryKind::Symlink => Some(format!("/{repo}/blob/{}", entry.path)),
+        EntryKind::Dir => Some(format!("/{repo}/tree/{}", render::encode_path(&entry.path))),
+        EntryKind::File | EntryKind::Symlink => Some(render::blob_url(repo, &entry.path)),
         EntryKind::Submodule => None,
     }
 }
@@ -398,6 +398,16 @@ fn is_markdown(name: &str) -> bool {
 /// longer tokenizing it than a person will spend reading it. Numbering still happens —
 /// that is the part a link depends on.
 const HIGHLIGHT_LINE_LIMIT: usize = 5000;
+
+/// Above this many lines the gutter itself is dropped and the file is served as one
+/// plain `<pre>`.
+///
+/// The gutter costs about 145 bytes a line, so a 500k-line generated file would be a
+/// 70 MB page — the viewer would be the thing that fell over, not the browser. Ten
+/// times the highlight limit is well past any file a person reads and well short of
+/// any page size that hurts. The raw link is on the header either way, and it is the
+/// right tool for a file this size.
+const GUTTER_LINE_LIMIT: usize = 50_000;
 
 /// The shiki grammar for a file, by extension first and whole name second.
 ///
@@ -492,6 +502,13 @@ fn numbered_code(text: &str, lang: Option<&str>) -> String {
     // A trailing newline ends the last line; it does not start another one.
     if lines.len() > 1 && lines.last() == Some(&"") {
         lines.pop();
+    }
+    if lines.len() > GUTTER_LINE_LIMIT {
+        return format!(
+            "<pre class=\"Box-body nashcode-code text-small\" data-lines=\"{}\">{}</pre>",
+            lines.len(),
+            render::escape_text(text)
+        );
     }
     let mut html = String::with_capacity(text.len() + lines.len() * 96);
     html.push_str("<pre class=\"Box-body nashcode-code nashcode-blob text-small\"");
@@ -588,6 +605,28 @@ fn new_file_url(repo: &str, dir: &str) -> String {
     format!("/{repo}/edit?{query}")
 }
 
+/// Where the pencil points.
+fn edit_url(repo: &str, path: &str) -> String {
+    format!("/{repo}/edit/{}", render::encode_path(path))
+}
+
+/// Where the raw bytes of a file on a branch are served.
+fn raw_url(repo: &str, branch: &str, path: &str) -> String {
+    format!(
+        "/{repo}/raw/{}/{}",
+        render::encode_path(branch),
+        render::encode_path(path)
+    )
+}
+
+/// What the form has to say about the attempt that just failed to commit.
+enum EditNote {
+    /// Nothing was committed, and that is a problem to fix.
+    Refused(String),
+    /// Nothing was committed, and nothing needed to be.
+    Unchanged(String),
+}
+
 /// What the edit form is showing right now — the file as typed, not as stored, so a
 /// rejected commit comes back with the person's own text still in it.
 struct EditState {
@@ -596,7 +635,12 @@ struct EditState {
     message: String,
     /// A path the repo does not have yet: the field is editable and the form says "Create".
     creating: bool,
-    error: Option<String>,
+    /// The blob this form was opened against, empty for a file that did not exist.
+    /// Posted back so the commit can refuse to overwrite someone else's push.
+    base: String,
+    /// The loaded file ended without a newline. A round trip must not add one.
+    no_trailing_newline: bool,
+    note: Option<EditNote>,
 }
 
 #[topcoat::router::query_params(error = bad_request)]
@@ -631,10 +675,38 @@ async fn edit_new(cx: &Cx) -> Result {
             content: String::new(),
             message: String::new(),
             creating: true,
-            error: None,
+            base: String::new(),
+            no_trailing_newline: false,
+            note: None,
         },
     )
     .await
+}
+
+/// The file as the default branch has it right now: its blob id and its bytes.
+///
+/// The blob id is git's own content hash, so "did this change" needs no comparison of
+/// the bytes and no timestamp anyone could disagree about.
+async fn current_blob(
+    repo: &crate::git::Repo,
+    path: &str,
+) -> Result<Option<(String, Vec<u8>)>> {
+    let Ok(branch) = repo.default_branch().await else {
+        return Ok(None);
+    };
+    let Ok(tip) = repo.tip(&branch).await else {
+        return Ok(None);
+    };
+    let Some(bytes) = repo.show_file(&tip, path).await? else {
+        return Ok(None);
+    };
+    let id = repo
+        .rev_parse(&format!("{tip}:{path}"))
+        .await
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    Ok(Some((id, bytes)))
 }
 
 /// `GET /{repo}/edit/{*path}` — the same form, holding the file as the default branch
@@ -654,13 +726,10 @@ async fn edit_existing(cx: &Cx) -> Result {
     };
 
     let repo = app(cx).mirrors.repo(&name);
-    let Ok(branch) = repo.default_branch().await else {
+    let Some((base, bytes)) = current_blob(&repo, &path).await? else {
         return Err(topcoat::router::error::not_found().into());
     };
-    let tip = repo.tip(&branch).await?;
-    let Some(bytes) = repo.show_file(&tip, &path).await? else {
-        return Err(topcoat::router::error::not_found().into());
-    };
+    let no_trailing_newline = !bytes.is_empty() && !bytes.ends_with(b"\n");
     // A textarea holds text. Anything else keeps its download link and its pencil-less
     // header; arriving here by hand gets the reason, not a 404.
     let Ok(content) = String::from_utf8(bytes) else {
@@ -687,7 +756,9 @@ async fn edit_existing(cx: &Cx) -> Result {
             content,
             message: String::new(),
             creating: false,
-            error: None,
+            base,
+            no_trailing_newline,
+            note: None,
         },
     )
     .await
@@ -707,7 +778,7 @@ async fn edit_view(cx: &Cx, name: &str, status: &MirrorStatus, state: EditState)
     let cancel_url = if state.creating {
         format!("/{name}")
     } else {
-        format!("/{name}/blob/{}", state.path)
+        render::blob_url(name, &state.path)
     };
     let placeholder = if state.creating {
         format!("Create {}", if state.path.is_empty() { "a file".to_owned() } else { state.path.clone() })
@@ -721,12 +792,22 @@ async fn edit_view(cx: &Cx, name: &str, status: &MirrorStatus, state: EditState)
                 <i class=(if state.creating { "ph ph-file-plus" } else { "ph ph-pencil-simple" })></i>
                 " " (heading)
             </h3>
-            if let Some(error) = &state.error {
+            if let Some(EditNote::Refused(why)) = &state.note {
                 <div class="flash flash-error mb-3">
-                    <i class="ph ph-warning"></i>" Nothing was committed: " (error.clone())
+                    <i class="ph ph-warning"></i>" Nothing was committed: " (why.clone())
+                </div>
+            }
+            if let Some(EditNote::Unchanged(what)) = &state.note {
+                <div class="flash mb-3">
+                    <i class="ph ph-check-circle"></i>" " (what.clone())
                 </div>
             }
             <form method="post" action=(format!("/{name}/edit")) class="Box">
+                // The blob the form was opened against, and whether it ended without a
+                // newline. Both travel with the edit so the commit can tell a stale
+                // form from a fresh one and leave the file's own shape alone.
+                <input type="hidden" name="base" value=(state.base.clone())>
+                <input type="hidden" name="eof" value=(if state.no_trailing_newline { "none" } else { "newline" })>
                 <div class="Box-header d-flex flex-items-center gap-2">
                     <i class="ph ph-file"></i>
                     if state.creating {
@@ -782,6 +863,12 @@ struct EditIn {
     content: String,
     #[serde(default)]
     message: String,
+    /// The blob the form was opened against. Absent for a client that never loaded a
+    /// form — a script posting straight at the endpoint gets no staleness check,
+    /// because it never had a version to be stale against.
+    base: Option<String>,
+    /// `none` when the loaded file ended without a newline.
+    eof: Option<String>,
 }
 
 /// `POST /{repo}/edit` — one commit on the default branch, pushed through the same
@@ -803,40 +890,83 @@ async fn edit_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result<Res
         .unwrap_or_default();
 
     // A textarea posts CRLF whatever the file held; a repo does not want that. The
-    // trailing newline is added back because every tool downstream expects one.
+    // trailing newline is restored unless the file the form loaded did without one:
+    // adding one would show up as a diff nobody asked for.
+    let wants_newline = input.eof.as_deref() != Some("none");
     let mut content = input.content.replace("\r\n", "\n");
-    if !content.is_empty() && !content.ends_with('\n') {
+    if wants_newline && !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
+
+    // Re-render the form as it stands, carrying whatever the person typed.
+    let form = |path: String, creating: bool, base: String, note: EditNote| EditState {
+        path,
+        content: content.clone(),
+        message: input.message.clone(),
+        creating,
+        base,
+        no_trailing_newline: !wants_newline,
+        note: Some(note),
+    };
 
     let Some(path) = safe_repo_path(&input.path) else {
         let page = edit_view(
             cx,
             &name,
             &ctx.status,
-            EditState {
-                path: input.path.clone(),
-                content,
-                message: input.message.clone(),
-                creating: true,
-                error: Some(
+            form(
+                input.path.clone(),
+                true,
+                String::new(),
+                EditNote::Refused(
                     "a path must be repo-relative, with no empty, dotted, or .git segments"
                         .to_owned(),
                 ),
-            },
+            ),
         )
         .await?;
         return page.into_response(cx);
     };
 
     let repo = app(cx).mirrors.repo(&name);
-    let existed = match repo.default_branch().await {
-        Ok(branch) => match repo.tip(&branch).await {
-            Ok(tip) => repo.show_file(&tip, &path).await?.is_some(),
-            Err(_) => false,
-        },
-        Err(_) => false,
-    };
+    let head = current_blob(&repo, &path).await?;
+    let head_id = head.as_ref().map(|(id, _)| id.clone()).unwrap_or_default();
+    let existed = head.is_some();
+
+    // Someone pushed between the form loading and this submit. Overwriting their work
+    // silently is the one outcome nobody can undo from here, so the edit comes back
+    // instead — the person's text is still in the box and the file is still theirs.
+    if let Some(base) = &input.base
+        && base.trim() != head_id
+    {
+        let why = if existed {
+            format!("{path} changed since this form was opened. Open it again and re-apply the edit.")
+        } else {
+            format!("{path} was deleted since this form was opened.")
+        };
+        let page =
+            edit_view(cx, &name, &ctx.status, form(path, !existed, head_id, EditNote::Refused(why)))
+                .await?;
+        return page.into_response(cx);
+    }
+
+    // Nothing to commit is not a failure, and it is not git's error message either.
+    if head.as_ref().is_some_and(|(_, bytes)| bytes == content.as_bytes()) {
+        let page = edit_view(
+            cx,
+            &name,
+            &ctx.status,
+            form(
+                path.clone(),
+                false,
+                head_id,
+                EditNote::Unchanged(format!("{path} is already exactly this. Nothing to commit.")),
+            ),
+        )
+        .await?;
+        return page.into_response(cx);
+    }
+
     let message = match input.message.trim() {
         "" if existed => format!("Update {path}"),
         "" => format!("Create {path}"),
@@ -845,19 +975,13 @@ async fn edit_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result<Res
 
     let who = crate::web::actor(cx);
     match app(cx).ops.commit_file(&name, &path, &content, &message, &who).await {
-        Ok(_) => crate::web::see_other(&format!("/{name}/blob/{path}")),
+        Ok(_) => crate::web::see_other(&render::blob_url(&name, &path)),
         Err(error) => {
             let page = edit_view(
                 cx,
                 &name,
                 &ctx.status,
-                EditState {
-                    path,
-                    content,
-                    message: input.message.clone(),
-                    creating: !existed,
-                    error: Some(error.to_string()),
-                },
+                form(path, !existed, head_id, EditNote::Refused(error.to_string())),
             )
             .await?;
             page.into_response(cx)
@@ -1171,7 +1295,7 @@ async fn document_page(cx: &Cx, root: &'static str) -> Result {
         None => None,
     };
 
-    let raw_url = format!("/{name}/raw/{branch}/{path}");
+    let raw_url = raw_url(&name, &branch, &path);
     let active = if root == docs::PLANS_DIR { "plans" } else { "board" };
 
     view! { cx =>
@@ -1388,13 +1512,23 @@ async fn wiki_page(cx: &Cx, requested: Option<String>) -> Result {
 
     let pages = index.wiki_pages();
     // A path from the URL only reaches a markdown file that exists. Everything else
-    // belongs to /blob/, which is a 404 away from here on purpose.
+    // belongs to /blob/, which is a 404 away from here on purpose — except that
+    // `docs/...` is also a perfectly ordinary branch name. Reserving `docs` was meant
+    // to cost one branch name, not a whole namespace, so a request that names no wiki
+    // page but does name a real branch falls through to that branch's PR view.
     let current = match &requested {
         Some(path) => {
-            let Some(path) = safe_repo_path(path).filter(|p| pages.contains(&p.as_str())) else {
-                return Err(topcoat::router::error::not_found().into());
-            };
-            Some(path)
+            let known = safe_repo_path(path).filter(|p| pages.contains(&p.as_str()));
+            match known {
+                Some(path) => Some(path),
+                None => {
+                    let branch = format!("docs/{path}");
+                    if repo.tip(&branch).await.is_ok() {
+                        return branch_page(cx, &name, &branch).await;
+                    }
+                    return Err(topcoat::router::error::not_found().into());
+                }
+            }
         }
         None => index.wiki_home().map(str::to_owned),
     };
@@ -1413,8 +1547,14 @@ async fn wiki_page(cx: &Cx, requested: Option<String>) -> Result {
             let document = docs::parse_document(path, &source);
             let branches = repo.branches().await.unwrap_or_default();
             let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
-            let body =
-                render::markdown_in_docs(&document.body, &name, Some(&index), &branches, dir);
+            let body = render::markdown_in_docs(
+                &document.body,
+                &name,
+                Some(&index),
+                &branches,
+                dir,
+                &branch,
+            );
             Some((path.clone(), document.title, body))
         }
         None => None,
@@ -1453,8 +1593,8 @@ async fn wiki_page(cx: &Cx, requested: Option<String>) -> Result {
                                 <i class="ph ph-file-text"></i>
                                 <strong>(doc_title.clone())</strong>
                                 <span class="ml-auto d-flex flex-items-center gap-2 text-small">
-                                    <a class="Link--secondary" href=(format!("/{name}/blob/{path}"))>"source"</a>
-                                    <a class="Link--secondary" href=(format!("/{name}/raw/{branch}/{path}"))>"raw"</a>
+                                    <a class="Link--secondary" href=(render::blob_url(&name, path))>"source"</a>
+                                    <a class="Link--secondary" href=(raw_url(&name, &branch, path))>"raw"</a>
                                 </span>
                             </div>
                             <div class="Box-body markdown-body">(Raw(body.clone()))</div>
