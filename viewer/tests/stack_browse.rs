@@ -3,10 +3,19 @@
 //!
 //! The upstreams are the real bare repos `common::Origin` publishes over git's dumb
 //! HTTP protocol, so a mirror on disk is a mirror that was really fetched. The server's
-//! request counter carries a second claim through this file: browsing never goes to the
-//! wire, not even for a revision the mirror does not have.
+//! request counter carries a second claim through this file: the browse surfaces never
+//! go to the wire, not even for a revision the mirror does not have.
+//!
+//! That claim is only worth counting if the counter *could* have moved. A dep is not
+//! due for a refresh for half an hour after its last attempt, so a test that syncs and
+//! then asserts "no further requests" passes whatever the pages do. Every counting test
+//! here therefore calls [`armed`] first: it drops the refresh interval to zero and
+//! proves the column page goes to the wire under exactly the conditions the browse
+//! surfaces are then shown not to.
 
 mod common;
+
+use std::time::Duration;
 
 use common::{Origin, TestBed, bed_declaring, get, git, make_remote, post_json, testbed_with};
 
@@ -26,6 +35,58 @@ async fn page(bed: &TestBed, path: &str) -> String {
 
 async fn status_of(bed: &TestBed, path: &str) -> u16 {
     get(&bed.router, path).await.0
+}
+
+/// The upstream's request count, once whatever a page started in the background has
+/// stopped moving it. A refresh runs in a spawned task, so reading the counter the
+/// instant a response comes back would count nothing at all.
+async fn settled(origin: &Origin) -> usize {
+    let mut last = origin.requests();
+    let mut still = 0;
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let now = origin.requests();
+        if now == last {
+            still += 1;
+            if still == 3 {
+                return now;
+            }
+        } else {
+            still = 0;
+            last = now;
+        }
+    }
+    last
+}
+
+/// Take the refresh interval out of the way and prove the counter can move.
+///
+/// With the interval at zero, every read that is *allowed* to refresh does — so loading
+/// the column page must reach the upstream. That is what gives the assertions after it
+/// their teeth: a browse surface that ever started a refresh, by calling
+/// `Upstreams::stack` instead of opening the one dep it was asked for, would move this
+/// same counter. Returns the count to compare against.
+async fn armed(bed: &TestBed, origin: &Origin, repo: &str) -> usize {
+    bed.upstreams.set_track_interval(Duration::ZERO);
+    let before = settled(origin).await;
+    page(bed, &format!("/{repo}/stack")).await;
+    let after = settled(origin).await;
+    assert!(
+        after > before,
+        "the column page never went to the wire, so counting requests proves nothing here"
+    );
+    after
+}
+
+/// The one card on the column page that belongs to this dep.
+fn card_for<'a>(body: &'a str, dep: &str) -> &'a str {
+    let marker = format!("<div key=\"{dep}\"");
+    let start = body
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no card for {dep}:\n{body}"));
+    let tail = &body[start + marker.len()..];
+    let end = tail.find("<div key=\"").unwrap_or(tail.len());
+    &tail[..end]
 }
 
 // ---- the column ------------------------------------------------------------------
@@ -89,23 +150,62 @@ layer = "runtime"
 
 #[tokio::test]
 async fn a_dep_with_no_mirror_says_why_instead_of_linking_anywhere() {
-    // Port 1 on loopback: nothing listens, and nothing ever will.
+    // Three ways to have no mirror: an upstream nobody can reach (port 1 on loopback,
+    // where nothing listens and nothing ever will), a URL that was refused before any
+    // request, and a name the routes already own.
     let bed = bed_declaring(&[(
         "demo",
         "[[dep]]\nname = \"gone\"\nurl = \"http://127.0.0.1:1/gone.git\"\ntrack = \"main\"\n\n\
-         [[dep]]\nname = \"refused\"\nurl = \"ssh://git@example.invalid/a\"\npin = \"1a2b3c4\"\n",
+         [[dep]]\nname = \"notaurl\"\nurl = \"ssh://git@example.invalid/a\"\npin = \"1a2b3c4\"\n\n\
+         [[dep]]\nname = \"sync\"\nurl = \"https://example.invalid/a\"\ntrack = \"main\"\n",
     )]);
     sync(&bed, "demo").await;
 
     let body = page(&bed, "/demo/stack").await;
-    assert!(!body.contains("href=\"/demo/stack/gone\""), "a dep with no mirror was a link:\n{body}");
-    assert!(!body.contains("href=\"/demo/stack/refused\""), "{body}");
-    assert!(body.contains("only http and https"), "the refused dep never says why:\n{body}");
+    for dep in ["gone", "notaurl", "sync"] {
+        assert!(
+            !body.contains(&format!("href=\"/demo/stack/{dep}\"")),
+            "a dep with no mirror was a link: {dep}\n{body}"
+        );
+    }
     assert!(body.contains("color-border-danger-emphasis"), "no card said anything was wrong:\n{body}");
 
-    // The dep is declared, so its page is not a 404 — it says the commit is not there.
+    // A mirror that could not be reached is behind. A declaration that was refused was
+    // never going to be fetched at all, and must not read as merely behind. The badges
+    // are matched as markup, not as words: git's own "Connection refused" lands in the
+    // error row of the very card that must not say "refused".
+    const STALE: &str = "</i> stale</span>";
+    const REFUSED: &str = "</i> refused</span>";
+
+    let gone = card_for(&body, "gone");
+    assert!(gone.contains(STALE), "an unreachable upstream did not read as stale:\n{gone}");
+    assert!(!gone.contains(REFUSED), "an upstream that was merely down read as refused:\n{gone}");
+
+    let notaurl = card_for(&body, "notaurl");
+    assert!(notaurl.contains(REFUSED), "a refused declaration did not say so:\n{notaurl}");
+    assert!(!notaurl.contains(STALE), "a declaration never fetchable read as stale:\n{notaurl}");
+    assert!(notaurl.contains("only http and https"), "the refusal never says why:\n{notaurl}");
+
+    // `POST /{repo}/stack/sync` is a static route, so a dep called `sync` could never
+    // have a page. The manifest refuses the name rather than drawing a dead link.
+    let reserved = card_for(&body, "sync");
+    assert!(reserved.contains("is reserved"), "the reserved name was accepted:\n{reserved}");
+    assert!(reserved.contains(REFUSED), "{reserved}");
+
+    // `gone` is a real declaration, so its page is not a 404 — it says the commit is
+    // not there. The two that were refused have no page at all.
     let waiting = page(&bed, "/demo/stack/gone").await;
     assert!(waiting.contains("not mirrored yet"), "{waiting}");
+    assert_eq!(status_of(&bed, "/demo/stack/notaurl").await, 404);
+    // The reserved one is the whole reason the name is refused: this path belongs to the
+    // sync route, so a GET is either that route saying "not with this method" or no page
+    // at all. Either way it is not a dep's tree, which is what the manifest must not
+    // promise.
+    let reserved_status = status_of(&bed, "/demo/stack/sync").await;
+    assert!(
+        reserved_status == 404 || reserved_status == 405,
+        "GET /demo/stack/sync answered {reserved_status}, so a dep could have lived there"
+    );
 }
 
 #[tokio::test]
@@ -128,15 +228,21 @@ async fn two_clicks_reach_a_file_in_a_dep_at_the_pinned_commit() {
     origin.publish("dgit");
     let pin = origin.tip("dgit", "main");
 
+    // A satisfied pin is never due for a refresh, so the column page alone could not
+    // move the counter. The tracked dep beside it is what makes "nothing fetched"
+    // mean something.
+    origin.repo("celld");
     let bed = bed_declaring(&[(
         "demo",
         &format!(
-            "[[dep]]\nname = \"dgit\"\nurl = \"{}\"\npin = \"{pin}\"\n",
-            origin.url("dgit")
+            "[[dep]]\nname = \"dgit\"\nurl = \"{}\"\npin = \"{pin}\"\n\n\
+             [[dep]]\nname = \"celld\"\nurl = \"{}\"\ntrack = \"main\"\n",
+            origin.url("dgit"),
+            origin.url("celld"),
         ),
     )]);
     sync(&bed, "demo").await;
-    let after_fetch = origin.requests();
+    let after_fetch = armed(&bed, &origin, "demo").await;
 
     // Click one: the column entry opens the dep's own tree.
     let tree = page(&bed, "/demo/stack/dgit").await;
@@ -150,8 +256,10 @@ async fn two_clicks_reach_a_file_in_a_dep_at_the_pinned_commit() {
     let blob = page(&bed, "/demo/stack/dgit/blob/src/main.rs").await;
     assert!(blob.contains("println!"), "the blob has no content:\n{blob}");
 
-    // Reading a mirror is reading. Nothing about it goes to the wire.
-    assert_eq!(origin.requests(), after_fetch, "browsing the column fetched");
+    // Reading a mirror is reading. Nothing about it goes to the wire — and the column
+    // page just proved, with the same interval in force, that a refresh would show up
+    // in this number.
+    assert_eq!(settled(&origin).await, after_fetch, "browsing the column fetched");
 }
 
 #[tokio::test]
@@ -200,7 +308,7 @@ async fn rev_narrows_to_a_commit_the_mirror_already_has() {
         ),
     )]);
     sync(&bed, "demo").await;
-    let after_fetch = origin.requests();
+    let after_fetch = armed(&bed, &origin, "demo").await;
 
     // The declared revision is the tracked branch's tip.
     let tip = page(&bed, "/demo/stack/dgit").await;
@@ -220,7 +328,7 @@ async fn rev_narrows_to_a_commit_the_mirror_already_has() {
 
     // An abbreviated rev is a rev.
     assert_eq!(status_of(&bed, &format!("/demo/stack/dgit?rev={}", &first[..10])).await, 200);
-    assert_eq!(origin.requests(), after_fetch, "a browse at a rev went to the wire");
+    assert_eq!(settled(&origin).await, after_fetch, "a browse at a rev went to the wire");
 }
 
 #[tokio::test]
@@ -235,7 +343,7 @@ async fn a_rev_the_mirror_does_not_have_is_a_404_and_never_a_fetch() {
         ),
     )]);
     sync(&bed, "demo").await;
-    let after_fetch = origin.requests();
+    let after_fetch = armed(&bed, &origin, "demo").await;
 
     let refused = [
         // A well-formed commit id the mirror simply does not have.
@@ -253,7 +361,7 @@ async fn a_rev_the_mirror_does_not_have_is_a_404_and_never_a_fetch() {
             assert_eq!(status_of(&bed, &url).await, 404, "{url} was not a 404");
         }
     }
-    assert_eq!(origin.requests(), after_fetch, "a rev the mirror lacks caused a fetch");
+    assert_eq!(settled(&origin).await, after_fetch, "a rev the mirror lacks caused a fetch");
 }
 
 // ---- the name is the declaring repo's --------------------------------------------
@@ -367,20 +475,25 @@ async fn a_gitlink_whose_commit_is_not_mirrored_still_only_ever_404s() {
     origin.repo("dgit");
     let pin = origin.tip("dgit", "main");
     let stranded = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    // The pin is satisfied and so never due; the tracked dep beside it is what lets the
+    // counter move at all, and `armed` proves it does.
+    origin.repo("celld");
     let bed = bed_with_gitlinks(
         &format!(
-            "[[dep]]\nname = \"dgit\"\nurl = \"{}\"\npin = \"{pin}\"\n",
-            origin.url("dgit")
+            "[[dep]]\nname = \"dgit\"\nurl = \"{}\"\npin = \"{pin}\"\n\n\
+             [[dep]]\nname = \"celld\"\nurl = \"{}\"\ntrack = \"main\"\n",
+            origin.url("dgit"),
+            origin.url("celld"),
         ),
         &[("vendor/dgit", &origin.url("dgit"), stranded)],
     );
     sync(&bed, "demo").await;
-    let after_fetch = origin.requests();
+    let after_fetch = armed(&bed, &origin, "demo").await;
 
     // The link is drawn from the tree, not from a fetch. Following it to a commit the
     // mirror has never seen is the ordinary 404, and still no request.
     let tree = page(&bed, "/demo/tree/vendor").await;
     assert!(tree.contains(&format!("href=\"/demo/stack/dgit?rev={stranded}\"")), "{tree}");
     assert_eq!(status_of(&bed, &format!("/demo/stack/dgit?rev={stranded}")).await, 404);
-    assert_eq!(origin.requests(), after_fetch, "following a stale gitlink fetched");
+    assert_eq!(settled(&origin).await, after_fetch, "following a stale gitlink fetched");
 }
