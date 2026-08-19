@@ -660,3 +660,85 @@ fn static_reply(root: &Path, method: &str, target: &str) -> Vec<u8> {
     }
     reply
 }
+
+// ---- upstream fixtures -------------------------------------------------------------
+
+/// A directory of bare repos, served over the dumb protocol: the upstreams a stack test
+/// declares.
+///
+/// Every repo here is a real bare repo published with `git update-server-info`, so the
+/// fetches under test are real fetches and nothing touches the network. The server's
+/// request counter is what proves a pinned dependency stops asking once it has what it
+/// was pinned to — and that a browse never asks at all.
+pub struct Origin {
+    pub keep: tempfile::TempDir,
+    pub server: FileServer,
+}
+
+impl Origin {
+    pub async fn new() -> Self {
+        let keep = tempfile::tempdir().expect("tempdir");
+        let server = serve_dir(keep.path().to_path_buf()).await;
+        Self { keep, server }
+    }
+
+    /// A new upstream with one commit on `main`, published for dumb clients.
+    pub fn repo(&self, name: &str) -> Work {
+        let bare = make_remote(self.keep.path(), name);
+        let work = Work::clone_from(&bare);
+        work.write("README.md", &format!("# {name}\n"));
+        work.commit_all("initial");
+        work.push("main");
+        self.publish(name);
+        work
+    }
+
+    /// `git update-server-info` is what makes a bare repo readable without a git
+    /// server, so every push to an upstream is followed by one.
+    pub fn publish(&self, name: &str) {
+        git(&self.bare(name), &["update-server-info"]);
+    }
+
+    pub fn bare(&self, name: &str) -> PathBuf {
+        self.keep.path().join(format!("{name}.git"))
+    }
+
+    pub fn url(&self, name: &str) -> String {
+        format!("{}/{name}.git", self.server.url)
+    }
+
+    pub fn tip(&self, name: &str, branch: &str) -> String {
+        git(&self.bare(name), &["rev-parse", &format!("refs/heads/{branch}")]).trim().to_owned()
+    }
+
+    pub fn requests(&self) -> usize {
+        self.server.requests()
+    }
+
+    /// Take an upstream off the air without stopping the server, so the next fetch
+    /// fails the way an upstream that moved or died does.
+    pub fn unpublish(&self, name: &str) {
+        let bare = self.bare(name);
+        std::fs::rename(&bare, bare.with_extension("gone")).expect("rename");
+    }
+}
+
+/// A testbed whose repos each declare the manifest given. An empty manifest means the
+/// repo has no `.nashcode/stack.toml` at all.
+pub fn bed_declaring(manifests: &[(&str, &str)]) -> TestBed {
+    let root = tempfile::tempdir().expect("tempdir");
+    let remotes = root.path().join("remotes");
+    std::fs::create_dir_all(&remotes).expect("mkdir");
+    for (name, manifest) in manifests {
+        let bare = make_remote(&remotes, name);
+        let work = Work::clone_from(&bare);
+        work.write("README.md", &format!("# {name}\n"));
+        if !manifest.is_empty() {
+            work.write(".nashcode/stack.toml", manifest);
+        }
+        work.commit_all("initial");
+        work.push("main");
+    }
+    let names: Vec<&str> = manifests.iter().map(|(name, _)| *name).collect();
+    testbed_with(root, &names, BTreeMap::new())
+}

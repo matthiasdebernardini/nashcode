@@ -9,87 +9,10 @@
 
 mod common;
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use common::{
-    FileServer, TestBed, Work, get, git, make_remote, post_json, serve_dir, testbed_with,
-};
-
-/// A directory of bare repos, served over the dumb protocol: the upstreams under test.
-struct Origin {
-    keep: tempfile::TempDir,
-    server: FileServer,
-}
-
-impl Origin {
-    async fn new() -> Self {
-        let keep = tempfile::tempdir().expect("tempdir");
-        let server = serve_dir(keep.path().to_path_buf()).await;
-        Self { keep, server }
-    }
-
-    /// A new upstream with one commit on `main`, published for dumb clients.
-    fn repo(&self, name: &str) -> Work {
-        let bare = make_remote(self.keep.path(), name);
-        let work = Work::clone_from(&bare);
-        work.write("README.md", &format!("# {name}\n"));
-        work.commit_all("initial");
-        work.push("main");
-        self.publish(name);
-        work
-    }
-
-    /// `git update-server-info` is what makes a bare repo readable without a git
-    /// server, so every push to an upstream is followed by one.
-    fn publish(&self, name: &str) {
-        git(&self.bare(name), &["update-server-info"]);
-    }
-
-    fn bare(&self, name: &str) -> PathBuf {
-        self.keep.path().join(format!("{name}.git"))
-    }
-
-    fn url(&self, name: &str) -> String {
-        format!("{}/{name}.git", self.server.url)
-    }
-
-    fn tip(&self, name: &str, branch: &str) -> String {
-        git(&self.bare(name), &["rev-parse", &format!("refs/heads/{branch}")]).trim().to_owned()
-    }
-
-    fn requests(&self) -> usize {
-        self.server.requests()
-    }
-
-    /// Take an upstream off the air without stopping the server, so the next fetch
-    /// fails the way an upstream that moved or died does.
-    fn unpublish(&self, name: &str) {
-        let bare = self.bare(name);
-        std::fs::rename(&bare, bare.with_extension("gone")).expect("rename");
-    }
-}
-
-/// A testbed whose repos each declare the manifest given. An empty manifest means the
-/// repo has no `.nashcode/stack.toml` at all.
-fn bed_declaring(manifests: &[(&str, &str)]) -> TestBed {
-    let root = tempfile::tempdir().expect("tempdir");
-    let remotes = root.path().join("remotes");
-    std::fs::create_dir_all(&remotes).expect("mkdir");
-    for (name, manifest) in manifests {
-        let bare = make_remote(&remotes, name);
-        let work = Work::clone_from(&bare);
-        work.write("README.md", &format!("# {name}\n"));
-        if !manifest.is_empty() {
-            work.write(".nashcode/stack.toml", manifest);
-        }
-        work.commit_all("initial");
-        work.push("main");
-    }
-    let names: Vec<&str> = manifests.iter().map(|(name, _)| *name).collect();
-    testbed_with(root, &names, BTreeMap::new())
-}
+use common::{Origin, TestBed, bed_declaring, get, post_json};
 
 /// `POST /{repo}/stack/sync`, returning the stack it answered with.
 async fn sync(bed: &TestBed, repo: &str) -> serde_json::Value {
