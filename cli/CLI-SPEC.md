@@ -140,15 +140,67 @@ LLM must be able to use it on reflex, so the syntax is the contract:
 - Backend: `GET /:repo/code/find?q=` (see viewer SPEC "Code intelligence"); the CLI
   owns only flag translation, the local rg pass, and the merge.
 
+## Agent envelope (agcli)
+
+The CLI is agent-only: no human types it, only coding agents do. It is built on
+`agcli` (crates.io, same author; source at `/Users/md/Projects/agcli`), not clap.
+This section is the output contract; the sections above stay the behavioural
+contract per command.
+
+- **One JSON envelope on stdout, always.** agcli's envelope replaces the old
+  human/`--json` dual mode. `--json` is no longer a declared flag; agcli parses
+  an undeclared bare flag as a boolean and ignores it, so existing invocations
+  keep working — verified by test, not assumed.
+- **Typed exit codes**, mapped at the handler boundary: 0 success, 2 usage,
+  3 not-found (profile missing, repo not on server), 4 auth (token rejected,
+  401/403 from dgit or viewer), 5 api (dgit/viewer HTTP failures, ssh
+  remote-script failures), 1 everything else. Agents branch on the code, not on
+  error prose.
+- **Every error carries a `fix`**: a runnable command or check, not prose. The
+  existing bail/context wording survives as the message.
+- **Reserved agcli flags** (`--select`, `--compact`, `--quiet`, `--yes`,
+  `--dry-run`) come free on every command. `setup --dry-run` and `rm --yes`
+  route through them. `--profile <name>` stays declared per command.
+- **No interactivity.** dialoguer is gone. `setup` with missing answers is a
+  usage error whose `fix` lists the missing flags; env fallbacks
+  (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `TS_AUTHKEY`) stay. `rm`
+  requires `--yes`; without it, usage error with the exact rerun line.
+- **`brain` never returns an error.** A down or unconfigured viewer is an
+  `ok: true` envelope with a `status` field saying so, exit 0. The SessionStart
+  hook depends on this.
+- **`annotate` launches plannotator by default** (the agent launches it FOR the
+  human now); `--no-launch` restores inspect-only. Envelope reports file,
+  plannotator path (null when absent), viewer URL.
+- **`ls` and `comments` emit bounded lists** (`{items, count, total, truncated,
+  fields}`), which advertises `--select` for free.
+- **`doctor`** is agcli's built-in doctor wrapping the existing checks; a
+  failing check carries its typed exit code (e.g. auth). Skipped never passes.
+- **`grep` bypasses the envelope.** Raw rg-format `path:line:content` stdout
+  and rg exit codes ARE its contract (see its section above); it keeps its own
+  flag surface, including its own `--json`, unchanged. agcli must support a
+  raw-stdout command; if it does not, that feature lands in agcli first.
+- **`next_actions`** on success, the useful ones only: `setup` → `init`,
+  `doctor`; `init`/`new` → `plan new`, `index`, `brain`; `plan new` →
+  `annotate`, `comments`; `annotate` → `comments --since=<now>`; `index` →
+  `index --status`, `brain`; `comments` → the same call with `--since=` of the
+  newest comment returned. Errors surface their `fix` as a runnable action.
+- **Surface-only rewrite.** `cli.rs`, `main.rs`, `output.rs` change; command
+  bodies and everything they call stay synchronous (blocking inside a handler
+  is fine for a run-once CLI). ureq stays. Every `long_about` paragraph moves
+  into the agcli command docs; zero prose is dropped.
+- **Audit in tests**: `assert!(cli.audit().is_clean())`, plus one exit-code
+  test per class and a stray-`--json`-is-ignored test.
+
 ## Implementation constraints
 
-- Rust, clap (derive), edition 2024. Prompts via `dialoguer` or equivalent
-  well-maintained crate; spinners fine, no TUI framework.
+- Rust, agcli (see "Agent envelope" above), edition 2024. No prompt crate, no
+  TUI framework — the CLI never prompts.
 - SSH = shell out to the system `ssh`/`scp` (respects user's config/agent); never an SSH
   library. All remote scripts are idempotent and `set -e`.
 - Secrets never in argv of remote commands where avoidable (pipe via stdin), never
   printed unless explicitly requested (`nashcode token`).
-- Every command supports `--json` for agent use; human output stays terse.
+- Output is the agcli envelope (one JSON value on stdout); progress and
+  warnings go to stderr, `--quiet` strips the chatter.
 - `--help` for every command is written for someone who has never seen celld: one
   paragraph of what/why at the top level explaining the architecture (dgit worker on
   celld, bucket is the store, tailnet is the perimeter).
