@@ -39,7 +39,6 @@ This file is for agents that are *building* it.
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/src/web/api.rs`, `viewer/src/code/mod.rs`, `cli/src/commands/` (`grep.rs` new), `cli/src/cli.rs`, `cli/src/main.rs`, `CLAUDE.md` | clickable-nodes session | `/code/find` + `nashcode grep` per the two SPECs |
 | `cli/CLI-SPEC.md`, `goals/agcli-migration/` | agcli-migration session | spec commit only for now; the `cli/src/**` rewrite waits until the clickable-nodes claim above clears, then will be claimed here |
-| `viewer/src/bugs/**`, `viewer/src/web/bugs.rs`, `viewer/tests/bugs.rs`, `viewer/tests/bugs_logs.rs` (new), `viewer/tests/fixtures/bugs/`, `viewer/src/main.rs` (bugs sweep + prune spawn), `viewer/NOTES.md`, `viewer/SPEC.md` (bugs section) | error-tracking session, slice 2 | the log store, both log doors, the logs page, and the four hardening items left at the bottom of this file |
 | `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
 
 ## Who has been doing what
@@ -223,30 +222,45 @@ The bugs tables are applied by `bugs/index.rs`, not by `db.rs`, so `db.rs` did n
 `viewer/NOTES.md` records every choice, including where the implementation disagreed
 with the goal doc.
 
-### Slice 2, unclaimed
+### Slice 2 landed; slice 3 is unclaimed
 
-The planned scope: Pushover, both log doors, crons, quotas, eviction, the escalation
-ladder, the mute rules, `nashcode bugs reindex`, dogfooding, the `/brain` stanza, and
-the README/AGENTS documentation (goal fact 20). Four more, from the peer review of
-slice 1 — each deliberately left, each with the reason:
+Slice 2 landed in `3c67681` and the claim is released: the log store, both log doors,
+the logs page, and all four hardening items from the slice-1 review. The whole
+workspace suite is green (566 tests) and clippy is clean.
 
-1. **Authenticate before decompressing, for the envelope-DSN path.** When auth is in
-   neither the header nor the query, the key comes from the envelope's own `dsn`
-   header, which means the body is read and expanded — up to 100 MiB — before anyone
-   is refused. On a tailnet that is a non-issue. It is a denial-of-service hole the
-   moment the phase-3 public ingester exists, so fix it before that lands: read the
-   first line, take the `dsn`, then continue.
-2. **Bound the digest queue and survive a restart.** The channel is unbounded and
-   each job carries a cloned body, so a burst is held in memory twice, and a crash
-   between the bucket write and the index write loses the index row silently. Slice 2:
-   a bounded channel with `try_send` → 429 (SDKs back off natively), a `digested_at`
-   column on `bugs_envelopes`, and a startup sweep of the undigested — which is the
-   same machinery `nashcode bugs reindex` needs, so build them together.
-3. **One bad bucket write should not abandon the rest of the envelope**
-   (`bugs/digest.rs`, the `?` in `Worker::digest`). A transient error on item two
-   currently drops item three as well. Log and continue.
-4. **`Detail::of` and `group.rs` disagree about the shape of `exception`.** Grouping
-   accepts the bare-array form as well as `{"values": [...]}`; the detail page reads
-   only `values`, so an event in the other form groups correctly and then renders
-   without its exception. One shared helper.
+What reaches outside `viewer/src/bugs/` and `viewer/src/web/bugs.rs`:
 
+- **`POST /api/{id}/logs` joins the ingest catch-all**, and `INGEST_PATH_LOGS` joins
+  the `OriginPolicy::exempt_paths` list in `web::router` — three lines in
+  `viewer/src/web.rs`, for the same reason the envelope route is exempt.
+- **`main.rs` gained two startup spawns**: the sweep of undigested envelopes, and a
+  24-hour log prune. Both are no-ops with no bucket configured.
+- **`Project` gained `retention_days`**, so `/bugs` and `/bugs/:project` JSON carry
+  one more key. Nothing reads it but the prune and a future settings form.
+- **`bugs_envelopes` gained `digested_at`.** Columns added after a release cannot ride
+  `CREATE TABLE IF NOT EXISTS`, so `bugs/index.rs` now has a two-line
+  `ADDED_COLUMNS` migration list. Add to it rather than editing `SCHEMA` in place.
+
+`viewer/NOTES.md` records the judgement calls, including where a captured SDK envelope
+disagreed with the protocol document and where the goal doc turned out to be optimistic
+about what SDKs attach by default.
+
+### Slice 3, unclaimed
+
+From the original slice-2 plan, not built yet: Pushover and the escalation ladder,
+crons, quotas, eviction, the mute rules, dogfooding nashcode's own errors, the `/brain`
+bugs stanza, and the README/AGENTS documentation (goal fact 20). Plus:
+
+1. **`nashcode bugs reindex`.** The viewer half exists — `Bugs::sweep(true)` re-reads
+   every stored envelope out of the bucket and re-digests it, and re-digesting is
+   idempotent because a repeated `event_id` is one occurrence. What is missing is the
+   command, which lives in `cli/`, held by two other sessions (clickable-nodes, then
+   the agcli rewrite). Whoever takes it needs an HTTP door for the sweep as well: there
+   is none yet, deliberately, because a route that re-digests everything wants thinking
+   about before it exists.
+2. **A quota gate.** The 429 the ingest route now answers is backpressure, not a quota:
+   it fires when the digest queue is full, not when a project has sent too much. Goal
+   fact 5's per-project quota is still unbuilt, and the response shape is already there
+   to reuse (`busy()` in `web/bugs.rs`).
+3. **Per-project `retention_days` has no UI.** The column exists and the prune reads
+   it; nothing sets it but the default.
