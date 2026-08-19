@@ -11,6 +11,7 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use common::{
     FileServer, TestBed, Work, get, git, make_remote, post_json, serve_dir, testbed_with,
@@ -60,6 +61,13 @@ impl Origin {
 
     fn requests(&self) -> usize {
         self.server.requests()
+    }
+
+    /// Take an upstream off the air without stopping the server, so the next fetch
+    /// fails the way an upstream that moved or died does.
+    fn unpublish(&self, name: &str) {
+        let bare = self.bare(name);
+        std::fs::rename(&bare, bare.with_extension("gone")).expect("rename");
     }
 }
 
@@ -320,6 +328,11 @@ track = "main"
 name = "by-path"
 url  = "{}"
 track = "main"
+
+[[dep]]
+name = "by-plain-http"
+url  = "http://10.1.2.3/celld.git"
+track = "main"
 "#,
             served.display(),
             served.display(),
@@ -336,6 +349,9 @@ track = "main"
     }
     assert!(deps[0]["error"].as_str().expect("error").contains("only http and https"));
     assert!(deps[1]["error"].as_str().expect("error").contains("only http and https"));
+    // Plain http off this box is refused before any subprocess runs: it would otherwise
+    // downgrade the transport of a mirror somebody else declared over https.
+    assert!(deps[3]["error"].as_str().expect("error").contains("must be https"));
 
     assert_eq!(origin.requests(), before, "a refused url reached the wire");
     assert!(!up(&bed).exists(), "a refused url made a directory");
@@ -439,6 +455,8 @@ async fn sync_picks_up_a_branch_that_moved_upstream() {
             origin.url("celld")
         ),
     )]);
+    // This test is about the fetch, not about the budget that spaces two of them out.
+    bed.upstreams.set_sync_debounce(Duration::ZERO);
 
     let first = sync(&bed, "demo").await;
     assert_eq!(first["deps"][0]["have"], origin.tip("celld", "main"));
@@ -453,6 +471,117 @@ async fn sync_picks_up_a_branch_that_moved_upstream() {
     let second = sync(&bed, "demo").await;
     assert_eq!(second["deps"][0]["have"], moved, "sync did not fetch the moved branch");
     assert_eq!(stanza(&bed, "demo").await["deps"][0]["have"], moved);
+}
+
+#[tokio::test]
+async fn sync_will_not_go_back_to_the_wire_twice_in_a_minute() {
+    let origin = Origin::new().await;
+    origin.repo("celld");
+    let bed = bed_declaring(&[(
+        "demo",
+        &format!(
+            "[[dep]]\nname = \"celld\"\nurl = \"{}\"\ntrack = \"main\"\n",
+            origin.url("celld")
+        ),
+    )]);
+
+    let first = sync(&bed, "demo").await;
+    let after_clone = origin.requests();
+    assert!(after_clone > 0, "the clone made no requests at all");
+
+    // Sync is a route anyone can call in a loop and the wire on the far end is somebody
+    // else's. Inside the budget it answers from disk without asking again.
+    for _ in 0..5 {
+        let again = sync(&bed, "demo").await;
+        assert_eq!(again["deps"][0]["have"], first["deps"][0]["have"]);
+        assert_eq!(again["deps"][0]["fresh"], true);
+    }
+    assert_eq!(origin.requests(), after_clone, "sync ignored its own rate limit");
+}
+
+#[tokio::test]
+async fn a_pin_the_upstream_does_not_publish_says_so() {
+    let origin = Origin::new().await;
+    origin.repo("dgit");
+    let bed = bed_declaring(&[(
+        "demo",
+        &format!(
+            "[[dep]]\nname = \"dgit\"\nurl = \"{}\"\npin = \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\"\n",
+            origin.url("dgit")
+        ),
+    )]);
+
+    let dep = sync(&bed, "demo").await["deps"][0].clone();
+    // The mirror fetched fine. The commit simply is not on any branch or tag upstream,
+    // which is a different thing from being behind, and has to read that way.
+    assert!(dep["last_fetched"].is_string(), "the mirror never fetched: {dep}");
+    assert_eq!(dep["have"], serde_json::Value::Null);
+    assert_eq!(dep["fresh"], false);
+    assert!(
+        dep["error"].as_str().unwrap_or_default().contains("not in the upstream's branches"),
+        "an unreachable pin said {:?}",
+        dep["error"]
+    );
+}
+
+#[tokio::test]
+async fn a_satisfied_pin_does_not_inherit_a_neighbours_failure() {
+    let origin = Origin::new().await;
+    origin.repo("celld");
+    let pin = origin.tip("celld", "main");
+    let url = origin.url("celld");
+    // Both deps are the same upstream, so they share one mirror and one fetch state.
+    let bed = bed_declaring(&[(
+        "demo",
+        &format!(
+            "[[dep]]\nname = \"pinned\"\nurl = \"{url}\"\npin = \"{pin}\"\n\n\
+             [[dep]]\nname = \"tracked\"\nurl = \"{url}\"\ntrack = \"main\"\n"
+        ),
+    )]);
+    bed.upstreams.set_sync_debounce(Duration::ZERO);
+
+    let stack = sync(&bed, "demo").await;
+    assert_eq!(stack["deps"][0]["fresh"], true);
+    assert_eq!(stack["deps"][1]["fresh"], true);
+
+    origin.unpublish("celld");
+    let stack = sync(&bed, "demo").await;
+
+    // "Then never again" has to mean something: the pin has its commit, and the branch
+    // its neighbour follows going dark is not its problem.
+    assert_eq!(stack["deps"][0]["have"], pin);
+    assert_eq!(stack["deps"][0]["error"], serde_json::Value::Null, "{}", stack["deps"][0]);
+    assert_eq!(stack["deps"][0]["fresh"], true);
+
+    assert!(stack["deps"][1]["error"].is_string(), "the tracked dep hid its failure");
+    assert_eq!(stack["deps"][1]["fresh"], false);
+}
+
+#[tokio::test]
+async fn the_brain_stanza_starts_the_fetch_behind_the_caller() {
+    let origin = Origin::new().await;
+    origin.repo("celld");
+    let bed = bed_declaring(&[(
+        "demo",
+        &format!(
+            "[[dep]]\nname = \"celld\"\nurl = \"{}\"\ntrack = \"main\"\n",
+            origin.url("celld")
+        ),
+    )]);
+
+    // Nothing in this test calls sync. The only thing that can fetch is the stanza
+    // starting the work behind the caller's back, the way a page load does.
+    let tip = serde_json::Value::String(origin.tip("celld", "main"));
+    let mut have = serde_json::Value::Null;
+    for _ in 0..200 {
+        have = stanza(&bed, "demo").await["deps"][0]["have"].clone();
+        if have == tip {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(have, tip, "reading the stanza never started the fetch");
+    assert!(origin.requests() > 0);
 }
 
 #[tokio::test]
