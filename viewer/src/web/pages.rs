@@ -16,8 +16,8 @@ use crate::mirror::MirrorStatus;
 use crate::render;
 use crate::stack::StackGraph;
 use crate::web::components::{
-    Raw, StackRow, branch_label, ci_icon, comment_block, comment_composer, shell, stack_column,
-    unavailable_card,
+    Raw, StackRow, branch_label, ci_icon, comment_block, comment_composer,
+    inline_comment_composer, shell, stack_column, unavailable_card,
 };
 use crate::web::{app, repo_ctx};
 
@@ -1366,7 +1366,7 @@ async fn document_page(cx: &Cx, root: &'static str) -> Result {
                 for comment in current {
                     comment_block(key: comment.id, repo: n.clone(), comment: comment)
                 }
-                comment_composer(repo: name.clone(), branch: branch.clone(), file: Some(path.clone()), with_line: true)
+                comment_composer(repo: name.clone(), branch: branch.clone(), file: Some(path.clone()))
             </div>
             if !outdated.is_empty() {
                 <details class="mt-3">
@@ -1974,7 +1974,8 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
                             <pre class="p-3 text-small nashcode-code nashcode-diff-fallback">(diff_fallback(&json))</pre>
                         </div>
                         <script type="application/json" class="nashcode-diff-data">(Raw(escape_json_for_script(&json)))</script>
-                        comment_composer(key: format!("composer-{mount}"), repo: n.clone(), branch: b.clone(), file: Some(path.clone()), with_line: true)
+                        inline_comment_composer(key: format!("inline-{mount}"), repo: n.clone(), branch: b.clone(), file: path.clone())
+                        comment_composer(key: format!("composer-{mount}"), repo: n.clone(), branch: b.clone(), file: Some(path.clone()))
                     </div>
                 }
             }

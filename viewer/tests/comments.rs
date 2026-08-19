@@ -1,9 +1,10 @@
 //! The comment API round trip: post, render inline, outdated after the branch moves,
-//! a post anchored to a file that is in no diff, and the `?since=` cursor.
+//! a post anchored to a file that is in no diff, the `?since=` cursor, and the markup
+//! the click-a-line composer is cloned from.
 
 mod common;
 
-use common::{Work, get, post_json, simple_bed, stacked_fixture};
+use common::{Work, get, post_form_from, post_json, simple_bed, stacked_fixture};
 
 #[tokio::test]
 async fn comment_round_trip_renders_inline_then_goes_outdated() {
@@ -46,6 +47,68 @@ async fn comment_round_trip_renders_inline_then_goes_outdated() {
     assert!(page.contains("outdated"), "moved anchor must show as outdated");
     assert!(page.contains("why two?"), "outdated comment still visible");
     assert!(!page.contains("\"lineNumber\":2"), "stale anchor must leave the diff");
+}
+
+#[tokio::test]
+async fn no_composer_asks_for_a_line_number_to_be_typed() {
+    let bed = simple_bed(|root| {
+        let work = stacked_fixture(root, "demo");
+        work.write("plans/api.md", "# API plan\n\nLine one.\n");
+        work.commit_all("plan");
+        work.push("main");
+        work
+    });
+
+    for path in ["/demo/part-1", "/demo/plans/api.md"] {
+        let (status, page) = get(&bed.router, path).await;
+        assert_eq!(status, 200);
+        assert!(page.contains("nashcode-composer"), "{path} lost its composer");
+        assert!(!page.contains("placeholder=\"line #\""), "{path} still asks for a typed line");
+        assert!(
+            !page.contains("type=\"number\" name=\"line\""),
+            "{path} still has the numeric line input"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_diff_carries_the_template_a_line_click_clones() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    let (status, page) = get(&bed.router, "/demo/part-1").await;
+    assert_eq!(status, 200);
+
+    // The template the browser clones: inert markup, the real action, and the hidden
+    // fields a line click fills in.
+    let start = page.find("nashcode-inline-composer-template").expect("template missing");
+    let end = page[start..].find("</template>").expect("template unclosed") + start;
+    let template = &page[start..end];
+    assert!(template.contains("action=\"/demo/comments\""), "{template}");
+    assert!(template.contains("name=\"branch\" value=\"part-1\""), "{template}");
+    assert!(template.contains("name=\"file\" value=\"src/app.txt\""), "{template}");
+    assert!(template.contains("type=\"hidden\" name=\"line\""), "{template}");
+    assert!(template.contains("nashcode-inline-composer-cancel"), "{template}");
+    assert!(template.contains("textarea name=\"body\""), "{template}");
+}
+
+#[tokio::test]
+async fn the_inline_composers_form_post_anchors_the_comment_to_the_line() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+
+    // Exactly what the cloned template submits: hidden branch, file, and line.
+    let (status, location, body) = post_form_from(
+        &bed.router,
+        "/demo/comments",
+        &[("branch", "part-1"), ("file", "src/app.txt"), ("line", "2"), ("body", "anchored here")],
+        &[("sec-fetch-site", "same-origin")],
+    )
+    .await;
+    assert_eq!(status, 303, "the composer's own form was refused:\n{body}");
+    assert!(location.is_some(), "a form post redirects back to the page");
+
+    // And it comes back as a line annotation on the diff, in place.
+    let (_, page) = get(&bed.router, "/demo/part-1").await;
+    assert!(page.contains("anchored here"), "comment not rendered inline");
+    assert!(page.contains("\"lineNumber\":2"), "annotation payload missing: {page}");
 }
 
 #[tokio::test]

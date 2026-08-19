@@ -479,6 +479,20 @@ h6,
   resize: vertical;
 }
 
+/*
+ * The composer a line click opens. It sits in a @pierre/diffs annotation slot, so it
+ * borrows the annotation card's inset and surface and reads as part of the diff rather
+ * than as a panel dropped on top of it.
+ */
+.nashcode-inline-composer {
+  border-radius: 10px;
+  background-color: var(--bgColor-muted);
+  margin: 6px 8px;
+  padding: 10px 12px;
+  font-family: var(--fontStack-system, system-ui);
+  font-size: 12px;
+}
+
 /* ---- no hairlines ------------------------------------------------------------ */
 
 /*

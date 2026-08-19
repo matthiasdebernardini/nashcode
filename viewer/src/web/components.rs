@@ -208,13 +208,14 @@ pub async fn comment_block(
     }
 }
 
-/// The composer that posts a comment. `file`/`line` empty means a PR-level comment.
+/// The composer that posts a comment. No `file` means a PR-level comment; with a
+/// `file` it is the whole-file composer. Line anchors come from clicking a diff line,
+/// never from typing a number.
 #[component]
 pub async fn comment_composer(
     #[into] repo: String,
     #[into] branch: String,
     #[default] file: Option<String>,
-    #[default] with_line: bool,
 ) -> Result {
     view! {
         <form method="post" action=(format!("/{repo}/comments"))
@@ -225,12 +226,39 @@ pub async fn comment_composer(
             }
             <textarea name="body" class="form-control input-block" placeholder="Leave a comment (markdown)" required=""></textarea>
             <div class="d-flex flex-items-center gap-2">
-                if with_line {
-                    <input type="number" name="line" min="1" class="form-control" style="width: 110px" placeholder="line #">
-                }
                 <button type="submit" class="btn btn-primary ml-auto">"Comment"</button>
             </div>
         </form>
+    }
+}
+
+/// The composer the browser clones when a diff line is clicked, kept inert in a
+/// `<template>` until then. Same action and same fields as the file-level composer,
+/// plus the hidden `line` the click fills in — so the server needs no new endpoint.
+#[component]
+pub async fn inline_comment_composer(
+    #[into] repo: String,
+    #[into] branch: String,
+    #[into] file: String,
+) -> Result {
+    view! {
+        <template class="nashcode-inline-composer-template">
+            <form method="post" action=(format!("/{repo}/comments"))
+                  class="nashcode-composer nashcode-inline-composer">
+                <input type="hidden" name="branch" value=(branch)>
+                <input type="hidden" name="file" value=(file)>
+                <input type="hidden" name="line" value="">
+                <div class="d-flex flex-items-center gap-2 text-small color-fg-muted">
+                    <i class="ph ph-chat-circle"></i>
+                    <span class="nashcode-inline-composer-target"></span>
+                </div>
+                <textarea name="body" class="form-control input-block" placeholder="Leave a comment (markdown)" required=""></textarea>
+                <div class="d-flex flex-items-center gap-2">
+                    <button type="button" class="btn nashcode-inline-composer-cancel">"Cancel"</button>
+                    <button type="submit" class="btn btn-primary ml-auto">"Comment"</button>
+                </div>
+            </form>
+        </template>
     }
 }
 

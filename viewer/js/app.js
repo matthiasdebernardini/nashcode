@@ -3,11 +3,12 @@
  *
  * Four jobs, all progressive enhancement over server-rendered HTML:
  *  1. render each embedded unified diff with @pierre/diffs (the real FileDiff
- *     component), attaching line-anchored comments through its annotation slots;
+ *     component), attaching line-anchored comments — and the composer a line click
+ *     opens — through its annotation slots;
  *  2. blob pages: line anchors (always) and shiki highlighting (when the server
  *     named a language), loading one grammar chunk on demand;
  *  3. native drag-and-drop on the board, POSTing moves to the server;
- *  4. small conveniences: toasts, comment-line pickers.
+ *  4. small conveniences: toasts.
  */
 import { FileDiff, parsePatchFiles } from "@pierre/diffs";
 
@@ -15,13 +16,123 @@ const THEME = { light: "github-light", dark: "github-dark" };
 
 /* ---- diffs ------------------------------------------------------------------ */
 
-function renderAnnotation(annotation) {
+/*
+ * Click a diff line to comment on it.
+ *
+ * @pierre/diffs hands us the click through `onLineClick` / `onLineNumberClick` — an
+ * event API, so no DOM scraping and no chance of reading the wrong number — and takes
+ * the composer back through the same annotation slots that render stored comments. The
+ * composer is a clone of a server-rendered <template>: same action, same hidden fields,
+ * so the server sees an ordinary form post and needs no new endpoint.
+ *
+ * A click that cannot name a new-side line (the deletion column) falls back to the
+ * file-level composer under the diff rather than anchoring to a line it guessed.
+ */
+
+/** Closes whichever inline composer is open, so only one ever is. */
+let closeOpenComposer = null;
+
+function renderStoredAnnotation(annotation) {
   const meta = annotation.metadata;
   if (!meta || !meta.html) return undefined;
   const el = document.createElement("div");
   el.className = "nashcode-annotation";
   el.innerHTML = meta.html;
   return el;
+}
+
+function mountDiff(data) {
+  const mount = document.getElementById(data.mount);
+  if (!mount || !data.patch) return;
+  const patches = parsePatchFiles(data.patch);
+  const fileDiff = patches[0] && patches[0].files[0];
+  if (!fileDiff) return;
+
+  const box = mount.closest(".Box");
+  const template = box && box.querySelector("template.nashcode-inline-composer-template");
+  // The whole-file composer: where an unanchorable click lands.
+  const fileComposer = box && box.querySelector(".nashcode-composer");
+  const stored = data.annotations || [];
+
+  // One metadata object, compared by identity: the renderer keeps the same composer
+  // element (and whatever is typed into it) across re-renders.
+  const composerMeta = { composer: true };
+  let composer = null;
+  let openLine = null;
+
+  function close() {
+    if (openLine === null) return;
+    openLine = null;
+    if (closeOpenComposer === close) closeOpenComposer = null;
+    instance.render({ lineAnnotations: stored });
+  }
+
+  function buildComposer() {
+    const form = template.content.firstElementChild.cloneNode(true);
+    form.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") close();
+    });
+    const cancel = form.querySelector(".nashcode-inline-composer-cancel");
+    if (cancel) cancel.addEventListener("click", () => close());
+    return form;
+  }
+
+  function open(line) {
+    if (closeOpenComposer && closeOpenComposer !== close) closeOpenComposer();
+    composer = composer || buildComposer();
+    const number = composer.querySelector("input[name=line]");
+    if (number) number.value = String(line);
+    const target = composer.querySelector(".nashcode-inline-composer-target");
+    if (target) target.textContent = `Line ${line} of ${data.file}`;
+    openLine = line;
+    closeOpenComposer = close;
+    instance.render({
+      lineAnnotations: [...stored, { side: "additions", lineNumber: line, metadata: composerMeta }],
+    });
+    const body = composer.querySelector("textarea[name=body]");
+    if (body) body.focus();
+  }
+
+  function fallBackToFile() {
+    close();
+    if (!fileComposer) return;
+    const body = fileComposer.querySelector("textarea[name=body]");
+    if (!body) return;
+    body.focus();
+    body.scrollIntoView({ block: "nearest" });
+  }
+
+  function onClick(props) {
+    // A click that ends a text selection is a selection, not a request to comment.
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) return;
+    if (!template) return;
+    const line = Number(props.lineNumber);
+    // Only the new side carries a line number a comment can anchor to.
+    if (props.annotationSide !== "additions" || !Number.isInteger(line) || line < 1) {
+      fallBackToFile();
+      return;
+    }
+    if (openLine === line) close();
+    else open(line);
+  }
+
+  const instance = new FileDiff({
+    theme: THEME,
+    themeType: "system",
+    diffStyle: "unified",
+    hunkSeparators: "line-info",
+    lineHoverHighlight: "both",
+    renderAnnotation(annotation) {
+      if (annotation.metadata === composerMeta) return composer;
+      return renderStoredAnnotation(annotation);
+    },
+    onLineClick: onClick,
+    onLineNumberClick: onClick,
+  });
+  // Drop the <pre> fallback once the real component takes over.
+  mount.textContent = "";
+  instance.render({ fileDiff, containerWrapper: mount, lineAnnotations: stored });
 }
 
 function mountDiffs() {
@@ -32,42 +143,17 @@ function mountDiffs() {
     } catch {
       continue;
     }
-    const mount = document.getElementById(data.mount);
-    if (!mount || !data.patch) continue;
-
     try {
-      const patches = parsePatchFiles(data.patch);
-      const fileDiff = patches[0] && patches[0].files[0];
-      if (!fileDiff) continue;
-      // Click a line number to anchor the comment composer to that line.
-      const composer =
-        mount.closest(".Box") && mount.closest(".Box").querySelector(".nashcode-composer");
-      const instance = new FileDiff({
-        theme: THEME,
-        themeType: "system",
-        diffStyle: "unified",
-        hunkSeparators: "line-info",
-        renderAnnotation,
-        onLineNumberClick(props) {
-          if (!composer || props.annotationSide !== "additions") return;
-          const line = composer.querySelector("input[name=line]");
-          const body = composer.querySelector("textarea[name=body]");
-          if (line) line.value = props.lineNumber;
-          if (body) body.focus();
-        },
-      });
-      // Drop the <pre> fallback once the real component takes over.
-      mount.textContent = "";
-      instance.render({
-        fileDiff,
-        containerWrapper: mount,
-        lineAnnotations: data.annotations || [],
-      });
+      mountDiff(data);
     } catch (error) {
       // A diff that will not parse still has its <pre> fallback in the DOM.
       console.warn("nashcode: diff render failed for", data.file, error);
     }
   }
+  // Escape closes the composer from anywhere, not only from inside it.
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && closeOpenComposer) closeOpenComposer();
+  });
 }
 
 /* ---- blob: line anchors and highlighting ------------------------------------- */
@@ -250,11 +336,6 @@ function mountBoard() {
     });
   }
 }
-
-/* ---- comment line picker ----------------------------------------------------- */
-
-// The composer's optional "line" input is plain HTML; nothing to wire yet beyond
-// keeping the form usable without JS. Deliberately no framework.
 
 // Each enhancement stands alone: one that throws must not take the others with it.
 // The server-rendered page underneath every one of them is already correct.
