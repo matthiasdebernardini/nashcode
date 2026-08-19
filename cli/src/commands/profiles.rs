@@ -2,7 +2,8 @@
 
 use super::Ctx;
 use crate::profile::Store;
-use anyhow::{Result, bail};
+use crate::exit::{Class, classed};
+use anyhow::Result;
 use serde_json::{Value, json};
 
 pub fn use_profile(_ctx: &Ctx, name: &str) -> Result<Value> {
@@ -36,7 +37,10 @@ pub fn list(_ctx: &Ctx) -> Result<Value> {
 pub fn token(ctx: &Ctx) -> Result<Value> {
     let (name, p) = ctx.profile()?;
     if p.token.is_empty() {
-        bail!("profile `{name}` holds no token");
+        return Err(classed(
+            Class::NotFound,
+            format!("profile `{name}` holds no token"),
+        ));
     }
     Ok(json!({ "profile": name, "token": p.token }))
 }

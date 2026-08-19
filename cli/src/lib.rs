@@ -9,6 +9,7 @@
 pub mod api;
 pub mod cli;
 pub mod commands;
+pub mod exit;
 pub mod index_page;
 pub mod output;
 pub mod profile;

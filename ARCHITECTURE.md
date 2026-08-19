@@ -55,10 +55,12 @@ graph LR
   cli_api --> cli_exit
   cli_api --> cli_index_page
   cli_cli --> cli_commands
+  cli_cli --> cli_exit
   cli_cli --> cli_output
   cli_cli --> cli_timefmt
   cli_commands --> cli_api
   cli_commands --> cli_cli
+  cli_commands --> cli_exit
   cli_commands --> cli_index_page
   cli_commands --> cli_output
   cli_commands --> cli_profile

@@ -13,7 +13,8 @@ pub mod setup;
 use crate::api::Client;
 use crate::output::Out;
 use crate::profile::{Profile, Store};
-use anyhow::{Result, bail};
+use crate::exit::{Class, classed};
+use anyhow::Result;
 
 /// What every command gets: the resolved profile and the output mode.
 pub struct Ctx {
@@ -33,7 +34,10 @@ impl Ctx {
     pub fn client(&self) -> Result<(String, Profile, Client)> {
         let (name, p) = self.profile()?;
         if p.url.is_empty() {
-            bail!("profile `{name}` has no server URL");
+            return Err(classed(
+                Class::NotFound,
+                format!("profile `{name}` has no server URL"),
+            ));
         }
         let client = Client::new(&p.url, &p.token);
         Ok((name, p, client))

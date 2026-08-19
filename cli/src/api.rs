@@ -14,7 +14,8 @@
 //! | `DELETE /<repo>`           | delete a repository                           |
 
 use crate::index_page::Repo;
-use anyhow::{Context, Result, bail};
+use crate::exit::{Class, Classify, classed};
+use anyhow::{Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -174,7 +175,7 @@ impl Client {
         let body = r
             .into_body()
             .read_to_string()
-            .context("read the response body")?;
+            .classify(Class::Api, "read the response body")?;
         Ok(Reply { status, body })
     }
 
@@ -189,7 +190,7 @@ impl Client {
         if let Some(a) = &self.auth {
             req = req.header("authorization", a);
         }
-        Self::finish(req.call().context("GET / on the dgit server")?)
+        Self::finish(req.call().classify(Class::Api, "GET / on the dgit server")?)
     }
 
     /// `GET /` without credentials — how an anonymous visitor sees the site.
@@ -198,7 +199,7 @@ impl Client {
             self.agent
                 .get(self.url("/"))
                 .call()
-                .context("anonymous GET /")?,
+                .classify(Class::Api, "anonymous GET /")?,
         )
     }
 
@@ -206,7 +207,10 @@ impl Client {
     pub fn list(&self) -> Result<Vec<Repo>> {
         let reply = self.index_html()?;
         if !reply.ok() {
-            bail!("{} returned HTTP {}", self.base, reply.status);
+            return Err(classed(
+                Class::Api,
+                format!("{} returned HTTP {}", self.base, reply.status),
+            ));
         }
         Ok(crate::index_page::parse(&reply.body))
     }
@@ -217,14 +221,17 @@ impl Client {
         let reply = self.send("PUT", &format!("/{repo}/config"), Some(body))?;
         self.expect_ok(&reply, repo)?;
         serde_json::from_str(&reply.body)
-            .with_context(|| format!("parse the config response from {}", self.base))
+            .classify_with(Class::Api, || {
+                format!("parse the config response from {}", self.base)
+            })
     }
 
     /// `POST /<repo>/gc`.
     pub fn gc(&self, repo: &str) -> Result<GcResult> {
         let reply = self.send("POST", &format!("/{repo}/gc"), None)?;
         self.expect_ok(&reply, repo)?;
-        serde_json::from_str(&reply.body).with_context(|| format!("parse the gc response for {repo}"))
+        serde_json::from_str(&reply.body)
+            .classify_with(Class::Api, || format!("parse the gc response for {repo}"))
     }
 
     /// `DELETE /<repo>`.
@@ -251,24 +258,33 @@ impl Client {
         })
     }
 
+    /// The class comes from the status code, which is the only part of this the
+    /// server cannot phrase. The body is appended afterwards, and cannot reach
+    /// the decision: dgit is free to answer 500 with the words "not found" in it.
     fn expect_ok(&self, reply: &Reply, repo: &str) -> Result<()> {
         if reply.ok() {
             return Ok(());
         }
-        let hint = match reply.status {
-            401 => " — the profile's token was rejected; check `nashcode token`",
-            403 => " — the server has no GIT_TOKEN configured",
-            404 => " — no such repository",
-            _ => "",
+        let (class, hint) = match reply.status {
+            401 => (
+                Class::Auth,
+                " — the profile's token was rejected; check `nashcode token`",
+            ),
+            403 => (Class::Auth, " — the server has no GIT_TOKEN configured"),
+            404 => (Class::NotFound, " — no such repository"),
+            _ => (Class::Api, ""),
         };
-        bail!(
-            "{} {} returned HTTP {}{}\n{}",
-            self.base,
-            repo,
-            reply.status,
-            hint,
-            reply.body.trim()
-        );
+        Err(classed(
+            class,
+            format!(
+                "{} {} returned HTTP {}{}\n{}",
+                self.base,
+                repo,
+                reply.status,
+                hint,
+                reply.body.trim()
+            ),
+        ))
     }
 
     fn send(&self, method: &str, path: &str, body: Option<String>) -> Result<Reply> {
@@ -305,7 +321,7 @@ impl Client {
                 req.call()
             }
         };
-        Self::finish(r.with_context(|| ctx)?)
+        Self::finish(r.classify_with(Class::Api, || ctx)?)
     }
 
     /// A plain GET, used for the viewer's JSON endpoints.
@@ -314,7 +330,7 @@ impl Client {
             self.agent
                 .get(url)
                 .call()
-                .with_context(|| format!("GET {url}"))?,
+                .classify_with(Class::Api, || format!("GET {url}"))?,
         )
     }
 
@@ -330,7 +346,7 @@ impl Client {
                 .get(url)
                 .header("accept", "application/json")
                 .call()
-                .with_context(|| format!("GET {url}"))?,
+                .classify_with(Class::Api, || format!("GET {url}"))?,
         )
     }
 
@@ -344,7 +360,7 @@ impl Client {
                 .post(url)
                 .header("content-type", "application/json")
                 .send(body)
-                .with_context(|| format!("POST {url}"))?,
+                .classify_with(Class::Api, || format!("POST {url}"))?,
         )
     }
 }
@@ -400,5 +416,65 @@ mod tests {
         };
         assert_eq!(serde_json::to_string(&cfg).unwrap(), r#"{"description":"hi"}"#);
         assert!(RepoConfig::default().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+    use crate::exit::class_of;
+
+    /// The reply an `expect_ok` would refuse, built by hand.
+    fn refuse(status: u16, body: &str) -> anyhow::Error {
+        let client = Client::new("https://box", "tt");
+        client
+            .expect_ok(
+                &Reply {
+                    status,
+                    body: body.to_string(),
+                },
+                "widget",
+            )
+            .unwrap_err()
+    }
+
+    #[test]
+    fn the_status_decides_the_class_and_the_body_never_does() {
+        // One body, carrying every phrase that used to steer the classifier,
+        // against four statuses. The status wins every time.
+        let loaded = "does not exist. --provider is required. the token was rejected. \
+                      no such repository. is not a valid name.";
+        for (status, want) in [
+            (401, Class::Auth),
+            (403, Class::Auth),
+            (404, Class::NotFound),
+            (500, Class::Api),
+        ] {
+            let e = refuse(status, loaded);
+            assert_eq!(class_of(&e), Some(want), "HTTP {status} with a loaded body");
+            // And the body is still in the message, where a human can read it.
+            assert!(e.to_string().contains("does not exist"));
+        }
+    }
+
+    #[test]
+    fn the_same_status_classes_the_same_whatever_the_body_says() {
+        let bodies = [
+            "",
+            "does not exist",
+            "--provider is required",
+            "authentication failed",
+        ];
+        let classes: Vec<_> = bodies.iter().map(|b| class_of(&refuse(500, b))).collect();
+        assert!(
+            classes.iter().all(|c| *c == Some(Class::Api)),
+            "a 500 changed class with its body: {classes:?}"
+        );
+    }
+
+    #[test]
+    fn the_hint_still_names_what_to_check() {
+        assert!(refuse(401, "").to_string().contains("nashcode token"));
+        assert!(refuse(404, "").to_string().contains("no such repository"));
     }
 }

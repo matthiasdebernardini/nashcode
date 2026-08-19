@@ -14,7 +14,8 @@ use crate::api::Client;
 use crate::cli::IndexArgs;
 use crate::timefmt::age_of;
 use crate::vcs;
-use anyhow::{Result, bail};
+use crate::exit::{Class, classed};
+use anyhow::Result;
 use serde_json::{Value, json};
 
 /// The viewer URL for a repository's index status.
@@ -81,13 +82,16 @@ pub fn render_status(value: &Value) -> Vec<String> {
 pub fn run(ctx: &Ctx, args: &IndexArgs) -> Result<Value> {
     let (name, profile) = ctx.profile()?;
     let Some(viewer) = profile.viewer_url.as_deref().filter(|v| !v.is_empty()) else {
-        bail!(
-            "profile `{name}` has no viewer URL, and the code index lives in the viewer, \
-             not in dgit.\n\
-             Deploy one with `nashcode setup --viewer`, or add `viewer_url` to the \
-             profile in {}.",
-            crate::profile::config_path()?.display()
-        );
+        return Err(classed(
+            Class::NotFound,
+            format!(
+                "profile `{name}` has no viewer URL, and the code index lives in the viewer, \
+                 not in dgit.\n\
+                 Deploy one with `nashcode setup --viewer`, or add `viewer_url` to the \
+                 profile in {}.",
+                crate::profile::config_path()?.display()
+            ),
+        ));
     };
 
     let repo = match &args.repo {
@@ -98,7 +102,7 @@ pub fn run(ctx: &Ctx, args: &IndexArgs) -> Result<Value> {
                 .origin_repo_name()?
                 .or_else(|| workspace.default_repo_name())
                 .ok_or_else(|| {
-                    anyhow::anyhow!("cannot tell which repository this is; name one")
+                    classed(Class::Usage, "cannot tell which repository this is; name one")
                 })?
         }
     };
@@ -109,7 +113,10 @@ pub fn run(ctx: &Ctx, args: &IndexArgs) -> Result<Value> {
         let url = index_url(viewer, &repo);
         let reply = client.post_url(&url, "{}")?;
         if !reply.ok() {
-            bail!("{url} returned HTTP {}\n{}", reply.status, reply.body.trim());
+            return Err(classed(
+                Class::Api,
+                format!("{url} returned HTTP {}\n{}", reply.status, reply.body.trim()),
+            ));
         }
         ctx.out.step(format!("queued an index run for {repo}"));
     }
@@ -117,7 +124,10 @@ pub fn run(ctx: &Ctx, args: &IndexArgs) -> Result<Value> {
     let url = status_url(viewer, &repo);
     let reply = client.get(&url)?;
     if !reply.ok() {
-        bail!("{url} returned HTTP {}\n{}", reply.status, reply.body.trim());
+        return Err(classed(
+            Class::Api,
+            format!("{url} returned HTTP {}\n{}", reply.status, reply.body.trim()),
+        ));
     }
     let status: Value = serde_json::from_str(&reply.body)
         .unwrap_or_else(|_| json!({ "error": reply.body.trim() }));

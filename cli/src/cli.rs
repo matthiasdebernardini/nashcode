@@ -12,6 +12,7 @@
 //! it lists commands.
 
 use crate::commands::{Ctx, brain, code, doctor, grep, invite, plan, profiles, repo, setup};
+use crate::exit::{Class, class_of};
 use crate::output::Out;
 use agcli::{AgentCli, Command, CommandError, CommandOutput, CommandRequest, ExitCode, NextAction};
 
@@ -508,69 +509,35 @@ fn port(req: &CommandRequest<'_>, key: &str, default: u16) -> u16 {
     req.flag(key).and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// Which failure class an anyhow error belongs to, read off the wording the
-/// command bodies already use.
+/// The failure class of an error from a command body.
 ///
-/// An agent branches on the exit code, so the classification has to be about
-/// *what to do next*: a missing profile or repository is something to create,
-/// a rejected token is something to replace, an upstream HTTP or ssh failure is
-/// something to retry or diagnose with `doctor`.
-pub fn classify(message: &str) -> (&'static str, i32) {
-    let m = message.to_ascii_lowercase();
-    let has = |needle: &str| m.contains(needle);
-
-    if has("http 401")
-        || has("http 403")
-        || has("token was rejected")
-        || has("no git_token")
-        || has("server has no token")
-    {
-        return ("AUTH", ExitCode::AUTH);
-    }
-    if has("no active profile")
-        || has("no profile named")
-        || has("no such repository")
-        || has("http 404")
-        || has("holds no token")
-        || has("does not exist")
-        // A profile that names no viewer, no server, or no host is a profile
-        // missing the resource the command needs — same class, same remedy.
-        || has("has no viewer url")
-        || has("has no server url")
-        || has("has no ssh destination")
-    {
-        return ("NOT_FOUND", ExitCode::NOT_FOUND);
-    }
-    // Refused before anything left the machine: the invocation was wrong, not
-    // the deployment.
-    if has("is not a valid")
-        || has("is not a usable")
-        || has("is required")
-        || has("nothing to change")
-        || has("give the plan a title")
-        || has("say what to do")
-    {
-        return ("USAGE", ExitCode::USAGE);
-    }
-    if has("returned http")
-        || has("failed on the host")
-        || has("cannot reach")
-        || has("cannot run a shell")
-        || has("cannot connect")
-        || has("ssh exited")
-        || has("dgit server")
-    {
-        return ("API", ExitCode::API);
-    }
-    ("ERROR", ExitCode::ERROR)
-}
-
-/// An anyhow error from a command body, mapped to the envelope. The wording the
-/// body chose survives verbatim as the message; `fix` is the command to run.
+/// It is read from the error, not from its text. Every site that knows what kind
+/// of failure it is raising says so there (see `crate::exit`), which is the only
+/// place that can know: a 500 from the viewer is an upstream failure whatever
+/// the body says, and a reviewer who writes "does not exist" in their notes is
+/// not reporting a missing file.
 fn oops(error: anyhow::Error, fix: impl Into<String>) -> CommandError {
     let message = format!("{error:#}");
-    let (code, exit) = classify(&message);
-    CommandError::new(message, code, fix).exit_code(exit)
+    match class_of(&error) {
+        Some(class) => {
+            CommandError::new(message, class.code(), fix_for(class, fix)).exit_code(class.exit_code())
+        }
+        None => CommandError::new(message, "ERROR", fix).exit_code(ExitCode::ERROR),
+    }
+}
+
+/// The command to run next. Two classes know better than the call site does.
+///
+/// A rejected credential is not fixed by listing repositories — `nashcode ls`
+/// reads anonymously and succeeds while the push token is dead, which teaches an
+/// agent exactly the wrong thing. And a deployment that is failing upstream is
+/// what `doctor` exists to diagnose, whichever command tripped over it.
+fn fix_for(class: Class, given: impl Into<String>) -> String {
+    match class {
+        Class::Auth => doctor::fix_for("token").to_string(),
+        Class::Api => "nashcode doctor".to_string(),
+        Class::Usage | Class::NotFound => given.into(),
+    }
 }
 
 /// A bad invocation. Not a failure of the deployment, so it never carries one of
@@ -650,7 +617,13 @@ fn setup_command() -> Command {
                     let known: Vec<&str> = Provider::all().iter().map(|p| p.id()).collect();
                     return Err(misuse(
                         format!("`{id}` is not a store nashcode offers"),
-                        format!("nashcode setup --provider {}", known.join("|")),
+                        // Runnable as written: an unquoted `|` here would have
+                        // been a shell pipe into a program called `r2`.
+                        format!(
+                            "nashcode setup --provider {}   # one of: {}",
+                            known.first().copied().unwrap_or("aws-s3"),
+                            known.join(", ")
+                        ),
                     ));
                 }
                 let value = setup::run(&ctx, &args).map_err(|e| {
@@ -676,15 +649,13 @@ fn setup_command() -> Command {
 fn setup_fix(message: &str) -> String {
     let m = message.to_ascii_lowercase();
     if m.contains("--provider") || m.contains("--bucket") || m.contains("--host") {
-        return "nashcode setup --host <user@host> --provider <aws-s3|r2|tigris> --bucket <name>"
-            .to_string();
+        return "nashcode setup --host <user@host> --provider tigris --bucket <name>".to_string();
     }
     if m.contains("credentials") {
-        return "AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… nashcode setup …, or add --creds-on-host"
+        return "nashcode setup --creds-on-host …   # or export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY first"
             .to_string();
     }
-    "nashcode setup --dry-run … to see the scripts, then re-run: every step is idempotent"
-        .to_string()
+    "nashcode setup --dry-run   # then re-run without it: every step is idempotent".to_string()
 }
 
 fn use_command() -> Command {
@@ -775,7 +746,7 @@ fn init_command() -> Command {
                 if args.git && args.jj {
                     return Err(misuse(
                         "--git and --jj ask for different working copies",
-                        "nashcode init --jj   # or --git, not both",
+                        "nashcode init --jj   # pick one; --git is the other",
                     ));
                 }
                 let value = repo::init(&ctx, &args).map_err(|e| oops(e, "nashcode doctor"))?;
@@ -928,7 +899,7 @@ fn desc_command() -> Command {
             if args.private && args.public {
                 return Err(misuse(
                     "--private and --public ask for opposite things",
-                    "nashcode desc <name> --private   # or --public, not both",
+                    "nashcode desc <name> --private   # pick one; --public is the other",
                 ));
             }
             let value = repo::desc(&ctx, &args).map_err(|e| oops(e, "nashcode ls"))?;

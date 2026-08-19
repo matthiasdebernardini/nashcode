@@ -11,16 +11,20 @@ use crate::cli::InviteArgs;
 use crate::profile::Profile;
 use crate::remote;
 use crate::ssh::{Ssh, parse_kv};
-use anyhow::{Result, bail};
+use crate::exit::{Class, classed};
+use anyhow::Result;
 use serde_json::{Value, json};
 
 pub fn run(ctx: &Ctx, args: &InviteArgs) -> Result<Value> {
     let (pname, p) = ctx.profile()?;
     if p.ssh.is_empty() {
-        bail!(
-            "profile `{pname}` has no ssh destination, and invites change the \
-             server's token set over SSH"
-        );
+        return Err(classed(
+            Class::NotFound,
+            format!(
+                "profile `{pname}` has no ssh destination, and invites change the \
+                 server's token set over SSH"
+            ),
+        ));
     }
     let ssh = Ssh::new(&p.ssh);
     if args.list {
@@ -31,7 +35,10 @@ pub fn run(ctx: &Ctx, args: &InviteArgs) -> Result<Value> {
     }
     match &args.name {
         Some(name) => invite(ctx, &p, &ssh, name),
-        None => bail!("say what to do: `nashcode invite <name>`, `--list`, or `--revoke <name>`"),
+        None => Err(classed(
+            Class::Usage,
+            "say what to do: `nashcode invite <name>`, `--list`, or `--revoke <name>`",
+        )),
     }
 }
 
@@ -49,10 +56,13 @@ fn listen(p: &Profile) -> String {
 
 fn invite(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<Value> {
     if !valid_invite_name(name) {
-        bail!(
-            "`{name}` is not a usable invite name. Letters, digits, dash, and \
-             underscore, starting with a letter or digit."
-        );
+        return Err(classed(
+            Class::Usage,
+            format!(
+                "`{name}` is not a usable invite name. Letters, digits, dash, and \
+                 underscore, starting with a letter or digit."
+            ),
+        ));
     }
     let token = super::setup::generate_token();
     ctx.out.step(format!("rotating GIT_TOKENS on {} and redeploying", ssh.dest));
@@ -87,10 +97,13 @@ fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<Value> {
     // Same gate as invite: the name lands in a grep pattern on the host, so
     // `--revoke '.*'` must die here, not wipe the mapping there.
     if !valid_invite_name(name) {
-        bail!(
-            "`{name}` is not a usable invite name. Letters, digits, dash, and \
-             underscore, starting with a letter or digit. See `nashcode invite --list`."
-        );
+        return Err(classed(
+            Class::Usage,
+            format!(
+                "`{name}` is not a usable invite name. Letters, digits, dash, and \
+                 underscore, starting with a letter or digit. See `nashcode invite --list`."
+            ),
+        ));
     }
     ctx.out.step(format!("removing `{name}` and redeploying"));
     let out = ssh.script(&remote::revoke_script(name, p, &listen(p)))?;
@@ -104,19 +117,34 @@ fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<Value> {
         // through, so a probe code means the revocation itself succeeded —
         // say exactly which promise is broken.
         match probe.as_str() {
-            "400" => bail!(
-                "`{name}` was removed from the mapping and the redeploy ran, but the \
-                 revoked token is STILL accepted (HTTP 400). Run `nashcode doctor` and \
-                 check the celld service."
-            ),
+            // The revoke went through and the token still works. That is an
+            // authorisation failure of the server's, and the most serious answer
+            // this command has: somebody's access outlived its revocation.
+            "400" => {
+                return Err(classed(
+                    Class::Auth,
+                    format!(
+                        "`{name}` was removed from the mapping and the redeploy ran, but the \
+                         revoked token is STILL accepted (HTTP 400). Run `nashcode doctor` and \
+                         check the celld service."
+                    ),
+                ));
+            }
             "" => {
                 out.require("revoke")?;
             }
-            code => bail!(
-                "`{name}` was revoked and the new token set deployed, but the check \
-                 could not confirm it (HTTP {code} from the loopback probe). \
-                 Re-run `nashcode doctor` to see why the server is not answering."
-            ),
+            // Revoked, but unconfirmed: the server is not answering. That is the
+            // deployment, whatever HTTP code happens to be in the sentence.
+            code => {
+                return Err(classed(
+                    Class::Api,
+                    format!(
+                        "`{name}` was revoked and the new token set deployed, but the check \
+                         could not confirm it (HTTP {code} from the loopback probe). \
+                         Re-run `nashcode doctor` to see why the server is not answering."
+                    ),
+                ));
+            }
         }
     }
     Ok(json!({

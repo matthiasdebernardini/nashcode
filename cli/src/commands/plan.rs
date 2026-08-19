@@ -9,6 +9,7 @@ use super::Ctx;
 use crate::api::Client;
 use crate::cli::{AnnotateArgs, CommentsArgs, PlanNewArgs};
 use crate::vcs;
+use crate::exit::{Class, classed};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -54,14 +55,20 @@ pub fn template(title: &str) -> String {
 pub fn new(_ctx: &Ctx, args: &PlanNewArgs) -> Result<Value> {
     let title = args.title.join(" ");
     if title.trim().is_empty() {
-        bail!("give the plan a title: nashcode plan new \"replace the parser\"");
+        return Err(classed(
+            Class::Usage,
+            "give the plan a title: nashcode plan new \"replace the parser\"",
+        ));
     }
     let ws = vcs::require_cwd()?;
     let dir = ws.root.join("plans");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(format!("{}.md", slug(&title)));
     if path.exists() {
-        bail!("{} already exists", path.display());
+        return Err(classed(
+            Class::Usage,
+            format!("{} already exists", path.display()),
+        ));
     }
     std::fs::write(&path, template(&title)).with_context(|| format!("write {}", path.display()))?;
 
@@ -76,7 +83,10 @@ pub fn new(_ctx: &Ctx, args: &PlanNewArgs) -> Result<Value> {
 pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<Value> {
     let path = PathBuf::from(&args.file);
     if !path.exists() {
-        bail!("{} does not exist", path.display());
+        return Err(classed(
+            Class::NotFound,
+            format!("{} does not exist", path.display()),
+        ));
     }
 
     // The viewer link is useful whether or not plannotator is installed.
@@ -194,11 +204,17 @@ pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<Value> {
     let client = Client::new(&target.viewer, &target.token);
     let reply = match client.post_url(&target.url, &payload) {
         Ok(r) => r,
-        Err(e) => return Err(e.context(unposted("post the annotation to the viewer", &body))),
+        // The class is decided before the feedback is anywhere near the message,
+        // and a `Classed` error cannot be re-read out of its own text — so a
+        // reviewer who writes the words "does not exist" no longer changes what
+        // this process exits with.
+        Err(e) => {
+            return Err(e.context(unposted("post the annotation to the viewer", &body)));
+        }
     };
     if !reply.ok() {
-        bail!(
-            "{}",
+        return Err(classed(
+            Class::Api,
             unposted(
                 &format!(
                     "{} returned HTTP {}\n{}",
@@ -206,9 +222,9 @@ pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<Value> {
                     reply.status,
                     reply.body.trim()
                 ),
-                &body
-            )
-        );
+                &body,
+            ),
+        ));
     }
 
     let id = serde_json::from_str::<Value>(&reply.body)
@@ -449,11 +465,14 @@ pub fn comments_url(
 pub fn comments(ctx: &Ctx, args: &CommentsArgs) -> Result<Vec<Value>> {
     let (name, p) = ctx.profile()?;
     let Some(viewer) = p.viewer_url.as_deref().filter(|v| !v.is_empty()) else {
-        bail!(
-            "profile `{name}` has no viewer URL, and comments live in the viewer, not in dgit.\n\
-             Deploy one with `nashcode setup --viewer`, or add `viewer_url` to the profile in {}.",
-            crate::profile::config_path()?.display()
-        );
+        return Err(classed(
+            Class::NotFound,
+            format!(
+                "profile `{name}` has no viewer URL, and comments live in the viewer, not in dgit.\n\
+                 Deploy one with `nashcode setup --viewer`, or add `viewer_url` to the profile in {}.",
+                crate::profile::config_path()?.display()
+            ),
+        ));
     };
 
     let repo = match &args.repo {
@@ -463,7 +482,7 @@ pub fn comments(ctx: &Ctx, args: &CommentsArgs) -> Result<Vec<Value>> {
             ws.origin_repo_name()?
                 .or_else(|| ws.default_repo_name())
                 .ok_or_else(|| {
-                    anyhow::anyhow!("cannot tell which repository this is; pass --repo")
+                    classed(Class::Usage, "cannot tell which repository this is; pass --repo")
                 })?
         }
     };
@@ -478,7 +497,10 @@ pub fn comments(ctx: &Ctx, args: &CommentsArgs) -> Result<Vec<Value>> {
     let client = Client::new(viewer, &p.token);
     let reply = client.get(&url)?;
     if !reply.ok() {
-        bail!("{url} returned HTTP {}\n{}", reply.status, reply.body.trim());
+        return Err(classed(
+            Class::Api,
+            format!("{url} returned HTTP {}\n{}", reply.status, reply.body.trim()),
+        ));
     }
     rows_of(&reply.body)
 }

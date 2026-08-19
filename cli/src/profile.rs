@@ -9,6 +9,7 @@
 //!   2. `$XDG_CONFIG_HOME/nashcode/config.toml`
 //!   3. `~/.config/nashcode/config.toml`
 
+use crate::exit::{Class, classed};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -93,13 +94,21 @@ impl Store {
         let name = match override_name {
             Some(n) => n.to_string(),
             None => self.active.clone().ok_or_else(|| {
-                anyhow!("no active profile. Run `nashcode setup`, or `nashcode use <profile>`")
+                classed(
+                    Class::NotFound,
+                    "no active profile. Run `nashcode setup`, or `nashcode use <profile>`",
+                )
             })?,
         };
         let p = self
             .profiles
             .get(&name)
-            .ok_or_else(|| anyhow!("no profile named `{name}`. See `nashcode profiles`"))?;
+            .ok_or_else(|| {
+                classed(
+                    Class::NotFound,
+                    format!("no profile named `{name}`. See `nashcode profiles`"),
+                )
+            })?;
         Ok((name, p))
     }
 
@@ -112,7 +121,10 @@ impl Store {
 
     pub fn set_active(&mut self, name: &str) -> Result<()> {
         if !self.profiles.contains_key(name) {
-            bail!("no profile named `{name}`. See `nashcode profiles`");
+            return Err(classed(
+                Class::NotFound,
+                format!("no profile named `{name}`. See `nashcode profiles`"),
+            ));
         }
         self.active = Some(name.to_string());
         Ok(())

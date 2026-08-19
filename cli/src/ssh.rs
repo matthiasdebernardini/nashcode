@@ -11,7 +11,8 @@
 //!
 //! `$NASHCODE_SSH_BIN` replaces the `ssh` executable. Tests point it at a shim.
 
-use anyhow::{Context, Result, bail};
+use crate::exit::{Class, Classify, classed};
+use anyhow::Result;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -41,6 +42,12 @@ impl Output {
     }
 
     /// Turn a non-zero exit into an error carrying the remote stderr.
+    ///
+    /// The class is `Api` because a remote script that failed is the deployment
+    /// failing, whatever the script said on its way out. The stderr tail is
+    /// still in the message — it is the only thing that explains the failure —
+    /// but it is text now, not evidence: `systemctl` saying "does not exist"
+    /// cannot make this a `NOT_FOUND`.
     pub fn require(self, what: &str) -> Result<Output> {
         if self.ok() {
             return Ok(self);
@@ -55,7 +62,14 @@ impl Output {
             .rev()
             .collect::<Vec<_>>()
             .join("\n");
-        bail!("{what} failed on the host (exit {})\n{}", self.code, tail.trim_end());
+        Err(classed(
+            Class::Api,
+            format!(
+                "{what} failed on the host (exit {})\n{}",
+                self.code,
+                tail.trim_end()
+            ),
+        ))
     }
 }
 
@@ -105,14 +119,14 @@ impl Ssh {
             .stderr(Stdio::piped());
         let mut child = cmd
             .spawn()
-            .with_context(|| format!("spawn {} {}", ssh_bin(), self.dest))?;
+            .classify_with(Class::Api, || format!("spawn {} {}", ssh_bin(), self.dest))?;
         child
             .stdin
             .take()
-            .context("ssh stdin")?
+            .ok_or_else(|| classed(Class::Api, "ssh stdin"))?
             .write_all(script.as_bytes())
-            .context("write remote script to ssh stdin")?;
-        let out = child.wait_with_output().context("wait for ssh")?;
+            .classify(Class::Api, "write remote script to ssh stdin")?;
+        let out = child.wait_with_output().classify(Class::Api, "wait for ssh")?;
         Ok(Output {
             code: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -140,14 +154,14 @@ impl Ssh {
             .stderr(Stdio::inherit());
         let mut child = cmd
             .spawn()
-            .with_context(|| format!("spawn {} {}", ssh_bin(), self.dest))?;
+            .classify_with(Class::Api, || format!("spawn {} {}", ssh_bin(), self.dest))?;
         child
             .stdin
             .take()
-            .context("ssh stdin")?
+            .ok_or_else(|| classed(Class::Api, "ssh stdin"))?
             .write_all(script.as_bytes())
-            .context("write remote script to ssh stdin")?;
-        let status = child.wait().context("wait for ssh")?;
+            .classify(Class::Api, "write remote script to ssh stdin")?;
+        let status = child.wait().classify(Class::Api, "wait for ssh")?;
         Ok(Output {
             code: status.code().unwrap_or(-1),
             stdout: String::new(),

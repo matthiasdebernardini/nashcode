@@ -76,7 +76,10 @@ impl Check {
 }
 
 /// What to run when a check fails. One runnable line per check id.
-fn fix_for(id: &str) -> &'static str {
+///
+/// Shared with the handler boundary: a rejected token is the same problem
+/// whether `doctor` found it or a push did, so it gets the same answer.
+pub fn fix_for(id: &str) -> &'static str {
     match id {
         "profile" => "nashcode setup --host <user@host> --provider <aws-s3|r2|tigris> --bucket <name>",
         "server" => "tailscale status   # then, on the host: tailscale serve --bg --https=443 http://127.0.0.1:8080",

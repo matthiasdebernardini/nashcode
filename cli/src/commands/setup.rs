@@ -10,7 +10,8 @@ use crate::output::Out;
 use crate::profile::{Profile, Store, suggest_name};
 use crate::remote::{self, Deploy};
 use crate::ssh::{Output, Ssh, parse_kv};
-use anyhow::{Context, Result, bail};
+use crate::exit::{Class, classed};
+use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -54,14 +55,17 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<Value> {
         }
     }
     let Some(provider) = args.provider else {
-        bail!(
-            "--provider is required: one of {}",
-            Provider::all()
-                .iter()
-                .map(|p| p.id())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        return Err(classed(
+            Class::Usage,
+            format!(
+                "--provider is required: one of {}",
+                Provider::all()
+                    .iter()
+                    .map(|p| p.id())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
     };
     let bucket_input = ask(
         "bucket name (or a full s3://bucket/prefix URL)",
@@ -266,36 +270,55 @@ fn preflight(out: &Out, scripts: &mut Vec<Value>, ssh: &Ssh, dry_run: bool) -> R
     }
     let res = ssh
         .script(&remote::preflight_script())
-        .with_context(|| format!("cannot reach {} over ssh", ssh.dest))?;
+        .map_err(|e| e.context(format!("cannot reach {} over ssh", ssh.dest)))?;
     if !res.ok() {
-        bail!(
-            "cannot run a shell on {} (ssh exited {}).\n{}",
-            ssh.dest,
-            res.code,
-            res.stderr.trim()
-        );
+        return Err(classed(
+            Class::Api,
+            format!(
+                "cannot run a shell on {} (ssh exited {}).\n{}",
+                ssh.dest,
+                res.code,
+                res.stderr.trim()
+            ),
+        ));
     }
     let kv = parse_kv(&res.stdout);
     let get = |k: &str| kv.get(k).map(String::as_str).unwrap_or("");
 
     if get("NASHCODE_OS") != "Linux" {
-        bail!(
-            "the host reports `{}`; nashcode sets up Linux hosts with systemd only",
-            get("NASHCODE_OS")
-        );
+        return Err(classed(
+            Class::Api,
+            format!(
+                "the host reports `{}`; nashcode sets up Linux hosts with systemd only",
+                get("NASHCODE_OS")
+            ),
+        ));
     }
     if get("NASHCODE_SYSTEMD") != "yes" {
-        bail!("the host has no systemctl; nashcode needs systemd to run celld as a service");
+        return Err(classed(
+            Class::Api,
+            "the host has no systemctl; nashcode needs systemd to run celld as a service",
+        ));
     }
     match get("NASHCODE_ROOT") {
         "root" | "sudo" => {}
-        "sudo-password" => bail!(
-            "sudo on {} asks for a password.\n\
-             nashcode runs unattended scripts over ssh, so it needs either a root login or \
-             passwordless sudo. Add a sudoers rule for this user, or connect as root.",
-            ssh.dest
-        ),
-        _ => bail!("no way to reach root on {}: install sudo or connect as root", ssh.dest),
+        "sudo-password" => {
+            return Err(classed(
+                Class::Api,
+                format!(
+                    "sudo on {} asks for a password.\n\
+                     nashcode runs unattended scripts over ssh, so it needs either a root login or \
+                     passwordless sudo. Add a sudoers rule for this user, or connect as root.",
+                    ssh.dest
+                ),
+            ));
+        }
+        _ => {
+            return Err(classed(
+                Class::Api,
+                format!("no way to reach root on {}: install sudo or connect as root", ssh.dest),
+            ));
+        }
     }
     out.step(format!(
         "{} — {} {}, {} access as {}",
@@ -346,7 +369,10 @@ fn join_tailnet(
         }
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
-    bail!("the host did not join the tailnet within five minutes");
+    Err(classed(
+        Class::Api,
+        "the host did not join the tailnet within five minutes",
+    ))
 }
 
 // --- plumbing --------------------------------------------------------------
@@ -398,7 +424,7 @@ fn ask(
     if let Some(d) = default {
         return Ok(d);
     }
-    bail!("{flag} is required")
+    Err(classed(Class::Usage, format!("{flag} is required")))
 }
 
 fn resolve_endpoint(args: &SetupArgs, provider: Provider) -> Result<Option<String>> {
@@ -411,11 +437,14 @@ fn resolve_endpoint(args: &SetupArgs, provider: Provider) -> Result<Option<Strin
     if provider == Provider::AwsS3 {
         return Ok(None); // the AWS SDK default is right
     }
-    bail!(
-        "--endpoint is required for {} ({})",
-        provider.label(),
-        provider.endpoint_hint()
-    )
+    Err(classed(
+        Class::Usage,
+        format!(
+            "--endpoint is required for {} ({})",
+            provider.label(),
+            provider.endpoint_hint()
+        ),
+    ))
 }
 
 /// Credentials, in the order that keeps them out of shell history: the flag if
@@ -439,10 +468,13 @@ fn resolve_credentials(out: &Out, args: &SetupArgs) -> Result<(Option<String>, O
     if let (Some(id), Some(secret)) = (&id, &secret) {
         return Ok((Some(id.clone()), Some(secret.clone())));
     }
-    bail!(
+    // A missing answer, like every other missing answer: nothing prompts, so
+    // this is the invocation being incomplete rather than anything failing.
+    Err(classed(
+        Class::Usage,
         "no bucket credentials. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, \
-         or pass --creds-on-host if the box already has them."
-    )
+         or pass --creds-on-host if the box already has them.",
+    ))
 }
 
 /// Bucket, region, and endpoint go into the systemd unit's ExecStart (no
@@ -451,7 +483,7 @@ fn resolve_credentials(out: &Out, args: &SetupArgs) -> Result<(Option<String>, O
 /// a newline, or a percent sign, so refuse them up front.
 pub fn reject_unsafe_value(what: &str, value: &str) -> Result<()> {
     if value.is_empty() {
-        bail!("the {what} is empty");
+        return Err(classed(Class::Usage, format!("the {what} is empty")));
     }
     if let Some(c) = value.chars().find(|c| c.is_whitespace() || *c == '%') {
         let shown = if c.is_whitespace() {
@@ -459,11 +491,14 @@ pub fn reject_unsafe_value(what: &str, value: &str) -> Result<()> {
         } else {
             format!("`{c}`")
         };
-        bail!(
-            "the {what} `{}` contains {shown}, which the systemd unit and its \
-             EnvironmentFile cannot carry safely",
-            value.escape_default()
-        );
+        return Err(classed(
+            Class::Usage,
+            format!(
+                "the {what} `{}` contains {shown}, which the systemd unit and its \
+                 EnvironmentFile cannot carry safely",
+                value.escape_default()
+            ),
+        ));
     }
     Ok(())
 }

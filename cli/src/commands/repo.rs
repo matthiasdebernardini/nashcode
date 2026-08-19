@@ -5,6 +5,7 @@ use crate::api::{Client, RepoConfig, valid_repo_name};
 use crate::cli::{CloneArgs, DescArgs, GcArgs, InitArgs, NewArgs, RemoteArgs, RmArgs};
 use crate::profile::Profile;
 use crate::vcs::{self, Workspace};
+use crate::exit::{Class, classed};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -48,7 +49,10 @@ fn require_jj(explicit_flag: bool, out: &crate::output::Out) -> Result<()> {
         return Ok(());
     }
     if explicit_flag {
-        bail!("--jj was given but jj is not on PATH. Install Jujutsu: https://jj-vcs.github.io/jj/");
+        return Err(classed(
+            Class::Usage,
+            "--jj was given but jj is not on PATH. Install Jujutsu: https://jj-vcs.github.io/jj/",
+        ));
     }
     out.warn("NASHCODE_JJ=1 is set but jj is not on PATH; continuing with git only");
     Ok(())
@@ -108,7 +112,12 @@ pub fn init(ctx: &Ctx, args: &InitArgs) -> Result<Value> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .filter(|n| !n.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("cannot name the repository after `{}`; pass a name", cwd.display()))?,
+            .ok_or_else(|| {
+                    classed(
+                        Class::Usage,
+                        format!("cannot name the repository after `{}`; pass a name", cwd.display()),
+                    )
+                })?,
     };
 
     let cfg = RepoConfig {
@@ -182,7 +191,7 @@ fn commit_and_push(ctx: &Ctx, ws: &Workspace) -> Result<bool> {
             &["git", "push", "--allow-new", "--remote", "origin", "--bookmark", "main"],
         )?;
         if !push.ok() {
-            bail!("jj git push failed: {}", push.stderr.trim());
+            return Err(vcs::transport_error("jj git push", &push.stderr));
         }
         ctx.out.step("jj git push --allow-new --bookmark main");
         return Ok(true);
@@ -217,7 +226,7 @@ fn commit_and_push(ctx: &Ctx, ws: &Workspace) -> Result<bool> {
     }
     let push = vcs::git(&ws.root, &["push", "--quiet", "-u", "origin", branch])?;
     if !push.ok() {
-        bail!("git push failed: {}", push.stderr.trim());
+        return Err(vcs::transport_error("git push", &push.stderr));
     }
     ctx.out.step(format!("git push -u origin {branch}"));
     Ok(true)
@@ -250,10 +259,13 @@ pub fn ls(ctx: &Ctx) -> Result<Vec<Value>> {
 /// `x/config` would otherwise address dgit's admin endpoint, not a repository.
 fn require_valid_name(name: &str) -> Result<()> {
     if !valid_repo_name(name) {
-        bail!(
-            "`{name}` is not a valid repository name. dgit allows letters, digits, dot, \
-             dash, and underscore, starting with a letter or digit."
-        );
+        return Err(classed(
+            Class::Usage,
+            format!(
+                "`{name}` is not a valid repository name. dgit allows letters, digits, dot, \
+                 dash, and underscore, starting with a letter or digit."
+            ),
+        ));
     }
     Ok(())
 }
@@ -265,7 +277,7 @@ pub fn clone(ctx: &Ctx, args: &CloneArgs) -> Result<Value> {
     let dir = args.dir.clone().unwrap_or_else(|| args.name.clone());
 
     if Path::new(&dir).exists() {
-        bail!("`{dir}` already exists");
+        return Err(classed(Class::Usage, format!("`{dir}` already exists")));
     }
     // Store the token first, so a private repository clones without a prompt.
     if !p.token.is_empty() && vcs::credential_helper(&p.url)?.is_some() {
@@ -274,7 +286,7 @@ pub fn clone(ctx: &Ctx, args: &CloneArgs) -> Result<Value> {
     let cwd = std::env::current_dir().context("read current directory")?;
     let r = vcs::git(&cwd, &["clone", &url, &dir])?;
     if !r.ok() {
-        bail!("git clone failed: {}", r.stderr.trim());
+        return Err(vcs::transport_error("git clone", &r.stderr));
     }
 
     let mut colocated = false;
@@ -322,7 +334,10 @@ pub fn desc(ctx: &Ctx, args: &DescArgs) -> Result<Value> {
         },
     };
     if cfg.is_empty() {
-        bail!("nothing to change. Pass --desc, --section, --owner, --private, or --public.");
+        return Err(classed(
+            Class::Usage,
+            "nothing to change. Pass --desc, --section, --owner, --private, or --public.",
+        ));
     }
     let echo = client.put_config(&args.name, &cfg)?;
     Ok(json!({
@@ -341,10 +356,18 @@ pub fn remote(ctx: &Ctx, args: &RemoteArgs) -> Result<Value> {
         Some(n) => n.clone(),
         None => ws
             .default_repo_name()
-            .ok_or_else(|| anyhow::anyhow!("cannot name the repository after the directory; pass a name"))?,
+            .ok_or_else(|| {
+                classed(
+                    Class::Usage,
+                    "cannot name the repository after the directory; pass a name",
+                )
+            })?,
     };
     if !valid_repo_name(&name) {
-        bail!("`{name}` is not a valid dgit repository name");
+        return Err(classed(
+            Class::Usage,
+            format!("`{name}` is not a valid dgit repository name"),
+        ));
     }
     let url = wire_remote(ctx, &p, &ws, &name)?;
     Ok(json!({ "name": name, "url": url, "vcs": ws.kind.as_str(), "root": ws.root }))

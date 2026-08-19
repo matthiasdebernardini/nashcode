@@ -9,6 +9,7 @@
 //! `$NASHCODE_GIT_BIN` and `$NASHCODE_JJ_BIN` replace the executables. Detection
 //! itself reads only the directory layout, so it needs neither binary.
 
+use crate::exit::{Class, classed};
 use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,114 @@ impl Kind {
 pub struct Workspace {
     pub root: PathBuf,
     pub kind: Kind,
+}
+
+
+/// Which failure class a *transport* failure from git or jj belongs to, read
+/// from what git said about it.
+///
+/// This is string matching, and it is in the right place: nashcode is looking at
+/// the output of a program it ran itself, in the one spot that knows the output
+/// is git's. What comes out is a typed class, so nothing further down has to
+/// guess again — and a plan file, a review comment, or a server's response body
+/// never reaches this function.
+///
+/// Authentication is the case the whole token story rests on: a push with a
+/// stale token must exit `AUTH`, not "something went wrong".
+pub fn transport_class(stderr: &str) -> Class {
+    let text = stderr.to_ascii_lowercase();
+    let says = |needle: &str| text.contains(needle);
+
+    if says("authentication failed")
+        || says("authentication required")
+        || says("could not read username")
+        || says("could not read password")
+        || says("invalid username or password")
+        || says("permission denied")
+        || says("access denied")
+        || says("http basic")
+        || says("403")
+        || says("401")
+    {
+        return Class::Auth;
+    }
+    if says("repository not found")
+        || says("not found")
+        || says("does not appear to be a git repository")
+        || says("404")
+    {
+        return Class::NotFound;
+    }
+    // A transport that failed for any other reason is the far end failing.
+    Class::Api
+}
+
+/// A transport failure, classified from git's own words.
+pub fn transport_error(what: &str, stderr: &str) -> anyhow::Error {
+    classed(
+        transport_class(stderr),
+        format!("{what} failed: {}", stderr.trim()),
+    )
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_token_is_an_auth_failure_not_a_mystery() {
+        // The first case the whole token story rests on.
+        for said in [
+            "fatal: Authentication failed for 'https://box/widget.git/'",
+            "fatal: could not read Username for 'https://box': terminal prompts disabled",
+            "remote: HTTP Basic: Access denied",
+            "fatal: unable to access 'https://box/w.git/': The requested URL returned error: 401",
+        ] {
+            assert_eq!(transport_class(said), Class::Auth, "{said}");
+        }
+    }
+
+    #[test]
+    fn a_repository_the_server_does_not_have_is_not_found() {
+        for said in [
+            "remote: Repository not found.\nfatal: repository 'https://box/nope.git/' not found",
+            "fatal: 'https://box/nope' does not appear to be a git repository",
+        ] {
+            assert_eq!(transport_class(said), Class::NotFound, "{said}");
+        }
+    }
+
+    #[test]
+    fn anything_else_that_failed_on_the_wire_is_the_far_end() {
+        for said in [
+            "fatal: unable to access 'https://box/w.git/': Could not resolve host: box",
+            "error: RPC failed; curl 56 Recv failure: Connection reset by peer",
+            "",
+        ] {
+            assert_eq!(transport_class(said), Class::Api, "{said}");
+        }
+    }
+
+    #[test]
+    fn the_class_comes_from_git_and_survives_whatever_else_is_in_the_message() {
+        // The harness case: one failure, three different bodies of prose around
+        // it. The class is the same every time, because it was decided here and
+        // is carried, not re-read.
+        let auth = "fatal: Authentication failed";
+        for noise in [
+            "",
+            "\nhint: the plan file does not exist",
+            "\nhint: --provider is required",
+            "\nhint: no such repository",
+        ] {
+            let e = transport_error("git push", &format!("{auth}{noise}"));
+            assert_eq!(
+                crate::exit::class_of(&e),
+                Some(Class::Auth),
+                "prose changed the class: {noise:?}"
+            );
+        }
+    }
 }
 
 impl Workspace {
@@ -172,7 +281,10 @@ impl Workspace {
             let verb = if has_origin { "set-url" } else { "add" };
             let r = jj(&self.root, &["git", "remote", verb, "origin", url])?;
             if !r.ok() {
-                bail!("jj git remote {verb} origin failed: {}", r.stderr.trim());
+                return Err(transport_error(
+                    &format!("jj git remote {verb} origin"),
+                    &r.stderr,
+                ));
             }
             Ok(format!("jj git remote {verb} origin {url}"))
         } else {
@@ -185,7 +297,7 @@ impl Workspace {
             };
             let r = git(&self.root, &args)?;
             if !r.ok() {
-                bail!("git {} failed: {}", args.join(" "), r.stderr.trim());
+                return Err(transport_error(&format!("git {}", args.join(" ")), &r.stderr));
             }
             Ok(format!("git {}", args.join(" ")))
         }
