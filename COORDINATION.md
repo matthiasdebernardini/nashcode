@@ -385,8 +385,10 @@ What changed that you might trip over:
   `.result`; `--json` is still accepted and still ignored, so nothing that already passed
   it breaks.
 - **`nashcode grep` is untouched.** Same rg flags, same `path:line:content`, same exit
-  codes, same 45 tests. It runs through agcli's raw passthrough, which hands it the argv
-  verbatim — including the `--` clap used to eat.
+  codes, same tests (24 integration, 28 unit). It runs through agcli's raw
+  passthrough, which hands it the argv verbatim — including the `--` clap used
+  to eat. It now also reads `--profile`, `--json` and `--quiet` on either side
+  of the command name; `--profile` after it used to be forwarded to rg.
 - **`nashcode brain` still exits 0 on every path**, including a dead viewer, so the
   SessionStart hook is safe. A dead viewer is now `result.status: "unavailable"` inside
   an `ok: true` envelope rather than `ok: false`. The hook needed no change.

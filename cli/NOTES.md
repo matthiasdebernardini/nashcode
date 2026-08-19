@@ -164,6 +164,15 @@ cursor that stepped backwards and re-delivered. It compares instants now
 (`timefmt::instant_key`), and an undateable row sorts below every real one
 instead of winning the maximum and freezing the loop.
 
+**No list is ever truncated, and the tests say so rather than faking one.**
+Review asked for a `truncated: true` case. There is not one to write: `ls` and
+`comments` both use `CommandOutput::list`, which reports everything it was
+given, because neither command pages or caps. A test that produced `true` would
+have to construct a result no invocation can. So the test pins the invariant
+instead — always complete, always `truncated: false`, never any truncation
+`guidance` — which is the assertion that fails on the day somebody adds a limit
+without telling the caller.
+
 **`nashcode ls` rows carry their own URL.** The old shape was
 `{url, count, repos}`; a bounded list has no room for a top-level `url`, so each
 row got `url` and `web`. `--select=items.name,items.url` then still answers

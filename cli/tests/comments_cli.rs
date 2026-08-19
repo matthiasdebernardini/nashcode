@@ -208,10 +208,12 @@ fn without_dash_dash_repo_the_origin_remote_names_the_repository() {
 }
 
 #[test]
-fn a_bounded_list_says_so_when_it_is_showing_less_than_it_has() {
-    // The viewer answers with more rows than it says it holds — the shape a
-    // paged endpoint takes. `truncated` is what stops an agent concluding it
-    // has seen everything.
+fn the_list_is_never_truncated_and_says_so_every_time() {
+    // `truncated` is the field that stops an agent concluding it has seen
+    // everything. nashcode never sets it: no command here pages or caps, so a
+    // caller gets whatever the viewer sent, whole. That is the contract worth
+    // pinning — if a future limit ever makes this false, the caller has to be
+    // told, and this test is what says nobody told them.
     let dir = tempfile::tempdir().unwrap();
     let (port, server) = one_shot_server(FIXTURE);
     let config = write_config(dir.path(), Some(port));
@@ -222,9 +224,9 @@ fn a_bounded_list_says_so_when_it_is_showing_less_than_it_has() {
         &["comments", "plans/rewrite-the-parser.md", "--repo", "demo"],
     );
     let result = &envelope(&out)["result"];
-    // This fixture is complete, so it is not truncated — and says which.
     assert_eq!(result["truncated"], false);
     assert_eq!(result["count"], result["total"]);
+    // Truncation guidance would be a lie on a complete list.
     assert!(result.get("guidance").is_none(), "{result}");
     server.join().unwrap();
 }
