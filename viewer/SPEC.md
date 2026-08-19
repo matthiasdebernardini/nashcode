@@ -521,6 +521,25 @@ The two share a word and nothing else.
 - Mirrors are whole, not partial: dgit and celld are small. Blobless clones for a
   kernel-sized dep are a known ceiling, taken when one hurts.
 
+Browsing the column (phase 2):
+
+- **`GET /:repo/stack` renders the column**: the repo itself, then each dep at its
+  resolved commit — name, layer, url, mode, freshness, and the commit it points at —
+  each entry opening that dep's tree. One page, N trees; never a merged fake tree.
+  A dep whose mirror is absent or refused renders as a card that says why, exactly
+  like an unavailable repo. The tab label is "Stack", singular, next to "Stacks";
+  the two pages link to each other's concept in one line so nobody guesses wrong.
+- **`GET /:repo/stack/:dep/tree/{*path}` and `/:repo/stack/:dep/blob/{*path}`**
+  browse the dep's mirror at the resolved commit. `?rev=` narrows to any commit
+  already present in the mirror — a gitlink target, for instance — and a rev the
+  mirror does not have is a 404, never a fetch. Read-only surfaces: no edit, no
+  new-file, no actions, no comments. `:dep` is the manifest name, valid only under
+  the repo that declared it.
+- **Submodule gitlinks link through.** A submodule entry in any tree whose
+  `.gitmodules` URL normalizes onto a mirrored dep of the same repo becomes a link
+  to that dep at the gitlink's commit; every other gitlink stays the inert label it
+  is today.
+
 ## Architecture
 
 A repo tab that answers "what is the shape of this system" — both the shape somebody
