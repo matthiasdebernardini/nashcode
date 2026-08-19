@@ -38,7 +38,7 @@ This file is for agents that are *building* it.
 |---|---|---|
 | `viewer/src/code.rs` (new), `viewer/src/ci.rs`, `viewer/src/db.rs`, `viewer/src/brain.rs`, `viewer/src/web/api.rs`, `viewer/src/cli.rs`, `viewer/Cargo.toml` | code-intelligence implementer (worktree) | embeddings + graph + endpoints per SPEC |
 | advisor (post-merge hook, comments) | queued behind code-intelligence | starts after its merge |
-| Architecture tab (`/:repo/architecture`, `/code/graph` dump, mermaid render) | main session | specced in `c85fd7f`; implementation queued behind both worktree streams |
+| `viewer/src/web/architecture.rs` (new), `viewer/src/web.rs`, `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/js/*`, `viewer/package.json`, `viewer/src/db.rs` (one additive migration block only), `AGENTS.md` | main session | Architecture tab per SPEC `c85fd7f`; brain stanza deferred until code-intelligence merges |
 
 ## Who has been doing what
 
