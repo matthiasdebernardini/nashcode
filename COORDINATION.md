@@ -39,6 +39,7 @@ This file is for agents that are *building* it.
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/src/web/api.rs`, `viewer/src/code/mod.rs`, `viewer/js/app.js`, `viewer/tests/architecture.rs` | clickable-nodes session | `/code/where` + post-render node wiring per SPEC "Nodes link back to the code" |
 | `cli/src/commands/` (`brain.rs` new, `mod.rs`), `cli/src/api.rs` | clickable-nodes session | `nashcode brain` digest per CLI-SPEC |
+| `viewer/src/bugs/` (new), `viewer/src/web/bugs.rs` (new), plus registration touches in `viewer/src/web.rs`, `viewer/src/main.rs`, `viewer/src/config.rs`, `viewer/Cargo.toml` | error-tracking session | phase 1 of `goals/error-tracking/goal.md` per SPEC "Bugs" |
 
 ## Who has been doing what
 
