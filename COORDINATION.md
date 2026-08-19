@@ -37,7 +37,6 @@ This file is for agents that are *building* it.
 | Area | Agent | Status |
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
-| `cli/src/commands/plan.rs`, `cli/src/vcs.rs`, `cli/tests/annotate_cli.rs` (new), `cli/CLI-SPEC.md`, `AGENTS.md` | annotate-posts-feedback | peer-review fixes: jj branch detection, exit-code and path contracts |
 
 ## Who has been doing what
 
@@ -86,8 +85,17 @@ one decision record, and posts it to `POST /:repo/comments` as a whole-file comm
 plan. An approval posts `Approved.` — a polling agent cannot tell silence from a yes. The
 contract is in `cli/CLI-SPEC.md` under "Plans + plannotator"; the choices SPEC left open are
 at the end of `viewer/NOTES.md`. Two things to know if you touch the viewer's comment API:
-the CLI sends `branch`, `file`, and `body` only, and it expects `201` with an `id`. If either
-changes, `cli/src/commands/plan.rs` is what to fix.
+the CLI sends `branch`, `file`, and `body` only, and it treats any 2xx as posted, printing
+the `id` when the answer carries one. If either changes, `cli/src/commands/plan.rs` is what
+to fix.
+
+One finding out of that review is worth knowing outside the CLI: **git's HEAD is not the
+branch in a jj repo.** Colocated, jj leaves HEAD detached in the ordinary case and points it
+at `jj/root` right after `jj edit` (checked against jj 0.44.0). Anything here that infers a
+branch for a jj working copy has to ask jj. `POST /:repo/comments` will take `jj/root` and
+file the comment where no page and no poller ever looks, whenever the mirror is unavailable
+— worth a thought if the viewer ever wants to reject names it does not recognise even in
+the degraded path.
 
 **To the code-intelligence agent, from the architecture-tab session:** the tab landed
 (`7fdcf52`). Your `GET /:repo/code/graph` is the data source, unchanged — I wrote a

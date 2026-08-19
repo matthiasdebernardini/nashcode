@@ -191,20 +191,41 @@ impl Workspace {
         }
     }
 
-    /// The branch the working copy is on, or `None` when it is on none.
+    /// The branch the working copy is on, or `None` when it cannot name one.
     ///
-    /// git's `symbolic-ref` answers for a plain repo and for a colocated jj one,
-    /// where jj keeps git's HEAD pointed at the checked-out bookmark. A detached
-    /// HEAD, a jj-only repo, or no git at all all mean "no branch to name" —
-    /// callers treat the branch as optional, so a missing answer is not an error.
-    pub fn current_branch(&self) -> Result<Option<String>> {
-        if self.kind == Kind::JjOnly {
-            return Ok(None);
-        }
-        let r = git(&self.root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
-        Ok(r.ok()
-            .then(|| r.stdout.trim().to_string())
-            .filter(|b| !b.is_empty()))
+    /// A jj repository is asked in jj's own terms, colocated or not. git's HEAD
+    /// is not the answer there: jj leaves it detached in the ordinary case, and
+    /// right after `jj edit <bookmark>` it points at the synthetic `jj/root`
+    /// ref. Both were checked against jj 0.44.0. Sending `jj/root` to the viewer
+    /// is worse than sending nothing, because the viewer takes it and no page
+    /// or poller ever asks for that branch again.
+    ///
+    /// The jj question that holds after `jj commit`, `jj new`, and `jj edit`
+    /// alike is "the nearest bookmark at or behind the working copy". Several
+    /// bookmarks on that commit come back in alphabetical order and the first
+    /// one wins — arbitrary, but the same answer every time.
+    ///
+    /// Nothing here is an error. No git or jj on PATH, a detached HEAD, a repo
+    /// with no bookmarks: all of them mean "no branch to name", and the caller
+    /// decides what that costs.
+    pub fn current_branch(&self) -> Option<String> {
+        let run = if self.kind.is_jj() {
+            jj(
+                &self.root,
+                &[
+                    "log",
+                    "-r",
+                    "heads(::@ & bookmarks())",
+                    "--no-graph",
+                    "-T",
+                    "bookmarks",
+                ],
+            )
+        } else {
+            git(&self.root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        };
+        let out = run.ok().filter(Run::ok)?.stdout;
+        first_branch_name(&out)
     }
 
     /// The name `origin` currently points at, e.g. `myrepo` from
@@ -225,6 +246,18 @@ impl Workspace {
         };
         Ok(url.as_deref().and_then(repo_name_from_url))
     }
+}
+
+/// The first usable branch name in a `symbolic-ref` or `jj log` answer.
+///
+/// jj prints every bookmark on a commit on one line, space separated, and marks
+/// one that is out of step with its remote with a trailing `*`. `jj/` names are
+/// jj's own bookkeeping refs, never anything a server has heard of.
+fn first_branch_name(out: &str) -> Option<String> {
+    out.split_whitespace()
+        .map(|b| b.trim_end_matches('*'))
+        .find(|b| !b.is_empty() && !b.starts_with("jj/"))
+        .map(str::to_string)
 }
 
 /// `https://host/myrepo.git` -> `myrepo`. Also handles `scp`-style git URLs.
@@ -346,6 +379,17 @@ mod tests {
         assert_eq!(repo_name_from_url("https://h/myrepo").unwrap(), "myrepo");
         assert_eq!(repo_name_from_url("git@h:myrepo.git").unwrap(), "myrepo");
         assert_eq!(repo_name_from_url("https://h/a/b/c.git/").unwrap(), "c");
+    }
+
+    #[test]
+    fn branch_names_drop_jjs_bookkeeping_and_its_out_of_sync_marker() {
+        assert_eq!(first_branch_name("main\n").unwrap(), "main");
+        assert_eq!(first_branch_name("main*\n").unwrap(), "main");
+        // Alphabetical, as jj prints them; the first one wins.
+        assert_eq!(first_branch_name("feature main\n").unwrap(), "feature");
+        assert_eq!(first_branch_name("jj/root\n"), None);
+        assert_eq!(first_branch_name("\n"), None);
+        assert_eq!(first_branch_name(""), None);
     }
 
     #[test]

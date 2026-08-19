@@ -109,6 +109,12 @@ comment, `id` included.
 
 Reply on the line you are answering. That is how a human sees the thread in place.
 
+A human reviewing locally does not curl. `nashcode annotate plans/retries.md` opens the
+plan in plannotator with an Approve button and posts what they decided here for them: their
+notes, or `Approved.` when they had none. It arrives as a whole-file comment on the branch
+the working copy is on, so a poller watching `?file=plans/retries.md` sees it like any
+other. Dismissing posts nothing.
+
 ## 5. Revise
 
 Edit the plan, commit, push. The comments stay put. Ones anchored to a line whose file has

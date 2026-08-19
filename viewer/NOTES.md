@@ -592,11 +592,39 @@ Lives in `cli/`, noted here because this is the file that records choices SPEC l
   review is over and give it nothing to act on, so the command bails. Blank `feedback` on
   an `approved` record is different — it degrades to the bare `Approved.`, because there
   the decision is the whole message.
-- **The branch comes from git's `symbolic-ref`, and a jj-native repo reports none.** A
-  colocated jj repo keeps git's HEAD on the checked-out bookmark, so one question answers
-  for both. A detached HEAD or a `.jj`-only repo gives `None` and the payload omits
-  `branch`, which the viewer accepts.
-- **"Nowhere to post" exits 0; a refused post does not.** A profile with no viewer URL and
-  a directory that is not a known repository are configuration, not failure: print the
+- **The branch comes from jj in a jj repo, and it is not optional.** The first version of
+  this asked git's `symbolic-ref` everywhere, on the belief that a colocated jj repo keeps
+  git's HEAD on the checked-out bookmark. That is false, and peer review caught it against
+  jj 0.44.0: in the ordinary state after `jj commit` or `jj new`, git's HEAD is detached
+  and `symbolic-ref` exits 1; right after `jj edit <bookmark>` it prints `jj/root`. The
+  first failure sends no branch and the viewer answers 400. The second sends a branch name
+  no server has heard of, and when the mirror happens to be unavailable the viewer takes
+  the comment with an empty anchor commit — a comment nobody will ever query, which is the
+  one way this design could lose feedback silently. jj is now asked in jj's terms:
+  `jj log -r 'heads(::@ & bookmarks())' -T bookmarks`, the nearest bookmark at or behind
+  the working copy, which is right after `jj commit`, `jj new`, and `jj edit` alike.
+  Several bookmarks on that commit come back alphabetically and the first wins. `jj/`
+  names and jj's trailing `*` out-of-sync marker are filtered out of both paths.
+- **No branch is a reason, not an omitted field.** `comment_payload` takes `&str`, not
+  `Option<&str>`. The viewer requires a branch, so a payload without one cannot succeed,
+  and there is no value in constructing it. A workspace that cannot name a branch takes
+  the print-the-feedback path with "cannot tell which branch this plan is on".
+- **A plan outside the repository is the same kind of refusal.** `relative_path` returns
+  `Option`. An absolute path posted as a file name is accepted by the viewer and then
+  rendered by no page and matched by no `?file=` query, so it is worse than not posting.
+- **"Nowhere to post" exits 0; a refused post does not.** No viewer URL, no resolvable
+  repository, no branch, a file outside the root: configuration, not failure. Print the
   feedback, say why it went nowhere, exit 0. A POST that was attempted and rejected is a
   real failure, so the feedback prints and then the command bails.
+- **The decision is read before the exit code is judged.** plannotator publishes the
+  result file atomically, so a file that exists is a whole decision. Bailing on a nonzero
+  exit without looking would throw away a review the human had already finished. A nonzero
+  exit with a published decision warns and posts; a nonzero exit with nothing published
+  fails.
+- **plannotator's stdout is nulled.** `--json` makes it print the decision record on
+  stdout as well as publishing it, and that copy would land between the feedback and the
+  posted id in the user's terminal. Its human-facing lines go to stderr, so nothing is
+  hidden by this. The record comes from the file.
+- **The scratch directory is 0700 from birth,** created with `DirBuilder::mode` rather
+  than chmodded afterwards. The feedback sits in a shared `/tmp` for as long as the human
+  is writing it.

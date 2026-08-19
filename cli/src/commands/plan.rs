@@ -99,9 +99,6 @@ pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<()> {
         return Ok(());
     };
 
-    if let Some(u) = &viewer {
-        ctx.out.step(u);
-    }
     if ctx.out.is_json() {
         ctx.out.json(&json!({
             "file": args.file,
@@ -124,27 +121,43 @@ pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<()> {
         .arg("--json")
         .arg("--result-file")
         .arg(&result_file)
+        // --json makes plannotator print the decision record on stdout as well
+        // as publishing it. We read the file, so the copy on our own stdout
+        // would only be noise between the feedback and the posted id.
+        .stdout(std::process::Stdio::null())
         .status()
         .with_context(|| format!("run {}", bin.display()));
-    let status = match status {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(e);
-        }
-    };
-    if !status.success() {
-        let _ = std::fs::remove_dir_all(&dir);
-        bail!("plannotator exited {}", status.code().unwrap_or(-1));
-    }
+
+    // Read the decision before judging the exit code. Publication is atomic, so
+    // a file that exists is a whole decision, and a human who spent ten minutes
+    // annotating should not lose it to whatever plannotator tripped over on the
+    // way out.
     let raw = std::fs::read_to_string(&result_file);
     let _ = std::fs::remove_dir_all(&dir);
-    let raw = raw.with_context(|| {
-        format!(
-            "plannotator exited 0 but wrote no decision to {}",
-            result_file.display()
-        )
-    })?;
+    let status = status?;
+    let raw = match raw {
+        Ok(raw) => {
+            if !status.success() {
+                ctx.out.warn(format!(
+                    "plannotator exited {}, but it had already published a decision — using it",
+                    status.code().unwrap_or(-1)
+                ));
+            }
+            raw
+        }
+        Err(e) if !status.success() => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "plannotator exited {} and published no decision",
+                status.code().unwrap_or(-1)
+            )));
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "plannotator exited 0 but published no decision to {}",
+                result_file.display()
+            )));
+        }
+    };
 
     let decision = match decision_body(&raw) {
         Ok(d) => d,
@@ -172,7 +185,7 @@ pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<()> {
         }
     };
 
-    let payload = comment_payload(&target.file, target.branch.as_deref(), &body).to_string();
+    let payload = comment_payload(&target.file, &target.branch, &body).to_string();
     let client = Client::new(&target.viewer, &target.token);
     let reply = match client.post_url(&target.url, &payload) {
         Ok(r) => r,
@@ -241,15 +254,15 @@ pub fn decision_body(raw: &str) -> Result<Option<String>> {
 
 /// The body of `POST /:repo/comments` for a whole-file plan comment.
 ///
+/// `branch` is not optional. The viewer rejects a comment without one, and it
+/// anchors the comment to that branch's tip, so a wrong branch is as good as no
+/// comment: every reader asks for a branch by name.
+///
 /// No `line`: the decision record has no per-annotation anchors, so the comment
 /// belongs to the file. No `author`: the viewer reads the caller's Tailscale
 /// identity, which is truer than anything this side could claim.
-pub fn comment_payload(file: &str, branch: Option<&str>, body: &str) -> Value {
-    let mut v = json!({ "file": file, "body": body });
-    if let Some(b) = branch {
-        v["branch"] = json!(b);
-    }
-    v
+pub fn comment_payload(file: &str, branch: &str, body: &str) -> Value {
+    json!({ "branch": branch, "file": file, "body": body })
 }
 
 /// Everything needed to post one comment about a plan.
@@ -262,7 +275,7 @@ struct CommentTarget {
     url: String,
     /// The plan's path as the viewer names it: relative, forward slashes.
     file: String,
-    branch: Option<String>,
+    branch: String,
 }
 
 /// Where a decision about `path` would be posted. The `Err` side is the reason
@@ -284,25 +297,39 @@ fn comment_target(ctx: &Ctx, path: &Path) -> std::result::Result<CommentTarget, 
         .map_err(|e| e.to_string())?
         .or_else(|| ws.default_repo_name())
         .ok_or_else(|| "cannot tell which repository this is".to_string())?;
+    let file = relative_path(&ws.root, path).ok_or_else(|| {
+        format!(
+            "{} is outside {}, and the viewer only knows files in the repository",
+            path.display(),
+            ws.root.display()
+        )
+    })?;
+    // No branch is a dead end, not a detail to leave out: the viewer refuses a
+    // comment without one, and when its mirror is down it accepts any name and
+    // files the comment where nobody will look.
+    let branch = ws.current_branch().ok_or_else(|| {
+        "cannot tell which branch this plan is on, and a comment is anchored to one".to_string()
+    })?;
     Ok(CommentTarget {
         url: format!("{viewer}/{}/comments", pct(&repo)),
         viewer,
         token: p.token.clone(),
-        file: relative_path(&ws.root, path),
-        branch: ws.current_branch().map_err(|e| e.to_string())?,
+        file,
+        branch,
     })
 }
 
 /// `path` as the viewer names it: relative to the workspace root, forward
 /// slashes. Both sides are canonicalised first, so `./plans/x.md` and an
 /// absolute path give the same answer.
-fn relative_path(root: &Path, path: &Path) -> String {
+///
+/// `None` when the file is not under the root. An absolute path posted as a
+/// file name is accepted by the viewer and then shown by nothing, so the caller
+/// has to treat that as a refusal rather than send it.
+fn relative_path(root: &Path, path: &Path) -> Option<String> {
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    abs.strip_prefix(&root)
-        .unwrap_or(&abs)
-        .to_string_lossy()
-        .replace('\\', "/")
+    Some(abs.strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/"))
 }
 
 /// A fresh empty directory under the system temp dir.
@@ -315,10 +342,18 @@ fn scratch_dir() -> Result<PathBuf> {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let base = std::env::temp_dir();
+    // 0700 from the start, not chmodded after: the feedback sits in a shared
+    // /tmp for as long as the human is writing it.
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
     for _ in 0..64 {
         let n = N.fetch_add(1, Ordering::Relaxed);
         let dir = base.join(format!("nashcode-annotate-{}-{n}", std::process::id()));
-        match std::fs::create_dir(&dir) {
+        match builder.create(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e).with_context(|| format!("create {}", dir.display())),
@@ -339,11 +374,14 @@ fn viewer_plan_url(ctx: &Ctx, path: &Path) -> Result<Option<String>> {
     let Some(repo) = ws.origin_repo_name()?.or_else(|| ws.default_repo_name()) else {
         return Ok(None);
     };
+    let Some(rel) = relative_path(&ws.root, path) else {
+        return Ok(None);
+    };
     Ok(Some(format!(
         "{}/{}/tree/{}",
         viewer.trim_end_matches('/'),
         repo,
-        relative_path(&ws.root, path)
+        rel
     )))
 }
 
@@ -590,27 +628,41 @@ mod tests {
 
     #[test]
     fn the_comment_payload_is_whole_file_and_unauthored() {
-        let v = comment_payload("plans/x.md", Some("review/x"), "Approved.");
+        let v = comment_payload("plans/x.md", "review/x", "Approved.");
         assert_eq!(v["file"], "plans/x.md");
         assert_eq!(v["branch"], "review/x");
         assert_eq!(v["body"], "Approved.");
         let o = v.as_object().unwrap();
         assert!(!o.contains_key("line"));
         assert!(!o.contains_key("author"));
-
-        let v = comment_payload("plans/x.md", None, "hi");
-        assert!(!v.as_object().unwrap().contains_key("branch"));
+        assert_eq!(o.len(), 3);
     }
 
     #[test]
     fn the_file_is_named_relative_to_the_workspace_root() {
-        let root = PathBuf::from("/repo");
-        assert_eq!(
-            relative_path(&root, &root.join("plans").join("x.md")),
-            "plans/x.md"
-        );
-        // Outside the root there is nothing to strip; the path stands as given.
-        assert_eq!(relative_path(&root, Path::new("/elsewhere/x.md")), "/elsewhere/x.md");
+        // Real directories, so canonicalize does its job instead of falling
+        // through: on macOS the temp dir is a symlink, and an uncanonicalised
+        // root would never be a prefix of the canonical file.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("plans")).unwrap();
+        let plan = root.join("plans").join("x.md");
+        std::fs::write(&plan, "# x").unwrap();
+        assert_eq!(relative_path(&root, &plan).unwrap(), "plans/x.md");
+
+        // The same file named the way a human types it from inside the repo.
+        let dotted = root.join(".").join("plans").join("x.md");
+        assert_eq!(relative_path(&root, &dotted).unwrap(), "plans/x.md");
+    }
+
+    #[test]
+    fn a_file_outside_the_workspace_has_no_name_the_viewer_would_understand() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("elsewhere.md");
+        std::fs::write(&outside, "# x").unwrap();
+        assert_eq!(relative_path(&root, &outside), None);
     }
 
     #[test]

@@ -117,7 +117,10 @@ SSH if configured), bucket reachable from host, viewer up (if configured).
   saved dgit HTML fixture, remote-script idempotency (run the generated install script
   twice against a fake `ssh` shim recording invocations), doctor output shape, jj
   detection via directory-layout fixtures, `comments` against a canned JSON fixture on
-  a loopback listener. No test may require network or a real host.
+  a loopback listener, and `annotate` against a fake plannotator on PATH plus a loopback
+  listener: the argv it hands the child, the request line and wire payload it posts, that
+  `--json` launches nothing, and both exit codes (0 when there is nowhere to post, nonzero
+  when a post is refused). No test may require network or a real host.
 
 ## Plans + plannotator
 
@@ -143,10 +146,19 @@ renders them). CLI support:
   Approval posts too, because a polling agent has no other way to hear the loop close.
   The request is `POST /:repo/comments` with `{"branch", "file", "body"}`: whole-file,
   since the record carries no per-annotation anchors, and unauthored, since the viewer
-  falls back to the caller's Tailscale identity. `--json` still launches nothing.
-  Feedback is never lost. When the POST fails, when the profile names no viewer, or when
-  the repository cannot be resolved, the feedback goes to stdout with the reason it was
-  not posted.
+  falls back to the caller's Tailscale identity. Any 2xx is success, and the stored `id`
+  is printed when the answer carries one. `--json` still launches nothing.
+
+  A comment is anchored to a branch, so the CLI needs a branch name it believes in. In a
+  jj repository that name is the nearest bookmark, asked of jj — git's HEAD is detached
+  in a colocated repo, or points at `jj/root`, and neither is a branch the server has
+  heard of. The viewer rejects a branch its mirror does not know, so annotating a plan on
+  a branch nobody pushed yet answers HTTP 400.
+
+  Feedback is never lost. When the POST fails, when the profile names no viewer, when the
+  repository or the branch cannot be named, or when the plan sits outside the repository,
+  the feedback goes to stdout with the reason it was not posted. Failure to post exits
+  nonzero. Having nowhere to post exits 0, because that is a configuration, not a fault.
 - `nashcode comments <file> [--branch ...] [--since RFC3339] [--repo ...]` — GET
   the viewer's `/:repo/comments` JSON endpoint (`viewer_url` from the active
   profile; a clear error when it is unset). `--repo` defaults to the name
