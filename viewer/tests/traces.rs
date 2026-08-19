@@ -252,6 +252,50 @@ async fn a_raw_transcript_session_reads_as_a_conversation() {
     );
 }
 
+/// A backfilled transcript opens with harness state lines that carry no conversation.
+/// A row for one of those repeats its type name and says nothing else, so the page
+/// leaves it out. The stored events are untouched.
+#[tokio::test]
+async fn bookkeeping_transcript_lines_are_dropped_from_the_page() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+
+    let (status, body) = post_json(
+        &bed.router,
+        "/demo/traces/events",
+        serde_json::json!({
+            "session": "sess-noise",
+            "agent": "claude-code",
+            "events": [
+                {"seq": 1, "kind": "file-history-snapshot", "payload": {
+                    "type": "file-history-snapshot",
+                    "messageId": "msg-1",
+                    "snapshot": {"trackedFileBackups": {}}
+                }},
+                {"seq": 2, "kind": "user", "payload": {
+                    "type": "user",
+                    "message": {"role": "user", "content": "hey can you go through this project"}
+                }},
+                {"seq": 3, "kind": "queue-operation", "payload": {"type": "queue-operation"}}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = get(&bed.router, "/demo/agent/sess-noise").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("hey can you go through this project"), "the prompt renders");
+    assert!(!body.contains("file-history-snapshot"), "the state line leaves no row");
+    assert!(!body.contains("queue-operation"), "nor does the queue line");
+
+    // Only the page filters. Agents polling the API still see every event.
+    let (status, body) = get_json(&bed.router, "/demo/traces/sess-noise").await;
+    assert_eq!(status, 200);
+    let session: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(session["events"].as_array().expect("events").len(), 3);
+}
+
 #[tokio::test]
 async fn traces_read_back_as_json_when_asked() {
     let bed = simple_bed(|root| stacked_fixture(root, "demo"));

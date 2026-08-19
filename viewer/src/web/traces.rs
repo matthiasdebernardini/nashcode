@@ -478,6 +478,12 @@ async fn agent_session(cx: &Cx) -> Result<Response> {
             }
             previous_head = Some(head.clone());
         }
+
+        // Nothing to read and no commit to point at: the row would say the event name
+        // twice and nothing else. A commit always earns its row, whatever the payload.
+        if shown.is_empty() && produced.is_empty() {
+            continue;
+        }
         turns.push(Turn {
             seq: event.seq,
             kind: event.kind.clone(),

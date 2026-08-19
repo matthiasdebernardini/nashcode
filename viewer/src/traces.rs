@@ -194,7 +194,11 @@ fn clip(text: &str) -> String {
 //    content is either a string or an array of `text` / `thinking` / `tool_use` /
 //    `tool_result` blocks.
 //
-// Anything else degrades to the one-line summary. A row is never blank.
+// Anything else with readable content degrades to the one-line summary. A payload with
+// no readable content at all reads as no pieces: harness bookkeeping lines
+// (`file-history-snapshot`, `mode`, `permission-mode`, …) would only echo their own type
+// name back, and a row that says the type twice is worse than no row. The page drops
+// those; the JSON APIs still return every stored event.
 
 use serde_json::Value;
 
@@ -240,13 +244,23 @@ pub struct FileEdit {
     pub patch: String,
 }
 
-/// Read one recorded event as the pieces of conversation it holds.
+/// Read one recorded event as the pieces of conversation it holds. Empty when the
+/// payload holds none, which is how bookkeeping lines disappear from the page.
 pub fn read(kind: &str, payload: &Value) -> Vec<Piece> {
     let some = |pieces: Vec<Piece>| (!pieces.is_empty()).then_some(pieces);
-    transcript_pieces(payload)
-        .and_then(some)
-        .or_else(|| hook_pieces(payload).and_then(some))
-        .unwrap_or_else(|| vec![Piece::Note(summarize(kind, payload))])
+    if let Some(pieces) =
+        transcript_pieces(payload).and_then(some).or_else(|| hook_pieces(payload).and_then(some))
+    {
+        return pieces;
+    }
+
+    // `summarize` falls back to the event name when it recognizes nothing, so a summary
+    // that is only the name is the signal that there is nothing here to show.
+    let summary = summarize(kind, payload);
+    if summary == clip(kind) {
+        return Vec::new();
+    }
+    vec![Piece::Note(summary)]
 }
 
 /// The file change reported on the result line that answers a tool call, keyed by the
@@ -825,13 +839,24 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_shape_degrades_to_one_line_never_to_nothing() {
+    fn an_unknown_shape_degrades_to_one_line_and_an_empty_one_to_nothing() {
+        // Recognizable content in an otherwise unknown shape still earns a row.
+        let known = serde_json::json!({"something": "else", "prompt": "ship it"});
+        assert_eq!(read("Notification", &known), vec![Piece::Prompt("ship it".into())]);
+
+        // Nothing to say: the row would only repeat the event name back.
         let payload = serde_json::json!({"something": "else"});
-        assert_eq!(read("Notification", &payload), vec![Piece::Note("Notification".into())]);
+        assert!(read("Notification", &payload).is_empty());
 
         // An empty assistant turn is a shape we know but has nothing in it.
         let empty = serde_json::json!({"type": "assistant", "message": {"content": []}});
-        assert_eq!(read("assistant", &empty), vec![Piece::Note("assistant".into())]);
+        assert!(read("assistant", &empty).is_empty());
+
+        // The bookkeeping lines a backfilled transcript opens with.
+        for kind in ["file-history-snapshot", "mode", "permission-mode", "queue-operation"] {
+            let line = serde_json::json!({"type": kind});
+            assert!(read(kind, &line).is_empty(), "{kind} renders nothing");
+        }
     }
 
     #[test]
