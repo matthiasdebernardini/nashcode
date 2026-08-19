@@ -56,6 +56,13 @@ pub fn envelope_key(project_id: i64, received_at: &str, nonce: &str) -> ObjectPa
     ObjectPath::from(format!("projects/{project_id}/envelopes/{received_at}-{nonce}.envelope"))
 }
 
+/// Where a project's archived log batches live. One NDJSON object per accepted
+/// batch, named by arrival time so a listing reads in order. The hot rows in SQLite
+/// are pruned; these are not.
+pub fn log_key(project_id: i64, received_at: &str, nonce: &str) -> ObjectPath {
+    ObjectPath::from(format!("projects/{project_id}/logs/{received_at}-{nonce}.ndjson"))
+}
+
 /// Where a project's event payloads live. The detail view reads this object; the
 /// SQLite row only points at it.
 pub fn event_key(project_id: i64, event_id: &str) -> ObjectPath {

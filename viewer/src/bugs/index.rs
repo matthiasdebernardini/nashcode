@@ -36,6 +36,8 @@ pub struct Project {
     /// An optional nashcode repo, for cross-links.
     pub repo: Option<String>,
     pub created_at: String,
+    /// How long log rows stay in the hot window. The bucket archive is forever.
+    pub retention_days: i64,
 }
 
 /// A project plus the counts the list page shows.
@@ -120,9 +122,17 @@ pub enum Landing {
     Duplicate,
 }
 
+/// How long a project keeps log rows in the hot window, unless it says otherwise.
+/// Thirty days is a month of "what happened last time"; the NDJSON archive in the
+/// bucket keeps everything anyway, so this only decides what search is fast over.
+pub const DEFAULT_RETENTION_DAYS: i64 = 30;
+
 /// Apply the bugs schema. Idempotent, run on every open.
 pub fn migrate(db: &Db) -> DbResult<()> {
-    db.with(|conn| conn.execute_batch(SCHEMA))
+    db.with(|conn| {
+        conn.execute_batch(SCHEMA)?;
+        add_missing_columns(conn)
+    })
 }
 
 // ---- projects --------------------------------------------------------------------
@@ -142,6 +152,7 @@ pub fn create_project(db: &Db, name: &str, key: &str, repo: Option<&str>) -> DbR
             key: key.to_owned(),
             repo: repo.map(str::to_owned),
             created_at,
+            retention_days: DEFAULT_RETENTION_DAYS,
         })
     })
 }
@@ -149,7 +160,8 @@ pub fn create_project(db: &Db, name: &str, key: &str, repo: Option<&str>) -> DbR
 pub fn project_by_name(db: &Db, name: &str) -> DbResult<Option<Project>> {
     db.with(|conn| {
         conn.query_row(
-            "SELECT id, name, key, repo, created_at FROM bugs_projects WHERE name = ?1",
+            "SELECT id, name, key, repo, created_at, retention_days
+             FROM bugs_projects WHERE name = ?1",
             params![name],
             read_project,
         )
@@ -160,7 +172,8 @@ pub fn project_by_name(db: &Db, name: &str) -> DbResult<Option<Project>> {
 pub fn project_by_id(db: &Db, id: i64) -> DbResult<Option<Project>> {
     db.with(|conn| {
         conn.query_row(
-            "SELECT id, name, key, repo, created_at FROM bugs_projects WHERE id = ?1",
+            "SELECT id, name, key, repo, created_at, retention_days
+             FROM bugs_projects WHERE id = ?1",
             params![id],
             read_project,
         )
@@ -172,7 +185,7 @@ pub fn project_by_id(db: &Db, id: i64) -> DbResult<Option<Project>> {
 pub fn projects(db: &Db) -> DbResult<Vec<ProjectSummary>> {
     db.with(|conn| {
         let mut statement = conn.prepare(
-            "SELECT p.id, p.name, p.key, p.repo, p.created_at,
+            "SELECT p.id, p.name, p.key, p.repo, p.created_at, p.retention_days,
                     COALESCE(SUM(i.state = 'unresolved'), 0),
                     COUNT(i.id),
                     COALESCE(SUM(i.events), 0)
@@ -184,9 +197,9 @@ pub fn projects(db: &Db) -> DbResult<Vec<ProjectSummary>> {
         let rows = statement.query_map([], |row| {
             Ok(ProjectSummary {
                 project: read_project(row)?,
-                unresolved: row.get(5)?,
-                issues: row.get(6)?,
-                events: row.get(7)?,
+                unresolved: row.get(6)?,
+                issues: row.get(7)?,
+                events: row.get(8)?,
             })
         })?;
         rows.collect()
@@ -200,6 +213,7 @@ fn read_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         key: row.get(2)?,
         repo: row.get(3)?,
         created_at: row.get(4)?,
+        retention_days: row.get(5)?,
     })
 }
 
@@ -472,16 +486,80 @@ CREATE INDEX IF NOT EXISTS bugs_envelopes_by_project
     ON bugs_envelopes (project_id, received_at);
 "#;
 
-/// Record that a raw envelope object landed in the bucket. The digest reads events
-/// out of it; a reindex reads the whole list.
-pub fn record_envelope(db: &Db, project_id: i64, object_key: &str) -> DbResult<()> {
+/// Columns added after the first release. `CREATE TABLE IF NOT EXISTS` never revisits
+/// a table it already found, so a column added to [`SCHEMA`] alone would exist in a
+/// fresh database and nowhere else.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+    // When the digest finished with this envelope. NULL means "never", which is what
+    // the startup sweep looks for: a crash between the bucket write and the index
+    // write leaves the object safe and the row unfinished.
+    ("bugs_envelopes", "digested_at", "TEXT"),
+    // How long a project's log rows stay in the hot window.
+    ("bugs_projects", "retention_days", "INTEGER NOT NULL DEFAULT 30"),
+];
+
+/// Add a column if the table does not have it yet.
+fn add_missing_columns(conn: &Connection) -> DbResult<()> {
+    for (table, column, definition) in ADDED_COLUMNS {
+        let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut present = false;
+        let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for name in names {
+            if name? == *column {
+                present = true;
+            }
+        }
+        drop(statement);
+        if !present {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Record that a raw envelope object landed in the bucket, and hand back the row id.
+/// The digest reads events out of it and stamps `digested_at`; the startup sweep
+/// re-reads whatever never got that stamp.
+pub fn record_envelope(db: &Db, project_id: i64, object_key: &str) -> DbResult<i64> {
     db.with(|conn| {
         conn.execute(
             "INSERT INTO bugs_envelopes (project_id, object_key, received_at)
              VALUES (?1, ?2, ?3)",
             params![project_id, object_key, now()],
         )?;
+        Ok(conn.last_insert_rowid())
+    })
+}
+
+/// The digest is done with this envelope.
+pub fn mark_digested(db: &Db, id: i64) -> DbResult<()> {
+    db.with(|conn| {
+        conn.execute("UPDATE bugs_envelopes SET digested_at = ?2 WHERE id = ?1", params![id, now()])?;
         Ok(())
+    })
+}
+
+/// One stored envelope waiting to be understood.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredEnvelope {
+    pub id: i64,
+    pub project_id: i64,
+    pub object_key: String,
+}
+
+/// Envelopes the digest never finished, oldest first. `all` takes every envelope
+/// instead, which is what rebuilding the index from the bucket needs.
+pub fn undigested(db: &Db, all: bool, limit: i64) -> DbResult<Vec<StoredEnvelope>> {
+    db.with(|conn| {
+        let mut statement = conn.prepare(
+            "SELECT id, project_id, object_key FROM bugs_envelopes
+             WHERE ?1 OR digested_at IS NULL
+             ORDER BY received_at, id LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![all, limit], |row| {
+            Ok(StoredEnvelope { id: row.get(0)?, project_id: row.get(1)?, object_key: row.get(2)? })
+        })?;
+        rows.collect()
     })
 }
 

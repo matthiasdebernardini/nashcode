@@ -776,3 +776,131 @@ The log half of that amendment is slice 2.
   the negative half: `error`, `default`, `log_item`, `monitor` and `session` must
   never appear, and the list must never be empty. An empty category list means
   "everything", which would silence the errors too.
+
+## Error tracking, slice 2: the log store
+
+### The Sentry log item was captured, not guessed
+
+`viewer/tests/fixtures/bugs/sentry-logs.envelope` is a real envelope, taken off
+`sentry-python` 2.68.0 with `enable_logs=True` pointed at a throwaway local listener.
+Two things in it differ from the shape the develop docs describe, and both would have
+been wrong if the fixture had been written by hand:
+
+- The payload is `{"version": 2, "items": [...]}`, not a bare `{"items": [...]}`.
+- **`severity_number` is not a field on the record.** The SDK puts it in the
+  attributes, as `sentry.severity_number`, beside `sentry.severity_text`. The parser
+  reads both places; the documented one is still first.
+
+The fixture is genuine, not edited: the capture ran with `server_name`, `release` and
+`environment` pinned to fixture values, because the default `server_name` is the
+machine's hostname and this repo carries no hostnames.
+
+One thing the goal doc says that the capture disproves: "SDK logger integrations
+attach these by default" is not true of `sentry.logger` in python 2.68 — no `code.*`
+attribute appears. The store reads them when they are there and shows nothing when
+they are not, which is the behaviour either way; the NDJSON door and an OTel-based SDK
+are where they actually come from today.
+
+### Both generations of the OTel code attributes
+
+`code.file.path` / `code.line.number` / `code.function.name` and the pre-2024
+`code.filepath` / `code.lineno` / `code.function` are both read and normalized to one
+column each. This is not politeness: the rename is a year old and SDKs pinned before
+it are still in production, so reading only the new names would show the file for some
+services and nothing for others — a difference nobody would think to look for.
+
+A line number of `0` is stored as NULL. Some loggers use it for "unknown", and
+`#L0` is not a line.
+
+### Retention: 30 days, and only the hot rows
+
+`retention_days` defaults to 30. The number decides what search is fast over, not what
+is kept: the NDJSON batch is already in the bucket and the prune never touches it. A
+month is long enough to answer "what happened last time this broke" and short enough
+that the FTS index stays small on a box with one disk.
+
+The prune runs on a plain 24-hour `tokio::interval`, so it prunes at whatever time the
+viewer last restarted. Aligning it to midnight would be one more thing to be wrong
+about a timezone with.
+
+### The search box is not an FTS5 program
+
+FTS5's MATCH takes a small query language, and a person typing `can't` or `AND` into a
+search box gets a syntax error rather than an answer. Every term is quoted and joined
+with `AND` before it reaches SQLite, so nothing typed can fail the query. The cost is
+that `OR` and `NEAR` are not reachable from the box; the trade is that the box always
+works. `file:` is pulled out first and becomes a `LIKE` on `code_file`, never a search
+term.
+
+### The logs page resolves a path before it links it
+
+SPEC's "Code origin" bullet says an unresolvable path renders as plain text and never
+a dead link. The issue-detail page took that conservatively — relative path, in-app
+frame, declared repo — and did not check the file exists, because that would be a
+mirror read per frame.
+
+The logs page does check, because it can afford to: it lists each *distinct parent
+directory* once at the default tip, exactly the way the blob page decides whether a
+path exists (`ls_tree`, then look for the name, and reject a directory). A hundred rows
+out of three files cost three `git ls-tree` calls. So `src/app.py:41` links when the
+repo really has that file, and stays grey text when it does not — including for a
+`/usr/lib/...` path out of site-packages, a path that has been deleted since, and a
+path that names a directory.
+
+### Both doors, one store
+
+The envelope door goes through the digest (it is inside an envelope that is already in
+the bucket); the NDJSON door writes inline, because there is nothing to group and
+nothing to be single-writer about. Both call `logs::store_batch`, which archives the
+batch to the bucket *before* it inserts the rows — the same ordering the events use,
+for the same reason.
+
+The NDJSON door has two auth sources, not three: there is no envelope header to carry
+a `dsn`, so a key in `X-Sentry-Auth` or `?sentry_key=` is the whole of it. One
+unreadable line is counted into `rejected` and the readable lines beside it still
+land; a shipper tailing a file will send a truncated line eventually, and losing the
+batch over it would be the wrong trade.
+
+### Slice-1 review follow-ups
+
+**Authenticate before decompressing.** The envelope `dsn` header is the first line of
+an uncompressed body, so `ingest::Reader` hands that line back before the rest is
+pulled: a request with no key costs a few hundred bytes instead of 100 MiB. A
+compressed body has no readable first line, so the no-declared-key path gets a small
+budget instead — 64 KiB compressed, 4 MiB expanded. Every SDK that compresses also
+sends a header or query key, both of which are judged before a byte is read and lift
+the caps back to 20 MiB / 100 MiB.
+
+The reader buffers whole transport chunks, so the honest guarantee is "one chunk plus
+the header line", not "exactly the header line". Reading a byte at a time to tighten
+that would cost every honest request to slow one dishonest one.
+
+**A bounded queue.** 1024 envelopes. The slot is reserved *before* the bucket write,
+so a full queue answers 429 with `Retry-After: 5` and stores nothing — a refusal that
+wrote the payload anyway would grow the backlog every time the client retried. Every
+SDK already backs off on a 429.
+
+**`digested_at` and the sweep.** Every `bugs_envelopes` row is stamped when the digest
+finishes with it, whatever the outcome: a body that fails to split will fail the same
+way forever, and a sweep that re-queued it would never reach the rest. `Bugs::sweep`
+re-reads the unstamped rows from the bucket at startup, capped at 10 000. `sweep(true)`
+takes every envelope instead — that is the primitive `nashcode bugs reindex` needs.
+
+**`nashcode bugs reindex` is not built.** The viewer half is (`sweep(true)`), but the
+command lives in `cli/`, which two other sessions hold. Left for a later slice.
+
+**One `exception` helper.** `group::last_exception` accepts `{"values": [...]}` and
+the bare array, and the detail page now calls it instead of reading `values` itself.
+An event in the bare form used to group correctly and then render with no exception.
+
+**One bad item no longer drops the rest.** A failed bucket write is logged, counted
+into `Outcome.failed`, and the loop goes on.
+
+### A test seam that was not added
+
+`Bugs::store` — the durable half of `accept`, with nothing queued — is public because
+the sweep test needs to reproduce a crash between the two writes, and because a
+backlog importer would want exactly it. Filling the digest queue *is* test-only, so it
+is a unit test inside `bugs/mod.rs` (holding reserved permits, which needs private
+access) rather than a public `fill_queue_for_test`. The 429 the route builds from that
+decision is asserted separately, in `web/bugs.rs`'s own test.

@@ -15,6 +15,7 @@ pub mod envelope;
 pub mod group;
 pub mod index;
 pub mod ingest;
+pub mod logs;
 pub mod store;
 
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,7 @@ use crate::config::Config;
 use crate::db::{Db, DbResult};
 
 pub use index::{EventRow, Issue, Landing, Project, ProjectSummary, state};
+pub use logs::{LogRow, Query as LogQuery, Record as LogRecord};
 
 /// The error-tracking feature: the bucket, the index, and the digest queue.
 ///
@@ -36,17 +38,48 @@ pub struct Bugs {
     inner: Arc<Inner>,
 }
 
+/// How many accepted envelopes may be waiting for the digest at once.
+///
+/// The queue used to be unbounded, which turns a burst into two copies of itself in
+/// memory — one in the bucket write, one waiting here — and hides the backlog until
+/// the box swaps. Bounded, a full queue is a fact the client is told: 429, which is
+/// the one answer every SDK already knows how to obey.
+pub const QUEUE_DEPTH: usize = 1024;
+
+/// How many unfinished envelopes one sweep picks up. A backlog larger than this is
+/// not a crash, it is a broken bucket, and re-reading a million objects at startup
+/// would keep the viewer from answering anything at all.
+pub const SWEEP_LIMIT: i64 = 10_000;
+
 struct Inner {
     db: Db,
     store: Option<Arc<dyn ObjectStore>>,
     /// The origin that goes into a DSN.
     ingest_url: String,
-    jobs: mpsc::UnboundedSender<digest::Job>,
+    jobs: mpsc::Sender<digest::Job>,
     /// The digest task's receiver, until the task takes it. The worker starts on the
     /// first envelope rather than at construction, because construction happens
     /// outside the async runtime in both `main` and the tests.
-    pending: Mutex<Option<mpsc::UnboundedReceiver<digest::Job>>>,
+    pending: Mutex<Option<mpsc::Receiver<digest::Job>>>,
     digested: Arc<watch::Sender<u64>>,
+}
+
+/// Why an envelope was not accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptError {
+    /// The digest queue is full. The client is asked to come back.
+    Busy,
+    /// The bucket refused the write, so there is nowhere durable to put the payload.
+    Store(String),
+}
+
+impl std::fmt::Display for AcceptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => f.write_str("the digest queue is full"),
+            Self::Store(detail) => f.write_str(detail),
+        }
+    }
 }
 
 impl std::fmt::Debug for Bugs {
@@ -61,6 +94,7 @@ impl Bugs {
     /// twenty jobs are not worth failing to start over.
     pub fn new(config: &Config, db: Db) -> DbResult<Self> {
         index::migrate(&db)?;
+        logs::migrate(&db)?;
         let store = match &config.bugs_bucket {
             None => None,
             Some(bucket) => match store::open(bucket, config.bugs_s3_endpoint.as_deref()) {
@@ -71,7 +105,7 @@ impl Bugs {
                 }
             },
         };
-        let (jobs, pending) = mpsc::unbounded_channel();
+        let (jobs, pending) = mpsc::channel(QUEUE_DEPTH);
         Ok(Self {
             inner: Arc::new(Inner {
                 db,
@@ -173,25 +207,130 @@ impl Bugs {
 
     /// Put the raw envelope in the bucket and queue it for digest. The bucket write
     /// is the durable step; everything after it can be redone from the object.
-    pub async fn accept(&self, project_id: i64, body: Vec<u8>) -> Result<(), String> {
-        let store = self.inner.store.as_ref().ok_or("error tracking is off")?;
+    ///
+    /// The queue slot is taken *first*. A full queue means the box is behind, and
+    /// answering 429 before writing anything keeps the bucket free of objects nobody
+    /// asked for; the SDK retries, which is what it does with a 429 anyway.
+    pub async fn accept(&self, project_id: i64, body: Vec<u8>) -> Result<(), AcceptError> {
+        self.start_digest();
+        let Ok(permit) = self.inner.jobs.try_reserve() else {
+            return Err(AcceptError::Busy);
+        };
+        let (envelope_id, body) = self.store(project_id, body).await?;
+        permit.send(digest::Job { project_id, envelope_id, body });
+        Ok(())
+    }
+
+    /// The durable half of [`Self::accept`] on its own: the object goes to the bucket
+    /// and the row is recorded, with nothing queued.
+    ///
+    /// A live request always wants `accept`. This is for the paths that mean to leave
+    /// the digest to the sweep — an imported backlog, and the crash a sweep exists to
+    /// repair. Hands back the row id (`None` if only the row failed) and the body.
+    pub async fn store(
+        &self,
+        project_id: i64,
+        body: Vec<u8>,
+    ) -> Result<(Option<i64>, Vec<u8>), AcceptError> {
+        let store = self
+            .inner
+            .store
+            .as_ref()
+            .ok_or_else(|| AcceptError::Store("error tracking is off".to_owned()))?;
         let key = store::envelope_key(project_id, &crate::db::now(), &mint_key());
         store
             .put(&key, body.clone().into())
             .await
-            .map_err(|error| format!("cannot write {key}: {error}"))?;
-        if let Err(error) = index::record_envelope(self.db(), project_id, key.as_ref()) {
-            // The object is safe; only the reindex shortcut is lost.
-            tracing::warn!(%error, "bugs: cannot record the envelope object");
+            .map_err(|error| AcceptError::Store(format!("cannot write {key}: {error}")))?;
+        match index::record_envelope(self.db(), project_id, key.as_ref()) {
+            Ok(id) => Ok((Some(id), body)),
+            Err(error) => {
+                // The object is safe; only the sweep's handle on it is lost.
+                tracing::warn!(%error, "bugs: cannot record the envelope object");
+                Ok((None, body))
+            }
         }
-        self.enqueue(digest::Job { project_id, body });
-        Ok(())
     }
 
-    fn enqueue(&self, job: digest::Job) {
+    /// Re-digest every envelope the digest never finished.
+    ///
+    /// A crash between the bucket write and the index write leaves the object in the
+    /// bucket and the row without a `digested_at`; nothing else would ever look at it
+    /// again. Run at startup. `all` re-reads every envelope instead, which is what
+    /// rebuilding the index from the bucket would need.
+    pub async fn sweep(&self, all: bool) -> usize {
+        let Some(store) = self.inner.store.clone() else { return 0 };
+        let pending = match index::undigested(self.db(), all, SWEEP_LIMIT) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "bugs: cannot list the undigested envelopes");
+                return 0;
+            }
+        };
+        if pending.is_empty() {
+            return 0;
+        }
         self.start_digest();
-        // The only receiver is the digest task, which lives as long as this handle.
-        let _ = self.inner.jobs.send(job);
+
+        let mut queued = 0;
+        for row in pending {
+            let path = object_store::path::Path::from(row.object_key.as_str());
+            let body = match store.get(&path).await {
+                Ok(got) => match got.bytes().await {
+                    Ok(bytes) => bytes.to_vec(),
+                    Err(error) => {
+                        tracing::warn!(%error, key = row.object_key, "bugs: cannot read an envelope object");
+                        continue;
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(%error, key = row.object_key, "bugs: cannot read an envelope object");
+                    continue;
+                }
+            };
+            // `send`, not `try_send`: the worker is draining alongside this loop, so
+            // waiting for a slot is the point rather than a failure.
+            if self
+                .inner
+                .jobs
+                .send(digest::Job { project_id: row.project_id, envelope_id: Some(row.id), body })
+                .await
+                .is_err()
+            {
+                break;
+            }
+            queued += 1;
+        }
+        tracing::info!(queued, "bugs: re-queued envelopes the digest never finished");
+        queued
+    }
+
+    // ---- logs --------------------------------------------------------------------
+
+    /// Archive a batch of log lines and index them. The NDJSON door calls this
+    /// directly; the envelope door reaches it through the digest.
+    pub async fn accept_logs(
+        &self,
+        project_id: i64,
+        records: &[logs::Record],
+        from: &str,
+    ) -> Result<usize, String> {
+        let store = self.inner.store.as_ref().ok_or("error tracking is off")?;
+        logs::store_batch(self.db(), store, project_id, records, from).await
+    }
+
+    pub fn logs(&self, project_id: i64, query: &logs::Query) -> DbResult<Vec<logs::LogRow>> {
+        logs::search(self.db(), project_id, query)
+    }
+
+    pub fn log_count(&self, project_id: i64) -> DbResult<i64> {
+        logs::count(self.db(), project_id)
+    }
+
+    /// Drop hot rows past each project's `retention_days`. The nightly job; the
+    /// bucket archive is untouched.
+    pub fn prune_logs(&self) -> DbResult<usize> {
+        logs::prune(self.db())
     }
 
     /// Start the digest task, once.
@@ -282,6 +421,31 @@ mod tests {
             bugs.dsn(&project),
             format!("https://{}@bugs.example.invalid/{}", project.key, project.id)
         );
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_refuses_the_envelope_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = dir.path().join("bucket");
+        let url = format!("file://{}", bucket.display());
+        let bugs = Bugs::new(&config(Some(&url)), Db::in_memory().unwrap()).unwrap();
+        let project = bugs.create_project("demo", None).unwrap();
+
+        // Hold every slot. Reserved permits are exactly what a backlog looks like to
+        // the sender, and holding them keeps the worker from draining behind us.
+        let held: Vec<_> =
+            std::iter::from_fn(|| bugs.inner.jobs.try_reserve().ok()).collect();
+        assert_eq!(held.len(), QUEUE_DEPTH);
+
+        let body = b"{}\n{\"type\":\"event\"}\n{\"event_id\":\"a\"}\n".to_vec();
+        assert_eq!(bugs.accept(project.id, body.clone()).await, Err(AcceptError::Busy));
+        // Nothing was stored: a refusal that wrote the payload anyway would grow the
+        // backlog every time the client retried.
+        assert!(!bucket.join("projects").exists(), "the refused envelope is not in the bucket");
+
+        // Give one slot back and the same envelope is taken.
+        drop(held);
+        assert_eq!(bugs.accept(project.id, body).await, Ok(()));
     }
 
     #[test]

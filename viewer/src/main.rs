@@ -148,6 +148,33 @@ async fn serve() {
         }
     };
 
+    // Anything the digest never finished — a crash between the bucket write and the
+    // index write — is picked up here rather than sitting in the bucket forever.
+    {
+        let bugs = bugs.clone();
+        tokio::spawn(async move {
+            bugs.sweep(false).await;
+        });
+    }
+
+    // The nightly log prune. A day is the interval, not the alignment: a viewer that
+    // restarts at noon prunes at noon, which is a property nobody has to think about.
+    // Only hot rows go; the NDJSON archive in the bucket stays.
+    if bugs.enabled() {
+        let bugs = bugs.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            loop {
+                every.tick().await;
+                match bugs.prune_logs() {
+                    Ok(0) => {}
+                    Ok(deleted) => tracing::info!(deleted, "bugs: pruned log rows past retention"),
+                    Err(error) => tracing::warn!(%error, "bugs: cannot prune the log window"),
+                }
+            }
+        });
+    }
+
     let app = web::App {
         ops: Ops {
             config: config.clone(),

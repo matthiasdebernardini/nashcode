@@ -13,6 +13,7 @@ payloads is edited.
 | `unknown-item.envelope` | the same, behind a `profile_chunk` and a `client_report` item | Bugsink, MIT |
 | `log-message.envelope` | `bugsink/111.json` | Bugsink, MIT |
 | `custom-fingerprint.envelope` | `sentry/custom-fingerprint.json` | Sentry, Apache-2.0 |
+| `sentry-logs.envelope` | captured here from `sentry-python` 2.68.0 | none — machine-generated |
 
 The `profile_chunk` and `client_report` item payloads in `unknown-item.envelope` are
 written here, not vendored.
@@ -27,6 +28,18 @@ Why each one is in the suite:
 - **log-message** — an event with a `logentry` and no exception at all.
 - **custom-fingerprint** — an explicit SDK `fingerprint`, and a numeric `timestamp`
   rather than an RFC 3339 string. Both forms are legal and both have to parse.
+- **sentry-logs** — a `log` container item, the first log door. Not vendored and not
+  hand-written: `sentry-python` 2.68.0 with `enable_logs=True` was pointed at a
+  throwaway local listener and the bytes it sent were kept. That is the point of it.
+  Two things in a real SDK's log envelope differ from the shape the protocol document
+  describes, and a hand-written fixture would have got both wrong: the payload is
+  `{"version": 2, "items": [...]}`, and `severity_number` is not a field on the record
+  but an attribute, `sentry.severity_number`.
+
+  The capture ran with `server_name`, `release` and `environment` pinned to fixture
+  values, because the SDK's default `server_name` is the machine's hostname and this
+  repo carries no hostnames. Nothing else is edited. It is generated output, so there
+  is nothing to license.
 
 [samples]: https://github.com/bugsink/event-samples
 

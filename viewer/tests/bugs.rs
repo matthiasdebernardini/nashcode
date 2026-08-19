@@ -347,6 +347,111 @@ async fn a_wrong_key_is_403_and_an_unknown_project_is_404() {
     assert_eq!(answer.status, 200, "{}", answer.body);
 }
 
+#[tokio::test]
+async fn an_unauthenticated_body_is_refused_before_it_is_read_or_expanded() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+
+    // No header, no query: the only key left is the envelope's own `dsn`, which is
+    // the first line. A body of 25 MiB — past the 20 MiB compressed cap — with no
+    // `dsn` there must come back 403, not 413: a 413 would mean the cap was reached,
+    // which would mean the whole body had been pulled before anyone checked it.
+    let mut huge = Vec::from(&b"{\"event_id\":\"aaaa\"}\n"[..]);
+    huge.extend(std::iter::repeat_n(b'x', 25 * 1024 * 1024));
+    let answer =
+        send(&bed.router, Method::POST, &format!("/api/{id}/envelope/"), &[], huge).await;
+    assert_eq!(answer.status, 403, "auth comes before the size cap");
+    assert_eq!(answer.header("x-sentry-error"), Some("no sentry_key"));
+
+    // A compressed body cannot be read without expanding it, so that door is narrow:
+    // 64 KiB compressed. This one is small compressed and enormous expanded — the
+    // classic bomb — and it is refused on the compressed cap, so it is never expanded.
+    let mut encoder =
+        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, &vec![b'x'; 200 * 1024 * 1024]).expect("gzip");
+    let bomb = encoder.finish().expect("gzip");
+    assert!(bomb.len() > 64 * 1024, "the point is that it is over the unauthed cap");
+    let answer = send(
+        &bed.router,
+        Method::POST,
+        &format!("/api/{id}/envelope/"),
+        &[("content-encoding", "gzip")],
+        bomb.clone(),
+    )
+    .await;
+    assert_eq!(answer.status, 413, "an unauthenticated compressed body gets a small budget");
+
+    // With a key in the header the same body is judged on the real caps instead, and
+    // this one is a bomb, so it stops at the decompressed cap rather than the small one.
+    let auth = format!("Sentry sentry_version=7, sentry_key={key}");
+    let answer = send(
+        &bed.router,
+        Method::POST,
+        &format!("/api/{id}/envelope/"),
+        &[("x-sentry-auth", auth.as_str()), ("content-encoding", "gzip")],
+        bomb,
+    )
+    .await;
+    assert_eq!(answer.status, 413);
+    assert_eq!(answer.header("x-sentry-error"), Some("the decompressed body"));
+
+    // And a small compressed envelope authenticated only by its own `dsn` still works.
+    let event = serde_json::json!({
+        "event_id": "e".repeat(32),
+        "platform": "python",
+        "exception": {"values": [{"type": "E", "value": "v"}]},
+    });
+    let plain = format!(
+        "{{\"event_id\":\"{}\",\"dsn\":\"https://{key}@bugs.example.invalid/{id}\"}}\n\
+         {{\"type\":\"event\"}}\n{event}\n",
+        "e".repeat(32),
+    );
+    let mut encoder =
+        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, plain.as_bytes()).expect("gzip");
+    let answer = send(
+        &bed.router,
+        Method::POST,
+        &format!("/api/{id}/envelope/"),
+        &[("content-encoding", "gzip")],
+        encoder.finish().expect("gzip"),
+    )
+    .await;
+    assert_eq!(answer.status, 200, "{}", answer.body);
+}
+
+#[tokio::test]
+async fn the_startup_sweep_re_digests_an_envelope_the_digest_never_finished() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, _key) = project(&bed, "api").await;
+
+    // What a kill -9 between the two writes leaves behind: the object is in the
+    // bucket, the row is recorded, and `digested_at` was never stamped. Without the
+    // sweep nothing would ever look at it again.
+    bed.bugs.store(id, fixture("python-exception.envelope")).await.expect("stored");
+    let issues = get(&bed, "/bugs/api", &[JSON]).await.json();
+    assert!(issues["issues"].as_array().expect("issues").is_empty(), "nothing digested yet");
+
+    // What `main` does on the way up.
+    assert_eq!(bed.bugs.sweep(false).await, 1);
+    bed.bugs.digested(1).await;
+
+    let issues = get(&bed, "/bugs/api", &[JSON]).await.json();
+    let issues = issues["issues"].as_array().expect("issues");
+    assert_eq!(issues.len(), 1, "the sweep re-read the object and indexed it");
+    assert!(issues[0]["title"].as_str().expect("a title").starts_with("RuntimeError:"));
+
+    // A second sweep has nothing left to do: the row is stamped now.
+    assert_eq!(bed.bugs.sweep(false).await, 0);
+
+    // `all` takes every envelope, stamped or not — the primitive a reindex needs.
+    // Re-digesting the same event twice is one occurrence, not two.
+    assert_eq!(bed.bugs.sweep(true).await, 1);
+    bed.bugs.digested(2).await;
+    let issues = get(&bed, "/bugs/api", &[JSON]).await.json();
+    assert_eq!(issues["issues"][0]["events"], 1);
+}
+
 // ---- fact 7: browser CORS ---------------------------------------------------------
 
 #[tokio::test]

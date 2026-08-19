@@ -17,13 +17,16 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
-use crate::bugs::{envelope, group, index, store};
+use crate::bugs::{envelope, group, index, logs, store};
 use crate::db::Db;
 
 /// One accepted envelope, waiting to be understood.
 #[derive(Debug)]
 pub struct Job {
     pub project_id: i64,
+    /// The `bugs_envelopes` row this body came from, stamped `digested_at` when the
+    /// job finishes. `None` only when recording the row itself failed.
+    pub envelope_id: Option<i64>,
     /// The envelope exactly as it arrived, decompressed.
     pub body: Vec<u8>,
 }
@@ -32,6 +35,8 @@ pub struct Job {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub events: usize,
+    /// Log lines lifted out of `log` container items.
+    pub logs: usize,
     /// Items whose type this build does not handle. Counted, never an error.
     pub skipped: usize,
     /// Items that failed on the way to the bucket or the index. Counted so the item
@@ -48,13 +53,23 @@ pub struct Worker {
 
 impl Worker {
     /// Drain the queue until every sender is gone.
-    pub async fn run(self, mut jobs: mpsc::UnboundedReceiver<Job>) {
+    pub async fn run(self, mut jobs: mpsc::Receiver<Job>) {
         while let Some(job) = jobs.recv().await {
             let project_id = job.project_id;
-            match self.digest(&job).await {
+            let digested = self.digest(&job).await;
+            // Stamped whatever happened. A digest that failed on the envelope itself
+            // will fail the same way on every retry, and a sweep that re-queued it
+            // forever would never get to the rest.
+            if let Some(id) = job.envelope_id
+                && let Err(error) = index::mark_digested(&self.db, id)
+            {
+                tracing::warn!(%error, "bugs: cannot stamp an envelope as digested");
+            }
+            match digested {
                 Ok(outcome) => tracing::debug!(
                     project_id,
                     events = outcome.events,
+                    logs = outcome.logs,
                     skipped = outcome.skipped,
                     failed = outcome.failed,
                     "digested"
@@ -72,9 +87,34 @@ impl Worker {
         let mut outcome = Outcome::default();
 
         for item in &split.items {
+            // Door one for logs: a `log` container item, which every current SDK
+            // sends through the same endpoint as its errors.
+            if item.ty == "log" {
+                let records = logs::parse_envelope_item(item.payload);
+                if records.is_empty() {
+                    outcome.skipped += 1;
+                    continue;
+                }
+                match logs::store_batch(
+                    &self.db,
+                    &self.store,
+                    job.project_id,
+                    &records,
+                    logs::source::ENVELOPE,
+                )
+                .await
+                {
+                    Ok(count) => outcome.logs += count,
+                    Err(error) => {
+                        outcome.failed += 1;
+                        tracing::warn!(project_id = job.project_id, %error, "cannot store a log batch");
+                    }
+                }
+                continue;
+            }
             if item.ty != "event" {
-                // `log`, `check_in`, `client_report` and the rest land in slice 2.
-                // Everything else is counted and dropped, which the protocol requires.
+                // `check_in` and `client_report` land in slice 3. Everything else is
+                // counted and dropped, which the protocol requires.
                 outcome.skipped += 1;
                 continue;
             }

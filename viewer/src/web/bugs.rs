@@ -21,7 +21,7 @@ use topcoat::router::{
 };
 use topcoat::view::{component, view};
 
-use crate::bugs::{Issue, Project, envelope, group, ingest, state};
+use crate::bugs::{Issue, Project, envelope, group, ingest, logs, state};
 use crate::web::components::shell;
 use crate::web::{actor, app, see_other};
 
@@ -41,11 +41,18 @@ path_param!(*rest);
 /// is what we want to say about them anyway.
 pub const INGEST_PATH: &str = "/api/{project_id}/{*rest}";
 pub const INGEST_PATH_BARE: &str = "/api/{project_id}/envelope";
+pub const INGEST_PATH_LOGS: &str = "/api/{project_id}/logs";
 
-/// The one path suffix the catch-all serves, with and without its trailing slash.
-fn is_envelope_path(cx: &Cx) -> bool {
+/// The two path suffixes the catch-all serves, each with and without its trailing
+/// slash. Anything else under `/api/{id}/` is a Sentry endpoint we do not implement,
+/// and 404 is what we mean to say about it.
+fn rest_is(cx: &Cx, wanted: &str) -> bool {
     let mut segments = path_param::<Rest>(cx).filter(|segment| !segment.is_empty());
-    segments.next() == Some("envelope") && segments.next().is_none()
+    segments.next() == Some(wanted) && segments.next().is_none()
+}
+
+fn is_envelope_path(cx: &Cx) -> bool {
+    rest_is(cx, "envelope")
 }
 
 /// Relay's CORS allow list, verbatim. The browser SDK sends no custom headers by
@@ -70,7 +77,7 @@ const RATE_LIMITS: &str = "86400:transaction;span;profile;profile_chunk;replay;t
 /// `OPTIONS /api/{project_id}/envelope/` — the browser preflight.
 #[route(OPTIONS "/api/{project_id}/{*rest}")]
 async fn preflight(cx: &Cx) -> Result<Response> {
-    if !is_envelope_path(cx) {
+    if !is_envelope_path(cx) && !rest_is(cx, "logs") {
         return Err(not_found().into());
     }
     preflight_answer(cx)
@@ -98,6 +105,9 @@ fn preflight_answer(cx: &Cx) -> Result<Response> {
 /// `POST /api/{project_id}/envelope/` — the one ingest route.
 #[route(POST "/api/{project_id}/{*rest}")]
 async fn ingest_envelope(cx: &Cx, body: Body) -> Result<Response> {
+    if rest_is(cx, "logs") {
+        return accept_logs(cx, body).await;
+    }
     if !is_envelope_path(cx) {
         return Err(not_found().into());
     }
@@ -107,6 +117,70 @@ async fn ingest_envelope(cx: &Cx, body: Body) -> Result<Response> {
 #[route(POST "/api/{project_id}/envelope")]
 async fn ingest_bare(cx: &Cx, body: Body) -> Result<Response> {
     accept_envelope(cx, body).await
+}
+
+/// `POST /api/{project_id}/logs` — the second log door, for everything that is not a
+/// Sentry SDK.
+#[route(POST "/api/{project_id}/logs")]
+async fn ingest_logs_bare(cx: &Cx, body: Body) -> Result<Response> {
+    accept_logs(cx, body).await
+}
+
+/// NDJSON in, one JSON object per line. Authenticated by the same DSN key as the
+/// envelope route and held to the same caps.
+///
+/// There is no envelope header here, so the third auth door — the `dsn` inside the
+/// body — does not exist: a key in `X-Sentry-Auth` or `?sentry_key=` is the whole of
+/// it. That is also why the body is never read before the key is judged.
+async fn accept_logs(cx: &Cx, body: Body) -> Result<Response> {
+    let bugs = &app(cx).bugs;
+    if !bugs.enabled() {
+        return Err(not_found().into());
+    }
+    let id = *path_param::<ProjectId>(cx)?;
+    let Some(project) = bugs.project_by_id(id)? else {
+        return Ok(sentry_error(StatusCode::NOT_FOUND, "unknown project"));
+    };
+    match header_key(cx).or_else(|| query_key(cx)) {
+        Some(key) if key == project.key => {}
+        Some(_) => return Ok(sentry_error(StatusCode::FORBIDDEN, "wrong key for this project")),
+        None => return Ok(sentry_error(StatusCode::FORBIDDEN, "no sentry_key")),
+    }
+
+    let raw = match ingest::read_capped(body, ingest::MAX_COMPRESSED).await {
+        Ok(raw) => raw,
+        Err(ingest::IngestError::TooLarge(what)) => {
+            return Ok(sentry_error(StatusCode::PAYLOAD_TOO_LARGE, what));
+        }
+        Err(error) => return Ok(sentry_error(StatusCode::BAD_REQUEST, &error.to_string())),
+    };
+    let encoding = request::headers(cx)
+        .get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let body = match ingest::decompress(encoding.as_deref(), raw) {
+        Ok(body) => body,
+        Err(ingest::IngestError::TooLarge(what)) => {
+            return Ok(sentry_error(StatusCode::PAYLOAD_TOO_LARGE, what));
+        }
+        Err(error) => return Ok(sentry_error(StatusCode::BAD_REQUEST, &error.to_string())),
+    };
+
+    // One bad line is one bad line. A shipper that tails a file will send a truncated
+    // one eventually, and refusing the batch over it would lose the good lines too.
+    let parsed = logs::parse_ndjson(&body, envelope::MAX_ITEM);
+    let accepted = match bugs.accept_logs(project.id, &parsed.records, logs::source::NDJSON).await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::error!(%error, project = project.name, "bugs: cannot store a log batch");
+            return Ok(sentry_error(StatusCode::BAD_GATEWAY, "cannot store the logs"));
+        }
+    };
+
+    let payload = serde_json::json!({ "accepted": accepted, "rejected": parsed.rejected });
+    let mut response = json_response(StatusCode::OK, payload.to_string());
+    cors(&mut response);
+    Ok(response)
 }
 
 async fn accept_envelope(cx: &Cx, body: Body) -> Result<Response> {
@@ -129,18 +203,53 @@ async fn accept_envelope(cx: &Cx, body: Body) -> Result<Response> {
         return Ok(sentry_error(StatusCode::FORBIDDEN, "wrong key for this project"));
     }
 
-    let raw = match ingest::read_capped(body, ingest::MAX_COMPRESSED).await {
+    let encoding = request::headers(cx)
+        .get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let compressed = !matches!(
+        encoding.as_deref().unwrap_or("").trim().to_ascii_lowercase().as_str(),
+        "" | "identity"
+    );
+    let mut reader = ingest::Reader::new(body);
+
+    // The third auth source is the `dsn` header inside the envelope, which is how
+    // Relay >= 21.6 lets a client authenticate with no header and no query string.
+    // In an uncompressed body that is the first line, so it can be read and judged
+    // before the other 20 MiB are pulled. In a compressed one it cannot be read at
+    // all without expanding the body, so that path gets a small budget instead.
+    let mut authed = declared.is_some();
+    if !authed && !compressed {
+        let line = match reader.header_line().await {
+            Ok(line) => line,
+            Err(ingest::IngestError::NoHeaderLine) => {
+                return Ok(sentry_error(StatusCode::FORBIDDEN, "no sentry_key"));
+            }
+            Err(error) => return Ok(sentry_error(StatusCode::BAD_REQUEST, &error.to_string())),
+        };
+        match envelope_dsn_key(line) {
+            Some(key) if key == project.key => authed = true,
+            Some(_) => {
+                return Ok(sentry_error(StatusCode::FORBIDDEN, "wrong key for this project"));
+            }
+            None => return Ok(sentry_error(StatusCode::FORBIDDEN, "no sentry_key")),
+        }
+    }
+
+    let (compressed_cap, decompressed_cap) = if authed {
+        (ingest::MAX_COMPRESSED, ingest::MAX_DECOMPRESSED)
+    } else {
+        (ingest::MAX_UNAUTHED_COMPRESSED, ingest::MAX_UNAUTHED_DECOMPRESSED)
+    };
+
+    let raw = match reader.read_to_end(compressed_cap).await {
         Ok(raw) => raw,
         Err(ingest::IngestError::TooLarge(what)) => {
             return Ok(sentry_error(StatusCode::PAYLOAD_TOO_LARGE, what));
         }
         Err(error) => return Ok(sentry_error(StatusCode::BAD_REQUEST, &error.to_string())),
     };
-    let encoding = request::headers(cx)
-        .get(header::CONTENT_ENCODING)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let body = match ingest::decompress(encoding.as_deref(), raw) {
+    let body = match ingest::decompress_capped(encoding.as_deref(), raw, decompressed_cap) {
         Ok(body) => body,
         Err(ingest::IngestError::TooLarge(what)) => {
             return Ok(sentry_error(StatusCode::PAYLOAD_TOO_LARGE, what));
@@ -159,9 +268,8 @@ async fn accept_envelope(cx: &Cx, body: Body) -> Result<Response> {
         Err(error) => return Ok(sentry_error(StatusCode::BAD_REQUEST, &error.to_string())),
     };
 
-    // Last auth source: the DSN in the envelope's own header, which is how Relay
-    // >= 21.6 lets a client authenticate with no header and no query string.
-    if declared.is_none() {
+    // The compressed half of the envelope-`dsn` door, now that the body is readable.
+    if !authed {
         let key = split.dsn().and_then(|dsn| {
             dsn.parse::<sentry_types::Dsn>().ok().map(|dsn| dsn.public_key().to_owned())
         });
@@ -181,9 +289,13 @@ async fn accept_envelope(cx: &Cx, body: Body) -> Result<Response> {
     let event_id = split.event_id().unwrap_or_else(crate::bugs::digest::new_event_id);
 
     // Durable first, understood later: the bytes are in the bucket before we answer.
-    if let Err(error) = bugs.accept(project.id, body).await {
-        tracing::error!(%error, project = project.name, "bugs: cannot store an envelope");
-        return Ok(sentry_error(StatusCode::BAD_GATEWAY, "cannot store the envelope"));
+    match bugs.accept(project.id, body).await {
+        Ok(()) => {}
+        Err(crate::bugs::AcceptError::Busy) => return Ok(busy()),
+        Err(error) => {
+            tracing::error!(%error, project = project.name, "bugs: cannot store an envelope");
+            return Ok(sentry_error(StatusCode::BAD_GATEWAY, "cannot store the envelope"));
+        }
     }
 
     let payload = serde_json::json!({ "id": event_id });
@@ -193,6 +305,21 @@ async fn accept_envelope(cx: &Cx, body: Body) -> Result<Response> {
         .insert("x-sentry-rate-limits", HeaderValue::from_static(RATE_LIMITS));
     cors(&mut response);
     Ok(response)
+}
+
+/// The digest queue is full: behind, not broken. An SDK reads `Retry-After` and backs
+/// off on its own, which is the whole reason the queue is bounded.
+fn busy() -> Response {
+    let mut response = sentry_error(StatusCode::TOO_MANY_REQUESTS, "the digest queue is full");
+    response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+    response
+}
+
+/// The public key of the `dsn` in one envelope header line.
+fn envelope_dsn_key(line: &[u8]) -> Option<String> {
+    let headers: serde_json::Value = serde_json::from_slice(line).ok()?;
+    let dsn = headers.get("dsn")?.as_str()?;
+    dsn.parse::<sentry_types::Dsn>().ok().map(|dsn| dsn.public_key().to_owned())
 }
 
 /// `X-Sentry-Auth: Sentry sentry_key=..., sentry_version=7, ...`
@@ -384,7 +511,8 @@ async fn project_page(cx: &Cx) -> Result<Response> {
         shell(title: format!("{name} · bugs"),
             <div class="d-flex flex-items-center gap-2 mb-2">
                 <h3><i class="ph ph-bug"></i>" "(name.clone())</h3>
-                <a class="ml-auto Link--primary text-small" href="/bugs">"All projects"</a>
+                <a class="ml-auto Link--primary text-small" href=(format!("/bugs/{name}/logs"))>"Logs"</a>
+                <a class="Link--primary text-small" href="/bugs">"All projects"</a>
             </div>
             dsn_card(dsn: dsn, project: project.clone())
             <div class="d-flex gap-2 mb-2">
@@ -606,11 +734,7 @@ impl Frame {
         }
         let repo = repo?;
         let path = self.path.as_deref()?;
-        if path.is_empty()
-            || path.starts_with('/')
-            || path.starts_with('.')
-            || path.split('/').any(|segment| segment == ".." || segment.is_empty())
-        {
+        if !linkable(path) {
             return None;
         }
         Some(match self.line {
@@ -718,4 +842,242 @@ async fn set_state(cx: &Cx, body: request::Bytes) -> Result<Response> {
         return see_other(&format!("/bugs/{name}/issues/{}", issue.id));
     }
     Ok(json_response(StatusCode::OK, serde_json::to_string(&issue)?))
+}
+
+// ---- logs page ---------------------------------------------------------------------
+
+/// How many log rows one page shows.
+const LOGS_PER_PAGE: i64 = 100;
+
+#[query_params(error = bad_request)]
+struct LogsQuery {
+    /// The search box, verbatim: free text plus any `file:` token.
+    q: Option<String>,
+    /// One severity band. Absent means all of them.
+    level: Option<String>,
+    /// Zero-based page, newest first.
+    page: Option<i64>,
+}
+
+/// `GET /bugs/{project}/logs` — search the hot window.
+#[route(GET "/bugs/{project_name}/logs")]
+async fn logs_page(cx: &Cx) -> Result<Response> {
+    on(cx)?;
+    let name = path_param::<ProjectName>(cx).to_owned();
+    let Some(project) = app(cx).bugs.project(&name)? else {
+        return Err(not_found().into());
+    };
+    let params = query_params::<LogsQuery>(cx)?;
+    let level = match params.level.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if !logs::SEVERITIES.iter().any(|(name, _)| *name == value) => {
+            return Err(bad_request("level is trace, debug, info, warn, error or fatal").into());
+        }
+        other => other.map(str::to_owned),
+    };
+    let raw = params.q.clone().unwrap_or_default();
+    let (text, file) = logs::parse_search(&raw);
+    let page = params.page.unwrap_or(0).max(0);
+
+    let query = logs::Query {
+        text,
+        level: level.clone(),
+        file,
+        limit: LOGS_PER_PAGE,
+        offset: page * LOGS_PER_PAGE,
+    };
+    // One row over the page tells us whether there is another page without counting
+    // the table, which on a hot window of millions is the difference that matters.
+    let mut rows = app(cx).bugs.logs(project.id, &query)?;
+    let more = rows.len() as i64 > LOGS_PER_PAGE;
+    rows.truncate(LOGS_PER_PAGE as usize);
+
+    let origins = code_links(cx, &project, &rows).await;
+
+    if wants_json(cx) {
+        let body = serde_json::json!({
+            "project": project,
+            "logs": rows,
+            "query": { "q": raw, "level": level, "page": page },
+            "more": more,
+        });
+        return Ok(json_response(StatusCode::OK, body.to_string()));
+    }
+
+    // Pair each row with its link before the view, so the markup only reads.
+    let rendered: Vec<(crate::bugs::LogRow, Option<String>)> =
+        rows.into_iter().map(|row| { let link = origins.get(&row.id).cloned(); (row, link) }).collect();
+
+    let page_view = view! { cx =>
+        shell(title: format!("{name} · logs"),
+            <div class="d-flex flex-items-center gap-2 mb-2">
+                <a class="Link--primary text-small" href=(format!("/bugs/{name}"))>(name.clone())</a>
+                <span class="color-fg-muted">"/"</span>
+                <h3 class="mb-0"><i class="ph ph-list-magnifying-glass"></i>" Logs"</h3>
+                <a class="ml-auto Link--primary text-small" href="/bugs">"All projects"</a>
+            </div>
+            <form method="get" class="d-flex gap-2 flex-items-center mb-2">
+                <input class="form-control flex-auto" type="search" name="q" value=(raw.clone())
+                       placeholder="search the message, or file:path/to/thing.rs">
+                <select class="form-select" name="level">
+                    <option value="" selected=(level.is_none())>"any level"</option>
+                    for (band, _) in logs::SEVERITIES {
+                        <option key=(band) value=(band) selected=(level.as_deref() == Some(band))>(band)</option>
+                    }
+                </select>
+                <button class="btn" type="submit">"Search"</button>
+            </form>
+            if rendered.is_empty() {
+                <div class="Box"><div class="Box-body color-fg-muted">
+                    "Nothing here. Logs arrive as Sentry "<code>"log"</code>" items on the DSN, or as
+                     NDJSON on "<code>(format!("POST /api/{}/logs", project.id))</code>"."
+                </div></div>
+            } else {
+                <div class="Box">
+                    for (row, link) in &rendered {
+                        log_row(key: row.id, row: row.clone(), link: link.clone())
+                    }
+                </div>
+                <div class="d-flex gap-2 mt-2 flex-items-center">
+                    if page > 0 {
+                        <a class="btn btn-sm" href=(logs_url(&name, &raw, level.as_deref(), page - 1))>"Newer"</a>
+                    }
+                    <span class="text-small color-fg-muted">"page "(page + 1)</span>
+                    if more {
+                        <a class="btn btn-sm" href=(logs_url(&name, &raw, level.as_deref(), page + 1))>"Older"</a>
+                    }
+                </div>
+            }
+        )
+    }?;
+    page_view.into_response(cx)
+}
+
+fn logs_url(project: &str, q: &str, level: Option<&str>, page: i64) -> String {
+    let mut url = format!("/bugs/{project}/logs?page={page}");
+    if !q.is_empty() {
+        url.push_str(&format!("&q={}", crate::render::encode_path(q)));
+    }
+    if let Some(level) = level {
+        url.push_str(&format!("&level={level}"));
+    }
+    url
+}
+
+#[component]
+async fn log_row(row: crate::bugs::LogRow, link: Option<String>) -> Result {
+    let origin = match (&row.code_file, row.code_line) {
+        (Some(file), Some(line)) if line > 0 => Some(format!("{file}:{line}")),
+        (Some(file), _) => Some(file.clone()),
+        (None, _) => None,
+    };
+    view! {
+        <div class="Box-row d-flex flex-items-baseline gap-2 text-small">
+            <span class="color-fg-muted nashcode-code">(row.ts.clone())</span>
+            <span class=(level_class(&row.severity_text))>(row.severity_text.clone())</span>
+            <span class="flex-auto">(row.message.clone())</span>
+            if let Some(origin) = origin {
+                // A path that does not resolve in the declared repo is plain text.
+                // A dead link is worse than no link.
+                if let Some(href) = link {
+                    <a class="Link--secondary nashcode-code" href=(href)>(origin)</a>
+                } else {
+                    <span class="color-fg-muted nashcode-code">(origin)</span>
+                }
+            }
+        </div>
+    }
+}
+
+fn level_class(level: &str) -> &'static str {
+    match level {
+        "fatal" | "error" => "Label Label--danger",
+        "warn" => "Label Label--warning",
+        "debug" | "trace" => "Label Label--secondary",
+        _ => "Label",
+    }
+}
+
+/// The blob URL for each row whose code origin actually exists in the declared repo.
+///
+/// Resolution is the code browser's own question, asked the same way: list the
+/// parent directory at the default tip and look for the name. One listing per
+/// distinct directory on the page, so a hundred rows out of three files cost three
+/// `ls-tree` calls, not a hundred.
+async fn code_links(
+    cx: &Cx,
+    project: &Project,
+    rows: &[crate::bugs::LogRow],
+) -> std::collections::HashMap<i64, String> {
+    let mut links = std::collections::HashMap::new();
+    let Some(repo) = project.repo.as_deref() else { return links };
+    if !app(cx).config.knows_repo(repo) {
+        return links;
+    }
+    let wanted: Vec<(i64, String, Option<i64>)> = rows
+        .iter()
+        .filter_map(|row| {
+            let path = row.code_file.as_deref()?;
+            linkable(path).then(|| (row.id, path.to_owned(), row.code_line))
+        })
+        .collect();
+    if wanted.is_empty() {
+        return links;
+    }
+
+    let mirror = app(cx).mirrors.repo(repo);
+    let Ok(branch) = mirror.default_branch().await else { return links };
+    let Ok(tip) = mirror.tip(&branch).await else { return links };
+
+    let mut listings: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (id, path, line) in wanted {
+        let (dir, file) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
+        if !listings.contains_key(dir) {
+            let entries = mirror
+                .ls_tree(&tip, dir)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|entry| entry.kind != crate::git::EntryKind::Dir)
+                .map(|entry| entry.name)
+                .collect();
+            listings.insert(dir.to_owned(), entries);
+        }
+        if listings[dir].iter().any(|name| name == file) {
+            let url = crate::render::blob_url(repo, &path);
+            links.insert(id, match line {
+                Some(line) if line > 0 => format!("{url}#L{line}"),
+                _ => url,
+            });
+        }
+    }
+    links
+}
+
+/// A path that could name a file inside a repo. An absolute one comes from the
+/// machine the process ran on, not from the repo, and `..` is nobody's source file.
+fn linkable(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with('.')
+        && !path.split('/').any(|segment| segment == ".." || segment.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one answer an overloaded ingest gives. Its shape is the contract: the
+    /// status an SDK backs off on, the delay it waits, and the CORS header without
+    /// which a browser SDK sees none of it.
+    #[test]
+    fn the_busy_answer_is_one_an_sdk_can_obey() {
+        let response = busy();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "5");
+        assert_eq!(response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), "*");
+        assert_eq!(response.headers().get("x-sentry-error").unwrap(), "the digest queue is full");
+    }
 }

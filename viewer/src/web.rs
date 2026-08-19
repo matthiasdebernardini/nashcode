@@ -62,7 +62,11 @@ pub fn router(app: App) -> Router {
         // from any page in the world: that is how a browser SDK reports an error.
         // It carries no ambient credential — the sentry_key in the request is the
         // whole of its auth — so origin verification has nothing to protect there.
-        .origin_policy(OriginPolicy::new().exempt_paths([bugs::INGEST_PATH, bugs::INGEST_PATH_BARE]))
+        .origin_policy(OriginPolicy::new().exempt_paths([
+            bugs::INGEST_PATH,
+            bugs::INGEST_PATH_BARE,
+            bugs::INGEST_PATH_LOGS,
+        ]))
         .discover()
         .app_context(app)
         .build()
