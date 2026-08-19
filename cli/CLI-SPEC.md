@@ -122,11 +122,14 @@ LLM must be able to use it on reflex, so the syntax is the contract:
   never an error** — whatever an agent types out of rg habit still runs. `-t`/`-g`
   filter paths on both the local and index sides.
 - **Output is grep's**: one hit per line, `path:line:content`, so anything that
-  parses grep parses this. Context lines use grep's `path-line-` form. The extras
-  ride in `#` comment lines and in grouping, never in the hit format.
+  parses grep parses this. Context lines use grep's `path-line-` form. Extras ride
+  in `#` comment lines and in grouping; text and semantic hit lines stay pure. The
+  one exception is the definitions block, whose lines carry a single trailing
+  ` # kind, N refs, M callers` annotation — a parser that wants raw content strips
+  from the last ` # `; `--json` carries the same facts unambiguously.
 - **What the index adds, in fixed order:** a `# definitions:` block first (from
-  `GET /:repo/code/find`, with kind and reference/caller counts in a trailing
-  comment), then the text hits, then — only when the text pass found nothing — a
+  `GET /:repo/code/find`), then the text hits, then — only when the text pass found
+  nothing — a
   `# semantic (no exact match):` block from the embeddings. A `#` header names the
   indexed commit and its age.
 - **Freshness is hybrid, not a warning.** Text hits come from a local `rg` run over
