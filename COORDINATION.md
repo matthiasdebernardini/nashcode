@@ -38,7 +38,6 @@ This file is for agents that are *building* it.
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `cli/**` (src, tests, Cargo.toml), `AGENTS.md` (CLI sections), `cli/NOTES.md` (new) | agcli-migration session | clap → agcli surface rewrite per cli/CLI-SPEC.md "Agent envelope"; agcli 0.15.0 is published and pinned; grep keeps raw rg stdout, brain keeps exit-0 |
-| `ingester/**` (new top-level directory), `goals/error-tracking/ingester.md` | public-ingester session | phase 3 step 1: the celld app (Worker + IngestCell + RegistryCell) that buffers envelopes on public infra. Touches no Rust crate; `viewer/src/**` and `cli/src/**` are not mine |
 | `viewer/src/bugs/**`, `viewer/src/web/bugs.rs`, `viewer/tests/bugs.rs`, `viewer/tests/bugs_logs.rs` | error-tracking session, slice-2 review fixes | the peer-review blockers on the NDJSON door and the digest queue, plus the should-fixes. `viewer/src/web.rs` NOT touched this time |
 | `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
 
@@ -282,3 +281,40 @@ bugs stanza, and the README/AGENTS documentation (goal fact 20). Plus:
    to reuse (`busy()` in `web/bugs.rs`).
 3. **Per-project `retention_days` has no UI.** The column exists and the prune reads
    it; nothing sets it but the default.
+
+### Phase 3 step 1 landed: the public ingester
+
+`b940c45` adds `ingester/`, a celld application, and the claim is released. It touches
+no Rust: `Cargo.toml` lists its members explicitly, so the new directory does not join
+the workspace and `cargo nextest run --workspace` is unchanged by it. `dd6557b` amended
+`goals/error-tracking/ingester.md` first — that document predates slice 2 and knew only
+about the envelope door, so the edge now carries `POST /api/<id>/logs` as well.
+
+Run it with `ingester/test.sh`: a MinIO container for the fleet bucket, a real
+`celld deploy`, a real celld node on loopback, 30 assertions over HTTP. About twenty
+seconds, 30/30 green. It needs docker, node, esbuild, and celld 0.2.0+ (`CELLD=` picks
+a binary).
+
+Three things worth knowing outside `ingester/`:
+
+- **The drain protocol is now written down** in `ingester/README.md`, and it is what the
+  nashcode-side drainer — a separate, later slice — codes against. Three routes:
+  `GET /_nashcode/drain/<project>`, `POST /_nashcode/ack/<project>`,
+  `GET|PUT /_nashcode/registry`, all bearer-authed, all answering 404 without the token.
+  Nothing in it is celld-shaped on purpose; the hedge in the design is that ~500 lines
+  of axum could serve the same three routes and the drainer would never notice.
+- **The edge answers the same way the viewer does**, deliberately: same CORS set, same
+  `X-Sentry-Rate-Limits` value, same `{"id": ...}` shape, same 403/404/413/429 split.
+  `ingester/src/protocol.ts` and `viewer/src/web/bugs.rs` hold two copies of one
+  contract. If you change one — the rate-limit categories especially — change both.
+- **MinIO now implements the conditional writes celld needs**, which `ingester.md` and
+  celld's own fencing document both say it does not. That was true when they were
+  written; `RELEASE.2025-08-13` refuses a repeat `If-None-Match: *` and a stale
+  `If-Match` correctly. It is what makes a local celld node testable at all — celld has
+  no filesystem or in-memory bucket mode. Production still wants S3, R2, GCS, or Tigris;
+  the reasoning is in `ingester/NOTES.md`.
+
+One trap, in case it costs you an afternoon: **a freshly downloaded, unsigned celld
+binary hangs for about five minutes on its first run on macOS 26.** It sits in
+`_dyld_start` with no output and no CPU. That is Gatekeeper, not celld. Wait it out once
+and every later run is instant.
