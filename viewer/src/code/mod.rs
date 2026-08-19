@@ -450,6 +450,66 @@ pub async fn grep(
     Ok(hits)
 }
 
+/// One edge of the whole-repo graph dump.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct Edge {
+    /// `defines`, `calls`, or `references`.
+    pub kind: &'static str,
+    /// The file for a `defines` edge; the enclosing function for the others, falling
+    /// back to the file when the call sits at module level.
+    pub from: String,
+    pub to: String,
+    pub file: String,
+    pub line: i64,
+    pub source: String,
+}
+
+/// Everything the indexes know about a repo, as one document.
+///
+/// This is the bulk companion to the per-symbol endpoints. An agent drawing a diagram
+/// needs the shape of the whole system, and paging through `?symbol=` calls to
+/// assemble it would be a request per node. Absent indexes degrade the document, not
+/// the request: worst case is the file inventory with `symbols: []`.
+pub fn graph(db: &Db, repo: &str) -> serde_json::Value {
+    let files = db.code_file_list(repo).unwrap_or_default();
+    let symbols = db.code_all_symbols(repo).unwrap_or_default();
+    let references = db.code_all_refs(repo).unwrap_or_default();
+
+    let mut edges: Vec<Edge> = Vec::with_capacity(symbols.len() + references.len());
+    for symbol in &symbols {
+        edges.push(Edge {
+            kind: "defines",
+            from: symbol.path.clone(),
+            to: symbol.name.clone(),
+            file: symbol.path.clone(),
+            line: symbol.start_line,
+            source: symbol.source.clone(),
+        });
+    }
+    for reference in &references {
+        edges.push(Edge {
+            // The graph layer records call edges; anything else it learns is a plain
+            // reference. Both spellings are in the dump so a reader can tell them apart.
+            kind: if reference.kind == "call" { "calls" } else { "references" },
+            from: reference.caller.clone().unwrap_or_else(|| reference.path.clone()),
+            to: reference.name.clone(),
+            file: reference.path.clone(),
+            line: reference.line,
+            source: reference.source.clone(),
+        });
+    }
+
+    serde_json::json!({
+        "generated_at": crate::db::now(),
+        // The commit the index was last built from, so a reader can tell whether the
+        // dump describes the tree they are looking at.
+        "commit": db.code_last_run(repo).ok().flatten().map(|row| row.run.commit),
+        "files": files,
+        "symbols": symbols,
+        "edges": edges,
+    })
+}
+
 /// The `code` stanza `/brain` carries for a repo.
 pub fn brain_stanza(db: &Db, repo: &str) -> serde_json::Value {
     let counts: CodeCounts = db.code_counts(repo).unwrap_or_default();

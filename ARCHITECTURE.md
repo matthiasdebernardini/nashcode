@@ -67,6 +67,7 @@ graph LR
     viewer_brain[brain]
     viewer_ci[ci]
     viewer_cli[cli]
+    viewer_code[code]
     viewer_config[config]
     viewer_db[db]
     viewer_docs[docs]
@@ -79,16 +80,22 @@ graph LR
     viewer_traces[traces]
     viewer_web[web]
   end
+  viewer_brain --> viewer_code
   viewer_brain --> viewer_config
   viewer_brain --> viewer_db
   viewer_brain --> viewer_docs
   viewer_brain --> viewer_mirror
   viewer_brain --> viewer_stack
+  viewer_ci --> viewer_code
   viewer_ci --> viewer_config
   viewer_ci --> viewer_db
   viewer_ci --> viewer_git
   viewer_ci --> viewer_hooks
   viewer_cli --> viewer_traces
+  viewer_code --> viewer_config
+  viewer_code --> viewer_db
+  viewer_code --> viewer_git
+  viewer_code --> viewer_mirror
   viewer_docs --> viewer_git
   viewer_docs --> viewer_render
   viewer_mirror --> viewer_config
@@ -107,6 +114,7 @@ graph LR
   viewer_traces --> viewer_git
   viewer_web --> viewer_brain
   viewer_web --> viewer_ci
+  viewer_web --> viewer_code
   viewer_web --> viewer_config
   viewer_web --> viewer_db
   viewer_web --> viewer_docs

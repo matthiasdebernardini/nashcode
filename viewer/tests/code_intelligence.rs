@@ -405,6 +405,120 @@ async fn a_deleted_file_stops_answering_queries() {
     );
 }
 
+// ---- the bulk graph dump -----------------------------------------------------------
+
+#[tokio::test]
+async fn the_graph_dump_carries_files_symbols_and_edges_in_one_call() {
+    let bed = simple_bed(code_fixture);
+    bed.index("demo").await;
+
+    let (status, body) = get(&bed.router, "/demo/code/graph").await;
+    assert_eq!(status, 200, "{body}");
+    let graph: Value = serde_json::from_str(&body).expect("json");
+
+    assert_eq!(graph["repo"], "demo");
+    assert!(graph["generated_at"].as_str().expect("generated_at").ends_with('Z'));
+    assert_eq!(
+        graph["commit"].as_str().expect("commit").len(),
+        40,
+        "the dump names the commit it describes: {body}"
+    );
+
+    // Every file in the tree, with its language and the blob behind it.
+    let files = graph["files"].as_array().expect("files");
+    assert_eq!(files.len(), 4, "{body}");
+    let rust = files.iter().find(|f| f["path"] == "src/net.rs").expect("net.rs");
+    assert_eq!(rust["lang"], "rust");
+    assert_eq!(rust["blob"].as_str().expect("blob").len(), 40);
+    let prose = files.iter().find(|f| f["path"] == "notes/plain.txt").expect("plain.txt");
+    assert_eq!(prose["lang"], "other", "a file with no grammar is still inventoried");
+
+    // Every symbol, with the file and line it is on.
+    let symbols = graph["symbols"].as_array().expect("symbols");
+    let retry = symbols.iter().find(|s| s["name"] == "retry").expect("retry");
+    assert_eq!(retry["path"], "src/net.rs");
+    assert_eq!(retry["kind"], "function");
+    assert_eq!(retry["start_line"], 8);
+
+    // Edges: a `defines` per symbol, a `calls` per call site.
+    let edges = graph["edges"].as_array().expect("edges");
+    assert!(
+        edges.iter().any(|e| {
+            e["kind"] == "defines" && e["from"] == "src/net.rs" && e["to"] == "retry"
+        }),
+        "the file defines the symbol: {body}"
+    );
+    let call = edges
+        .iter()
+        .find(|e| e["kind"] == "calls" && e["to"] == "backoff")
+        .expect("the call to backoff");
+    assert_eq!(call["from"], "retry", "the edge starts at the calling function");
+    assert_eq!(call["file"], "src/net.rs");
+    assert_eq!(call["source"], "treesitter");
+}
+
+#[tokio::test]
+async fn a_call_outside_any_function_starts_its_edge_at_the_file() {
+    let bed = simple_bed(|root| {
+        let remote = make_remote(root, "demo");
+        let work = Work::clone_from(&remote);
+        // A module-level call: there is no enclosing function to name.
+        work.write("app/boot.py", "import sys\n\nconfigure(sys.argv)\n\n\ndef later():\n    pass\n");
+        work.commit_all("initial");
+        work.push("main");
+        work
+    });
+    bed.index("demo").await;
+
+    let (_, body) = get(&bed.router, "/demo/code/graph").await;
+    let graph: Value = serde_json::from_str(&body).expect("json");
+    let edge = graph["edges"]
+        .as_array()
+        .expect("edges")
+        .iter()
+        .find(|e| e["to"] == "configure")
+        .expect("the module-level call");
+    assert_eq!(edge["from"], "app/boot.py", "{body}");
+}
+
+#[tokio::test]
+async fn a_repo_with_no_index_dumps_an_empty_graph_rather_than_an_error() {
+    let bed = simple_bed(code_fixture);
+    bed.mirrors.refresh_now("demo").await;
+
+    let (status, body) = get(&bed.router, "/demo/code/graph").await;
+    assert_eq!(status, 200, "{body}");
+    let graph: Value = serde_json::from_str(&body).expect("json");
+    assert!(graph["files"].as_array().expect("files").is_empty());
+    assert!(graph["symbols"].as_array().expect("symbols").is_empty());
+    assert!(graph["edges"].as_array().expect("edges").is_empty());
+    assert!(graph["commit"].is_null(), "nothing has been indexed: {body}");
+}
+
+#[tokio::test]
+async fn a_repo_of_only_unparseable_files_dumps_the_inventory_with_no_symbols() {
+    let bed = simple_bed(|root| {
+        let remote = make_remote(root, "demo");
+        let work = Work::clone_from(&remote);
+        work.write("README.md", "# just prose\n");
+        work.write("data/rows.csv", "a,b\n1,2\n");
+        work.commit_all("initial");
+        work.push("main");
+        work
+    });
+    bed.index("demo").await;
+
+    let (status, body) = get(&bed.router, "/demo/code/graph").await;
+    assert_eq!(status, 200, "{body}");
+    let graph: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(graph["files"].as_array().expect("files").len(), 2);
+    assert!(
+        graph["symbols"].as_array().expect("symbols").is_empty(),
+        "no grammar read these, and that is the documented worst case: {body}"
+    );
+    assert!(graph["edges"].as_array().expect("edges").is_empty());
+}
+
 // ---- status, queueing, and brain ---------------------------------------------------
 
 #[tokio::test]
@@ -443,6 +557,7 @@ async fn an_unknown_repo_is_a_404_on_every_code_endpoint() {
     let bed = simple_bed(code_fixture);
     for path in [
         "/nope/code",
+        "/nope/code/graph",
         "/nope/code/text?q=x",
         "/nope/code/similar?q=x",
         "/nope/code/def?symbol=x",

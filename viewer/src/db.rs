@@ -796,6 +796,71 @@ impl Db {
         })
     }
 
+    /// The repo's whole file inventory: path, language, and the blob behind it.
+    pub fn code_file_list(&self, repo: &str) -> DbResult<Vec<CodeFile>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT path, lang, blob FROM code_files WHERE repo = ?1 ORDER BY path",
+            )?;
+            let rows = statement
+                .query_map(params![repo], |row| {
+                    Ok(CodeFile { path: row.get(0)?, lang: row.get(1)?, blob: row.get(2)? })
+                })?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Every definition in the repo, resolved to the path it now lives at.
+    pub fn code_all_symbols(&self, repo: &str) -> DbResult<Vec<SymbolHit>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT f.path, s.name, s.kind, s.start_line, s.end_line, s.source
+                 FROM code_symbols s JOIN code_files f ON f.repo = s.repo AND f.blob = s.blob
+                 WHERE s.repo = ?1
+                 ORDER BY f.path, s.start_line, s.name",
+            )?;
+            let rows = statement
+                .query_map(params![repo], |row| {
+                    Ok(SymbolHit {
+                        path: row.get(0)?,
+                        name: row.get(1)?,
+                        kind: row.get(2)?,
+                        start_line: row.get(3)?,
+                        end_line: row.get(4)?,
+                        source: row.get(5)?,
+                    })
+                })?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Every reference in the repo, resolved to its path.
+    pub fn code_all_refs(&self, repo: &str) -> DbResult<Vec<RefHit>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT f.path, r.name, r.caller, r.line, r.kind, r.source
+                 FROM code_refs r JOIN code_files f ON f.repo = r.repo AND f.blob = r.blob
+                 WHERE r.repo = ?1
+                 ORDER BY f.path, r.line, r.name",
+            )?;
+            let rows = statement
+                .query_map(params![repo], |row| {
+                    Ok(RefHit {
+                        path: row.get(0)?,
+                        name: row.get(1)?,
+                        caller: row.get(2)?,
+                        line: row.get(3)?,
+                        kind: row.get(4)?,
+                        source: row.get(5)?,
+                    })
+                })?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
     /// Record what an index run did. `/brain` reads the latest of these.
     pub fn code_record_run(&self, run: &CodeRun) -> DbResult<()> {
         self.with(|conn| {
@@ -1046,6 +1111,14 @@ pub struct StoredChunk {
     pub snippet: String,
     pub vector: Option<Vec<f32>>,
     pub model: String,
+}
+
+/// One file in the index, as the bulk dump reports it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CodeFile {
+    pub path: String,
+    pub lang: String,
+    pub blob: String,
 }
 
 /// A definition read back.

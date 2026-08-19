@@ -608,6 +608,25 @@ fn graph_answer<T: serde::Serialize>(
     value
 }
 
+/// `GET /{repo}/code/graph` — the whole analysis in one call.
+///
+/// The bulk companion to the per-symbol endpoints: an agent drawing an architecture
+/// diagram needs every node and edge at once, and paging through `?symbol=` calls to
+/// assemble that would be a request per node. A repo with no index answers with an
+/// empty document, never an error.
+#[route(GET "/{repo}/code/graph")]
+async fn code_graph(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    if !app(cx).config.knows_repo(&name) {
+        return Err(topcoat::router::error::not_found().into());
+    }
+    let mut graph = crate::code::graph(&app(cx).db, &name);
+    if let Some(object) = graph.as_object_mut() {
+        object.insert("repo".to_owned(), serde_json::json!(name));
+    }
+    json_ok(graph)
+}
+
 /// `POST /{repo}/code/index` — queue an index run. This is what `nashcode index` calls.
 ///
 /// It queues and returns; it never indexes inline. The run happens on the CI queue

@@ -484,3 +484,22 @@ rather than a hint. Without `ANTHROPIC_API_KEY` the route still answers 404, unc
   boundary. Exit status 1 means "no matches", which is an answer.
 - **One transaction per blob.** An index run that dies halfway leaves every blob it
   finished intact, and the next run resumes exactly where it stopped.
+
+### `GET /:repo/code/graph`, the bulk dump
+
+From the Architecture section of SPEC, which is otherwise a later stream's. It selects
+the three tables whole and answers
+`{repo, generated_at, commit, files, symbols, edges}`. `commit` is the commit the last
+index run read, so a caller can tell whether the dump describes the tree it is looking
+at; it is `null` before the first run.
+
+Edges are synthesised rather than stored, because storing them would be a second copy
+of the two tables that can disagree with the first. One `defines` edge per symbol
+(file to symbol), and one `calls` or `references` edge per reference. A reference edge
+starts at the function that encloses it, falling back to the file when the call sits at
+module level — a diagram needs an arrow from *something*, and the file is the honest
+answer when there is no function.
+
+The degradation the spec asks for falls out of the join: a repo with no index answers
+with empty lists, and a repo of files no grammar reads answers with the inventory and
+`symbols: []`. Neither is an error.
