@@ -467,6 +467,17 @@ that language to the in-process graph, never breaks the pipeline.
   owns. Queries: `GET /:repo/code/def?symbol=`, `GET /:repo/code/refs?symbol=`,
   `GET /:repo/code/callers?symbol=`. A language the indexer cannot parse degrades to
   text search, never to an error.
+- **`GET /:repo/code/find?q=` — the fused query, one call instead of four.** The
+  caller sends what it has — an identifier, a regex, a phrase — and the server routes:
+  an exact symbol match returns the definitions first (name, kind, path, line,
+  snippet) with reference and caller counts attached; text hits over the chunks come
+  next; when text comes back thin, an embeddings pass adds semantic hits, labeled as
+  such. Every hit says which layer produced it (`definition`, `reference`, `text`,
+  `semantic`) and the response header says the indexed commit and its age, because
+  the index lags the working tree and the caller must know what it is looking at.
+  Ranking is fixed: definitions, then references, then text, then semantic. Degrades
+  like the sibling endpoints: unindexed repo answers empty with the index hint, never
+  an error.
 - **Brain is the front door.** `GET /brain` grows a per-repo `code` stanza (index age,
   chunk and symbol counts). `POST /brain/ask` gains tool access to the three query
   endpoints so "where is retry handled and who calls it" is answerable in one question.

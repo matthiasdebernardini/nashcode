@@ -65,6 +65,7 @@ graph LR
   cli_remote --> cli_ssh
   subgraph viewer
     viewer_brain[brain]
+    viewer_bugs[bugs]
     viewer_ci[ci]
     viewer_cli[cli]
     viewer_code[code]
@@ -86,6 +87,8 @@ graph LR
   viewer_brain --> viewer_docs
   viewer_brain --> viewer_mirror
   viewer_brain --> viewer_stack
+  viewer_bugs --> viewer_config
+  viewer_bugs --> viewer_db
   viewer_ci --> viewer_code
   viewer_ci --> viewer_config
   viewer_ci --> viewer_db

@@ -113,6 +113,33 @@ viewer that is down prints one line saying so and exits 0 — this runs from
 session-start hooks, and a dead viewer must not break a session. Raw dump stays
 `curl /brain`; this command is the usable view.
 
+### `nashcode grep [flags] PATTERN [path...]`
+Grep for agents: the surface is ripgrep's, the answers come from the code index. An
+LLM must be able to use it on reflex, so the syntax is the contract:
+
+- **Flags mirror rg** where they matter: `-i`, `-n` (on by default), `-l`, `-C`/`-A`/
+  `-B`, `-t rust`, `-g <glob>`, and the global `--json`. **Unknown flags are ignored,
+  never an error** — whatever an agent types out of rg habit still runs. `-t`/`-g`
+  filter paths on both the local and index sides.
+- **Output is grep's**: one hit per line, `path:line:content`, so anything that
+  parses grep parses this. Context lines use grep's `path-line-` form. The extras
+  ride in `#` comment lines and in grouping, never in the hit format.
+- **What the index adds, in fixed order:** a `# definitions:` block first (from
+  `GET /:repo/code/find`, with kind and reference/caller counts in a trailing
+  comment), then the text hits, then — only when the text pass found nothing — a
+  `# semantic (no exact match):` block from the embeddings. A `#` header names the
+  indexed commit and its age.
+- **Freshness is hybrid, not a warning.** Text hits come from a local `rg` run over
+  the working tree when the command runs inside a checkout with `rg` on PATH — the
+  tree an agent is editing is always fresher than the index. Definitions, counts,
+  and semantic hits come from the index. Outside a checkout, or with no `rg`, the
+  text pass falls back to the index's chunk search.
+- **Exit codes are grep's** (0 hits, 1 none) — agents branch on them. A dead viewer
+  degrades to plain local rg with one `#` line saying the index was unreachable;
+  only "no checkout AND no index" is an error.
+- Backend: `GET /:repo/code/find?q=` (see viewer SPEC "Code intelligence"); the CLI
+  owns only flag translation, the local rg pass, and the merge.
+
 ## Implementation constraints
 
 - Rust, clap (derive), edition 2024. Prompts via `dialoguer` or equivalent
