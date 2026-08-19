@@ -332,7 +332,15 @@ stores both and lets you cross-reference them.
   - The renderer understands two payload shapes natively: live hook events
     (`prompt`/`tool_name` fields) and raw Claude Code transcript lines
     (`type: user|assistant|system`, `message.content` block arrays). Unknown shapes
-    degrade to the one-line summary, never to a blank row.
+    with recognizable content degrade to the one-line summary.
+  - **Bookkeeping rows are dropped, not summarized.** A raw transcript carries
+    harness state lines (`last-prompt`, `mode`, `permission-mode`, `bridge-session`,
+    `attachment`, `file-history-snapshot`, …) that hold no conversational content.
+    Rendering them repeats the type name twice and says nothing; a backfilled session
+    opened with dozens of such rows before the first prompt. An event whose payload
+    yields no readable piece — and whose `HEAD` move produced no commit — renders
+    nothing. Events with attributed commits always render, whatever their shape.
+    The JSON APIs still return every stored event; only the HTML page filters.
   - `/:repo/traces...` and `/:repo/prompts` redirect (301) to their `/agent`
     equivalents. The JSON APIs under `/traces` keep their paths; agents already push
     to them.
