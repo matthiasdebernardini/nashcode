@@ -534,11 +534,15 @@ Browsing the column (phase 2):
   already present in the mirror — a gitlink target, for instance — and a rev the
   mirror does not have is a 404, never a fetch. Read-only surfaces: no edit, no
   new-file, no actions, no comments. `:dep` is the manifest name, valid only under
-  the repo that declared it.
+  the repo that declared it; a declaration the manifest refused has no mirror and
+  so has no page (404), while a dep that is accepted but not yet fetched has one
+  that says so.
 - **Submodule gitlinks link through.** A submodule entry in any tree whose
-  `.gitmodules` URL normalizes onto a mirrored dep of the same repo becomes a link
+  `.gitmodules` URL normalizes onto a declared dep of the same repo becomes a link
   to that dep at the gitlink's commit; every other gitlink stays the inert label it
-  is today.
+  is today. The link follows the declaration, not the state of the mirror — a
+  gitlink pinning a commit nobody has fetched is still a link, and answers the
+  ordinary 404 — so the affordance does not flicker as mirrors move.
 
 ## Architecture
 
