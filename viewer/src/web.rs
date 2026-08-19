@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod architecture;
+pub mod bugs;
 pub mod components;
 pub mod pages;
 pub mod traces;
@@ -14,11 +15,12 @@ use std::sync::Arc;
 
 use topcoat::context::{Cx, app_context};
 use topcoat::router::{
-    HeaderValue, Router, RouterBuilderDiscoverExt, StatusCode, header,
+    HeaderValue, OriginPolicy, Router, RouterBuilderDiscoverExt, StatusCode, header,
     response::Response,
 };
 
 use crate::brain::Brain;
+use crate::bugs::Bugs;
 use crate::ci::CiQueue;
 use crate::code::Embeddings;
 use crate::config::Config;
@@ -37,6 +39,8 @@ pub struct App {
     pub ci: CiQueue,
     pub ops: Ops,
     pub brain: Brain,
+    /// Error tracking. Disabled unless a bucket is configured; see [`crate::bugs`].
+    pub bugs: Bugs,
     /// The embedding model, shared with the indexer so a query and an index run use
     /// the one loaded copy. Empty until the first index run fills it.
     pub embeddings: Embeddings,
@@ -54,6 +58,11 @@ pub fn router(app: App) -> Router {
     // the 2 MiB default rejects any real session.
     Router::builder()
         .layer(topcoat::router::BodyLimit::max(64 * 1024 * 1024))
+        // The ingest route is the one surface that must take a cross-origin POST
+        // from any page in the world: that is how a browser SDK reports an error.
+        // It carries no ambient credential — the sentry_key in the request is the
+        // whole of its auth — so origin verification has nothing to protect there.
+        .origin_policy(OriginPolicy::new().exempt_paths([bugs::INGEST_PATH, bugs::INGEST_PATH_BARE]))
         .discover()
         .app_context(app)
         .build()

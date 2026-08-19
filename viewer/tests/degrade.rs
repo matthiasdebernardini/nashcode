@@ -39,6 +39,9 @@ async fn every_page_survives_a_dead_git_server_on_an_existing_mirror() {
         anthropic_key: None,
         anthropic_url: "http://127.0.0.1:9".to_owned(),
         brain_model: "claude-opus-5".to_owned(),
+        bugs_bucket: None,
+        bugs_s3_endpoint: None,
+        bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
     });
     let dead = testbed_from_config(tempfile::tempdir().expect("tempdir"), dead_config);
 

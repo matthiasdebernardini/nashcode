@@ -634,3 +634,119 @@ Lives in `cli/`, noted here because this is the file that records choices SPEC l
 - Node links point at the line numbers of the commit the code index was last built
   from, rendered against the tip blob. Where the two have drifted, the link lands
   near the symbol rather than on it; re-indexing is what closes the gap.
+
+## Bugs, slice 1: the DSN consumer (2026-08-19)
+
+`goals/error-tracking/goal.md` is the contract and `SPEC.md` binds the surface. This
+is where the code had to choose, and the two places it disagreed with the plan.
+
+### `sentry-types` cannot split an envelope, so the splitter is hand-written
+
+The goal doc says to try `sentry-types` 0.49's `Envelope::from_slice` on real
+fixtures first. It fails the test. Its `EnvelopeItemType` is a closed serde enum with
+no unknown variant, so one `{"type":"profile_chunk"}` item makes the *whole* envelope
+fail to parse — which is the exact behaviour the protocol names as the number-one
+thing a server must not do (acceptance fact 3). It also deserializes `event` items
+into typed structs, which throws away the raw bytes the bucket is supposed to hold
+and makes parsing stricter than "only `event_id`, `timestamp` and `platform` are
+required".
+
+So `bugs/envelope.rs` is the ~120-line splitter the doc allowed for, working in raw
+bytes throughout, and `sentry-types` keeps the two jobs it is good at: `Auth` for the
+`X-Sentry-Auth` header and the `?sentry_key=` query string, and `Dsn` for the
+envelope's own `dsn` header.
+
+### `file:///path` is a bucket
+
+`NASHCODE_BUGS_BUCKET` takes `s3://name` as specified, and also `file:///path`, which
+`object_store`'s `LocalFileSystem` serves. That is not a production fallback: it is
+what lets the whole ingest path — put, get, key layout, the digest reading back — run
+against a real object store in a tempdir with no S3, no MinIO container, and no mock.
+The tests use it. Nothing else about the code path differs.
+
+### The ingest route is a catch-all under `/api/{id}/`
+
+The protocol's URL is `POST /api/<project_id>/envelope/`, with the trailing slash,
+and every current SDK sends it. Topcoat refuses to register a route path ending in a
+slash ("invalid path: empty segment"), and matchit's catch-all needs a non-empty
+remainder, so `/api/1/envelope/` matches neither `/api/{id}/envelope` nor
+`/api/{id}/envelope/{*rest}` — it falls through to the viewer's own
+`POST /{repo}/{*rest}` and 404s. The route is therefore `/api/{project_id}/{*rest}`,
+which catches both spellings, with the handler checking the tail is exactly
+`envelope`. Everything else under `/api/` gets a 404, which is what the goal doc
+wants said about `/store/`, `/minidump/` and the Sentry Web API anyway.
+
+The cost: a repo named literally `api` would have its `POST /api/<branch>/merge`
+swallowed by this route. `NASHCODE_REPOS` would have to name one for that to bite.
+
+### The ingest route is exempt from origin verification
+
+Topcoat rejects a state-changing cross-origin browser request by default, which is
+right for every other route here and wrong for this one: a browser SDK's whole job is
+to POST cross-origin from any page in the world. It carries no ambient credential —
+the `sentry_key` in the request is the entire auth — so there is nothing for origin
+verification to protect. `web::router` exempts the two ingest paths and nothing else.
+
+### The bugs tables are owned by `bugs/`, not by `db.rs`
+
+`bugs/index.rs` carries its own `SCHEMA` and applies it with `execute_batch` on
+`Bugs::new`, the same migration pattern `db.rs` uses, through the same connection.
+The feature ships its schema with itself, and `db.rs` — which two work streams touch
+— did not have to move.
+
+### The digest task starts on the first envelope
+
+`CiQueue` hands its receiver to `main.rs`, which spawns the worker. Bugs cannot do
+that: `Bugs::new` runs outside the async runtime in both `main` and the tests, and a
+test that never spawned the worker would see ingest succeed and no issue appear. So
+the receiver sits in the `Bugs` handle and the worker spawns on the first `enqueue`,
+which is always inside an async handler. Single-writer is unchanged. `Bugs::digested(n)`
+is how a caller waits for the queue to drain without sleeping.
+
+### Parameterization: what was implemented and what was left out
+
+The goal doc lists uuid, hex, int, ip, email, url, date and quoted string. All eight
+are there, as one ordered regex alternation, plus two judgement calls:
+
+- **Only double-quoted strings.** A single-quote rule would eat from the apostrophe
+  in `Can't connect` to the next apostrophe anywhere in the message. `KeyError:
+  'user_id'` therefore keeps its quotes; the type and the parameterized rest still
+  group it correctly.
+- **A run of hex digits is only `<hex>` if it is really hexadecimal.** The plain
+  `\b[0-9a-fA-F]{7,}\b` pattern matches `decaffeinated` and `1234567` alike, so the
+  replacement checks the match holds both a digit and a letter and leaves it alone
+  otherwise. `1234567` stays `<int>`; English words stay words.
+
+Sentry's float and duration classes are not implemented. `1.5` becomes
+`<int>.<int>`, which groups exactly as stably.
+
+### In-app frames link into the code browser, conservatively
+
+SPEC's "Code origin" amendment says an unresolvable path renders as text and never a
+dead link, so `Frame::blob_url` returns `None` unless all three hold: the frame is
+`in_app`, the project declared a repo, and the `filename` is plainly relative (no
+leading `/`, no `.`, no `..`, no empty segment). A frame out of site-packages or with
+an absolute `abs_path` therefore stays plain text. The viewer does not check the file
+exists at the tip — that would be a mirror read per frame on every page load, and the
+blob route already renders its own "not found" for the case that matters.
+
+The log half of that amendment is slice 2.
+
+### Smaller choices
+
+- **The grouping key is stored twice**: readable, so a person can see why two events
+  landed together, and SHA-256 hashed, which is what the unique index is on.
+- **An event id is sanitized before it becomes an object key.** It is client-supplied
+  and goes straight into a path. Anything but alphanumerics and `-` is dropped, and
+  an id with nothing left gets a fresh uuid.
+- **The same `event_id` twice is one occurrence, not two.** A client retry after a
+  timeout is the common case and double-counting it would inflate every issue.
+- **The raw envelope and the event payload are both objects.** The envelope is the
+  reindex source; the event object is what the detail page reads with one `get`.
+  Slice 2's `reindex` can drop the second if the duplication ever costs anything.
+- **A bucket that will not open turns the feature off** rather than failing the
+  process. The viewer's other twenty jobs are not worth refusing to start over.
+- **`X-Sentry-Rate-Limits` is asserted category by category** in the tests, including
+  the negative half: `error`, `default`, `log_item`, `monitor` and `session` must
+  never appear, and the list must never be empty. An empty category list means
+  "everything", which would silence the errors too.

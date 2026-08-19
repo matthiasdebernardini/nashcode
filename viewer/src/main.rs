@@ -11,6 +11,7 @@ use nashcode::docs::DocIndexCache;
 use nashcode::hooks::Webhooks;
 use nashcode::mirror::{Mirrors, NewTip, TipObserver};
 use nashcode::ops::Ops;
+use nashcode::bugs::Bugs;
 use nashcode::{brain, hooks, web};
 
 #[tokio::main]
@@ -139,6 +140,14 @@ async fn serve() {
         });
     }
 
+    let bugs = match Bugs::new(&config, db.clone()) {
+        Ok(bugs) => bugs,
+        Err(error) => {
+            eprintln!("cannot apply the bugs schema: {error}");
+            std::process::exit(1);
+        }
+    };
+
     let app = web::App {
         ops: Ops {
             config: config.clone(),
@@ -152,6 +161,7 @@ async fn serve() {
         docs: DocIndexCache::new(),
         ci: ci_queue,
         brain: brain::Brain::new(),
+        bugs,
         embeddings,
     };
 
@@ -180,6 +190,12 @@ fn doctor(config: &Config) {
     }
     if config.anthropic_key.is_none() {
         eprintln!("doctor: ANTHROPIC_API_KEY is unset; POST /brain/ask answers 404");
+    }
+    if config.bugs_bucket.is_none() {
+        eprintln!(
+            "doctor: NASHCODE_BUGS_BUCKET is unset; error tracking is off and /bugs \
+             plus /api/:project/envelope/ answer 404"
+        );
     }
     if config.git_token.is_empty() {
         eprintln!("doctor: GIT_TOKEN is empty; pushes to dgit will be anonymous");

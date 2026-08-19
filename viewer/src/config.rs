@@ -31,6 +31,16 @@ pub struct Config {
     pub anthropic_url: String,
     /// `NASHCODE_BRAIN_MODEL`.
     pub brain_model: String,
+    /// `NASHCODE_BUGS_BUCKET`. `s3://name` for a real bucket, `file:///path` for a
+    /// directory. Unset means error tracking is off: `/bugs` and the ingest routes
+    /// answer 404.
+    pub bugs_bucket: Option<String>,
+    /// `S3_ENDPOINT`, for MinIO or Garage. Ignored by a `file://` bucket.
+    pub bugs_s3_endpoint: Option<String>,
+    /// `NASHCODE_BUGS_INGEST_URL`: the origin SDKs post envelopes to, which is what
+    /// goes into a DSN. Not the bind address — the public ingest domain for projects
+    /// on public infra, the tailnet URL for tailnet ones.
+    pub bugs_ingest_url: String,
 }
 
 fn env_or(key: &str, fallback: &str) -> String {
@@ -40,6 +50,13 @@ fn env_or(key: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_owned())
 }
 
+/// An environment variable that is either set to something useful or absent. An empty
+/// value reads as absent, so `FOO=` in a unit file turns a feature off rather than
+/// half-configuring it.
+fn optional(key: &str) -> Option<String> {
+    std::env::var(key).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+}
+
 fn home() -> PathBuf {
     std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -47,6 +64,7 @@ fn home() -> PathBuf {
 impl Config {
     /// Read the configuration from the environment, applying the documented defaults.
     pub fn from_env() -> Self {
+        let bind = env_or("NASHCODE_BIND", "127.0.0.1:8090");
         let mirrors = PathBuf::from(env_or(
             "NASHCODE_MIRRORS",
             &home().join("mirrors").to_string_lossy(),
@@ -84,7 +102,12 @@ impl Config {
             git_token: env_or("GIT_TOKEN", ""),
             repos,
             mirrors,
-            bind: env_or("NASHCODE_BIND", "127.0.0.1:8090"),
+            bugs_bucket: optional("NASHCODE_BUGS_BUCKET"),
+            bugs_s3_endpoint: optional("S3_ENDPOINT"),
+            bugs_ingest_url: env_or("NASHCODE_BUGS_INGEST_URL", &format!("http://{bind}"))
+                .trim_end_matches('/')
+                .to_owned(),
+            bind,
             db_path,
             ci_logs,
             traces,

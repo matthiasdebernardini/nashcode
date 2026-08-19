@@ -713,6 +713,9 @@ fn asking_bed(url: &str) -> common::TestBed {
         anthropic_key: Some("test-key".to_owned()),
         anthropic_url: url.to_owned(),
         brain_model: "claude-opus-5".to_owned(),
+        bugs_bucket: None,
+        bugs_s3_endpoint: None,
+        bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
     });
     common::testbed_from_config(root, config)
 }

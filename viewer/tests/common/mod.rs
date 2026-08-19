@@ -10,6 +10,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use nashcode::brain::Brain;
+use nashcode::bugs::Bugs;
 use nashcode::ci::CiQueue;
 use nashcode::code::{EmbedError, Embedder, Embeddings, Indexer};
 use nashcode::config::Config;
@@ -147,6 +148,7 @@ pub struct TestBed {
     pub mirrors: Mirrors,
     pub app: App,
     pub router: Router,
+    pub bugs: Bugs,
     pub embeddings: Embeddings,
     pub indexer: Indexer,
 }
@@ -190,6 +192,9 @@ pub fn testbed_with(root: tempfile::TempDir, repos: &[&str], webhooks: BTreeMap<
         anthropic_key: None,
         anthropic_url: "http://127.0.0.1:1".to_owned(),
         brain_model: "claude-opus-5".to_owned(),
+        bugs_bucket: None,
+        bugs_s3_endpoint: None,
+        bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
     });
     testbed_from_config(root, config)
 }
@@ -219,6 +224,9 @@ pub fn observed_bed(build: impl FnOnce(&Path) -> Work, webhooks: BTreeMap<String
         anthropic_key: None,
         anthropic_url: "http://127.0.0.1:1".to_owned(),
         brain_model: "claude-opus-5".to_owned(),
+        bugs_bucket: None,
+        bugs_s3_endpoint: None,
+        bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
     });
     testbed_build(root, config, true)
 }
@@ -258,6 +266,7 @@ fn testbed_build(root: tempfile::TempDir, config: Arc<Config>, observe: bool) ->
         mirrors: mirrors.clone(),
         embeddings: embeddings.clone(),
     };
+    let bugs = Bugs::new(&config, db.clone()).expect("the bugs schema applies");
     let app = App {
         config: config.clone(),
         db: db.clone(),
@@ -266,10 +275,11 @@ fn testbed_build(root: tempfile::TempDir, config: Arc<Config>, observe: bool) ->
         ci,
         ops,
         brain: Brain::new(),
+        bugs: bugs.clone(),
         embeddings: embeddings.clone(),
     };
     let router = web::router(app.clone());
-    TestBed { root, config, db, mirrors, app, router, embeddings, indexer }
+    TestBed { root, config, db, mirrors, app, router, bugs, embeddings, indexer }
 }
 
 /// A deterministic stand-in for the real encoder.

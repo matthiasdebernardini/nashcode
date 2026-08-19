@@ -358,6 +358,9 @@ mod tests {
             anthropic_key: None,
             anthropic_url: "https://api.anthropic.com".to_owned(),
             brain_model: "claude-opus-5".to_owned(),
+            bugs_bucket: None,
+            bugs_s3_endpoint: None,
+            bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
         };
         let mirrors = Mirrors::new(Arc::new(config), Db::in_memory().unwrap());
 

@@ -2,6 +2,7 @@
 //! integration tests can drive the real router end to end.
 
 pub mod brain;
+pub mod bugs;
 pub mod ci;
 pub mod cli;
 pub mod code;
