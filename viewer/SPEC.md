@@ -484,6 +484,33 @@ that language to the in-process graph, never breaks the pipeline.
   The JSON endpoints stay public individually — an agent that knows what it wants
   should not pay for a model round-trip.
 
+## Stack (upstream dependencies)
+
+A repo can declare the code it is built on — its upstream column — and the viewer
+mirrors that column next to the repo's own code. One naming caution: the "Stacks" tab
+is branch stacks; "the stack" here is the dependency column (`plans/whole-stack.md`).
+The two share a word and nothing else.
+
+- **The manifest is a commit.** `.nashcode/stack.toml` at the default-branch tip, read
+  on refresh. Each `[[dep]]` carries: `name` (a plain name, unique in the file), `url`
+  (an `http(s)` git clone URL — any other scheme is reported in brain, never fetched),
+  exactly one of `pin` (a commit) or `track` (a branch), and an optional free-text
+  `layer`. A malformed manifest degrades: brain carries the parse error and every
+  other page is unaffected. No manifest, no stack, no cost.
+- **One mirror per URL, global.** Upstream mirrors are `git clone --mirror` copies
+  under `$NASHCODE_MIRRORS/up/<host>/<path>.git`, keyed by normalized clone URL, so
+  two repos declaring the same dependency share one mirror. They are read-only
+  everywhere: no push, no CI, no plans, no board, no comments, no traces.
+- **`pin` fetches until the commit is on disk, then never again.** `track` deps
+  refresh on a 30-minute schedule, plus `POST /:repo/stack/sync` for "I need it now".
+  Upstream fetches follow the mirror rules: a failure degrades to stale, and never
+  blocks or fails a page.
+- **Brain tells the whole story.** The per-repo `/brain` JSON grows a `stack` stanza:
+  per dep its name, url, layer, mode, the declared rev, the commit actually resolved
+  on disk, freshness, and any error — parse errors and fetch errors both land here.
+- Mirrors are whole, not partial: dgit and celld are small. Blobless clones for a
+  kernel-sized dep are a known ceiling, taken when one hurts.
+
 ## Architecture
 
 A repo tab that answers "what is the shape of this system" — both the shape somebody
