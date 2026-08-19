@@ -667,6 +667,26 @@ viewer-side surface; the goal doc binds protocol, grouping, and notification sem
   drops hot rows past the project's `retention_days`; the archive object stays.
   `/bugs/:project/logs` searches it — FTS query, level filter, `file:` token, newest
   first, paged. Logs never push to Pushover.
+- **Drain.** The viewer pulls from the public ingester; it never accepts an inbound
+  connection. Protocol: `ingester/README.md`, "The drainer contract" — three bearer-authed
+  routes, and nothing in the drainer may know that celld serves them.
+  `NASHCODE_BUGS_DRAIN` is an iroh EndpointId or an `http://host:port` base URL, and both
+  work identically; `NASHCODE_BUGS_DRAIN_TOKEN` is the bearer token;
+  `NASHCODE_BUGS_DRAIN_KEY` is the file holding the persistent iroh secret key, whose
+  EndpointId goes in the ingester's allow-file; `NASHCODE_BUGS_DRAIN_INTERVAL` is seconds
+  between cycles, default 30. Unset `NASHCODE_BUGS_DRAIN` = the drainer is off, one doctor
+  line. Drain set with `NASHCODE_BUGS_BUCKET` unset is a refusal to start, not a warning:
+  a drain with nowhere durable to put a payload would ack rows into nothing.
+  Each cycle drains every active project after its stored cursor and replays each row into
+  the door its `kind` names — `envelope` into the envelope pipeline, `logs` into the NDJSON
+  one — with the same streaming caps the direct doors use. **Ack only what digest took.** A
+  429 off the byte-budget queue ends the project's cycle with no ack, so the rows come back
+  next time; delivery is at-least-once and the dedupe on `event_id` and `dedupe_key` is what
+  makes a redelivery cost nothing. A row that can never parse is acked and counted, because
+  one poison row must not wedge a project's queue for ever. The cursor per project lives in
+  SQLite, so a restart replays only the unacked tail. The registry is `PUT` whole whenever
+  the project set changed since the last push, never merged; an empty set is refused and
+  logged rather than pushed, since emptying it takes every project on the fleet offline.
 - **Pushover.** `NASHCODE_PUSHOVER_TOKEN` + `NASHCODE_PUSHOVER_USER`. State changes
   only — new issue, regression, unmute, cron incident, recovery — never per event.
   SQLite outbound queue, single sender, retry/park rules and the ~20/hour cap per the
