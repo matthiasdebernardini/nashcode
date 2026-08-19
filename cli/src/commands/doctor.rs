@@ -1,19 +1,19 @@
-//! `nashcode doctor` — one line per check, and never a false pass.
+//! `nashcode doctor` — one entry per check, and never a false pass.
 //!
 //! A check that cannot run reports `skip` with the reason. Reporting a skipped
 //! check as a pass is how a health command becomes useless, so the three
-//! statuses stay distinct in both output modes and the exit code counts only
-//! real failures.
+//! statuses stay distinct and only a real failure drives the exit code.
+//!
+//! The checks themselves live here; agcli owns the command, the report shape,
+//! and the exit code it carries. [`checks`] is the seam between them.
 
-use super::Ctx;
 use crate::api::{AuthProbe, Client, Reach, classify};
-use crate::output::mark;
-use crate::profile::Profile;
+use crate::profile::{Profile, Store};
 use crate::remote;
 use crate::ssh::{Ssh, parse_kv};
-use anyhow::Result;
+use agcli::{CheckResult, ExitCode};
 use serde::Serialize;
-use serde_json::json;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -62,72 +62,104 @@ impl Check {
     fn skip(id: &'static str, label: &'static str, detail: impl Into<String>) -> Self {
         Self::new(id, label, Status::Skip, detail)
     }
+
+    /// The same finding, in the shape agcli reports. A failure carries the
+    /// command to run next, because "the token is rejected" without "rotate it
+    /// like this" is a diagnosis an agent cannot act on.
+    fn to_result(&self) -> CheckResult {
+        match self.status {
+            Status::Ok => CheckResult::pass_with(self.detail.clone()),
+            Status::Skip => CheckResult::skip(self.detail.clone()),
+            Status::Fail => CheckResult::fail(self.detail.clone(), fix_for(self.id)),
+        }
+    }
 }
 
-/// The whole report. `ok` is false when any check failed; skips do not count.
-pub fn report(profile: Option<&str>, checks: &[Check]) -> serde_json::Value {
-    let failed = checks.iter().filter(|c| c.status == Status::Fail).count();
-    json!({
-        "profile": profile,
-        "ok": failed == 0,
-        "failed": failed,
-        "checks": checks,
-    })
+/// What to run when a check fails. One runnable line per check id.
+fn fix_for(id: &str) -> &'static str {
+    match id {
+        "profile" => "nashcode setup --host <user@host> --provider <aws-s3|r2|tigris> --bucket <name>",
+        "server" => "tailscale status   # then, on the host: tailscale serve --bg --https=443 http://127.0.0.1:8080",
+        "tls" => "ssh <host> tailscale serve status",
+        "token" => "nashcode token   # compare it with GIT_TOKEN in ~/dgit/wrangler.celld.jsonc on the host",
+        "celld" => "ssh <host> sudo systemctl restart celld && ssh <host> systemctl status celld",
+        "loopback" => "ssh <host> journalctl -u celld -n 50",
+        "tailscale-headers" => "ssh <host> sudo tailscale serve --bg --https=443 http://127.0.0.1:8080",
+        "bucket" => "ssh <host> sudo celld diagnose   # check the bucket and credentials in /etc/celld/celld.env",
+        "viewer" => "ssh <host> sudo systemctl restart nashcode-viewer",
+        _ => "nashcode doctor",
+    }
 }
 
-/// One line per check: mark, label padded to a common width, then the detail.
-pub fn render(checks: &[Check]) -> Vec<String> {
-    let width = checks.iter().map(|c| c.label.len()).max().unwrap_or(0);
-    checks
+/// The checks, as agcli runs them.
+///
+/// agcli asks for one closure per check, but nashcode's checks come in batches:
+/// four of them share one SSH round trip, three share one HTTP request. Running
+/// each closure independently would multiply those calls by four. So the whole
+/// sweep runs once, behind a `OnceLock`, and each closure reads its own row out
+/// of the cached answer — the first check to run pays for all of them.
+pub fn checks() -> Vec<agcli::Check> {
+    // Every check, by its stable id, in report order, with the exit code its
+    // failure should drive. A rejected token is an auth failure; everything
+    // else that can break is the deployment being unreachable or wrong, which
+    // is `API`. A missing profile is not a broken deployment — it is no
+    // deployment, which is `NOT_FOUND`.
+    const ORDER: [(&str, i32); 9] = [
+        ("profile", ExitCode::NOT_FOUND),
+        ("server", ExitCode::API),
+        ("tls", ExitCode::API),
+        ("token", ExitCode::AUTH),
+        ("celld", ExitCode::API),
+        ("loopback", ExitCode::API),
+        ("tailscale-headers", ExitCode::API),
+        ("bucket", ExitCode::API),
+        ("viewer", ExitCode::API),
+    ];
+
+    let sweep: Arc<OnceLock<Vec<Check>>> = Arc::new(OnceLock::new());
+    ORDER
         .iter()
-        .map(|c| {
-            format!(
-                "{} {:width$}  {}",
-                mark(c.status.as_str()),
-                c.label,
-                c.detail,
-                width = width
-            )
+        .map(|(id, code)| {
+            let sweep = Arc::clone(&sweep);
+            let id = *id;
+            agcli::Check::new(id, move || {
+                let sweep = Arc::clone(&sweep);
+                Box::pin(async move {
+                    let all = sweep.get_or_init(sweep_all);
+                    match all.iter().find(|c| c.id == id) {
+                        Some(c) => c.to_result(),
+                        // The profile check failed, so nothing after it ran.
+                        None => CheckResult::skip("skipped: the profile could not be read"),
+                    }
+                })
+            })
+            .exit_code(*code)
         })
         .collect()
 }
 
-pub fn run(ctx: &Ctx) -> Result<()> {
+/// Run every check once, in order, and stop where a failure makes the rest
+/// meaningless: with no profile there is no server to ask about.
+fn sweep_all() -> Vec<Check> {
     let mut checks = Vec::new();
-
-    let loaded = ctx.profile();
-    let (name, p) = match loaded {
+    let p = match Store::load().and_then(|store| {
+        let (n, p) = store.resolve(None)?;
+        Ok((n, p.clone()))
+    }) {
         Ok((n, p)) => {
             checks.push(Check::ok("profile", "profile", format!("{n} -> {}", p.url)));
-            (n, p)
+            p
         }
         Err(e) => {
             checks.push(Check::fail("profile", "profile", e.to_string()));
-            let value = report(None, &checks);
-            ctx.out.emit(value, || {
-                for line in render(&checks) {
-                    ctx.out.line(line);
-                }
-            });
-            std::process::exit(1);
+            return checks;
         }
     };
 
     checks.extend(server_checks(&p));
     checks.extend(host_checks(&p));
     checks.push(viewer_check(&p));
-
-    let failed = checks.iter().filter(|c| c.status == Status::Fail).count();
-    let value = report(Some(&name), &checks);
-    ctx.out.emit(value, || {
-        for line in render(&checks) {
-            ctx.out.line(line);
-        }
-    });
-    if failed > 0 {
-        std::process::exit(1);
-    }
-    Ok(())
+    checks
 }
 
 /// Reachability, certificate, and credential, from this machine.
@@ -305,37 +337,40 @@ mod tests {
     }
 
     #[test]
-    fn render_is_one_aligned_line_per_check() {
-        let lines = render(&sample());
-        assert_eq!(lines.len(), 3);
-        assert!(lines[0].starts_with("✓ profile"));
-        assert!(lines[1].starts_with("✗ server "));
-        assert!(lines[2].starts_with("- viewer  "));
-        // Details are aligned into one column.
+    fn a_skip_is_not_a_pass_and_a_fail_carries_a_runnable_fix() {
+        let results: Vec<CheckResult> = sample().iter().map(Check::to_result).collect();
+        assert!(results[0].is_ok() && !results[0].skipped());
+        assert!(results[1].failed());
+        assert!(results[2].skipped(), "a skip must never read as a pass");
+        // agcli leaves `healthy` true for a skip, so the skip must say why.
         assert_eq!(
-            lines[0].find("box ->").unwrap(),
-            lines[1].find("cannot").unwrap()
+            results[2].detail.as_deref(),
+            Some("no viewer configured")
         );
+        // A failure without a next command is a diagnosis an agent cannot act on.
+        let fix = results[1].fix.as_deref().unwrap();
+        assert!(fix.contains("tailscale"), "{fix}");
     }
 
     #[test]
-    fn a_skip_is_not_a_pass_and_a_fail_sinks_the_report() {
-        let value = report(Some("box"), &sample());
-        assert_eq!(value["ok"], false);
-        assert_eq!(value["failed"], 1);
-        assert_eq!(value["checks"][2]["status"], "skip");
-
-        let clean = vec![Check::ok("a", "a", "fine"), Check::skip("b", "b", "n/a")];
-        let value = report(Some("box"), &clean);
-        assert_eq!(value["ok"], true);
-        assert_eq!(value["failed"], 0);
-    }
-
-    #[test]
-    fn every_check_carries_a_stable_id_and_a_detail() {
+    fn every_check_carries_a_stable_id_a_detail_and_a_fix() {
         for c in sample() {
             assert!(!c.id.is_empty());
             assert!(!c.detail.is_empty(), "{} has no detail", c.id);
+            assert!(!fix_for(c.id).is_empty(), "{} has no fix", c.id);
+        }
+    }
+
+    #[test]
+    fn the_registered_checks_cover_every_id_the_sweep_can_produce() {
+        let names: Vec<String> = checks().iter().map(|c| c.name().to_string()).collect();
+        assert_eq!(names.len(), 9);
+        for id in [
+            "profile", "server", "tls", "token", "celld", "loopback",
+            "tailscale-headers", "bucket", "viewer",
+        ] {
+            assert!(names.iter().any(|n| n == id), "{id} is not registered");
+            assert_ne!(fix_for(id), "nashcode doctor", "{id} has only the fallback fix");
         }
     }
 }

@@ -8,7 +8,6 @@
 use super::Ctx;
 use crate::api::Client;
 use crate::cli::{AnnotateArgs, CommentsArgs, PlanNewArgs};
-use crate::timefmt::age_of;
 use crate::vcs;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -52,7 +51,7 @@ pub fn template(title: &str) -> String {
     )
 }
 
-pub fn new(ctx: &Ctx, args: &PlanNewArgs) -> Result<()> {
+pub fn new(_ctx: &Ctx, args: &PlanNewArgs) -> Result<Value> {
     let title = args.title.join(" ");
     if title.trim().is_empty() {
         bail!("give the plan a title: nashcode plan new \"replace the parser\"");
@@ -71,13 +70,10 @@ pub fn new(ctx: &Ctx, args: &PlanNewArgs) -> Result<()> {
         .unwrap_or(&path)
         .to_string_lossy()
         .into_owned();
-    ctx.out.emit(json!({ "path": path, "relative": rel, "title": title }), || {
-        ctx.out.line(rel)
-    });
-    Ok(())
+    Ok(json!({ "path": path, "relative": rel, "title": title }))
 }
 
-pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<()> {
+pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<Value> {
     let path = PathBuf::from(&args.file);
     if !path.exists() {
         bail!("{} does not exist", path.display());
@@ -85,27 +81,33 @@ pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<()> {
 
     // The viewer link is useful whether or not plannotator is installed.
     let viewer = viewer_plan_url(ctx, &path).unwrap_or(None);
+    let found = which("plannotator");
+    let where_it_is = match &found {
+        Some(bin) => json!(bin.to_string_lossy()),
+        None => Value::Null,
+    };
+    let base = json!({
+        "file": args.file,
+        "plannotator": where_it_is,
+        "viewer_url": viewer,
+    });
 
-    let Some(bin) = which("plannotator") else {
-        ctx.out.emit(
-            json!({ "file": args.file, "plannotator": Value::Null, "viewer_url": viewer }),
-            || {
-                ctx.out.line(PLANNOTATOR_HINT);
-                if let Some(u) = &viewer {
-                    ctx.out.line(u);
-                }
-            },
-        );
-        return Ok(());
+    let Some(bin) = found else {
+        let mut value = base;
+        value["launched"] = json!(false);
+        value["status"] = json!("plannotator not installed");
+        value["hint"] = json!(PLANNOTATOR_HINT);
+        return Ok(value);
     };
 
-    if ctx.out.is_json() {
-        ctx.out.json(&json!({
-            "file": args.file,
-            "plannotator": bin.to_string_lossy(),
-            "viewer_url": viewer,
-        }));
-        return Ok(());
+    // `--no-launch` is the inspect-only form: say where everything is and open
+    // nothing. Launching is the default now, because the agent runs this FOR a
+    // human who is about to read the plan.
+    if args.no_launch {
+        let mut value = base;
+        value["launched"] = json!(false);
+        value["status"] = json!("not launched (--no-launch)");
+        return Ok(value);
     }
 
     // Resolved before the launch so a missing viewer is a known fact by the time
@@ -122,8 +124,8 @@ pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<()> {
         .arg("--result-file")
         .arg(&result_file)
         // --json makes plannotator print the decision record on stdout as well
-        // as publishing it. We read the file, so the copy on our own stdout
-        // would only be noise between the feedback and the posted id.
+        // as publishing it. We read the file, and stdout belongs to the
+        // envelope, so the child's copy is routed to /dev/null.
         .stdout(std::process::Stdio::null())
         .status()
         .with_context(|| format!("run {}", bin.display()));
@@ -159,29 +161,32 @@ pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<()> {
         }
     };
 
+    let mut value = base;
+    value["launched"] = json!(true);
+
     let decision = match decision_body(&raw) {
         Ok(d) => d,
         Err(e) => {
-            // Unreadable, but still the human's words. Put them where they can
-            // be copied out, then fail.
-            ctx.out.line(raw.trim());
-            return Err(e);
+            // Unreadable, but still the human's words. Carry them in the error
+            // rather than dropping them on the floor.
+            return Err(e.context(format!("the decision plannotator wrote was: {}", raw.trim())));
         }
     };
     let Some(body) = decision else {
-        ctx.out.line("dismissed, nothing posted");
-        return Ok(());
+        value["status"] = json!("dismissed, nothing posted");
+        return Ok(value);
     };
+    value["feedback"] = json!(body);
 
     let target = match target {
         Ok(t) => t,
         Err(why) => {
-            // The human's words outlive the plumbing. Print them, say why they
-            // went nowhere, and exit 0: nothing failed, there was just nowhere
+            // The human's words outlive the plumbing. Return them, say why they
+            // went nowhere, and succeed: nothing failed, there was just nowhere
             // to put them.
-            ctx.out.line(&body);
-            ctx.out.line(format!("not posted: {why}"));
-            return Ok(());
+            value["status"] = json!("not posted");
+            value["not_posted"] = json!(why);
+            return Ok(value);
         }
     };
 
@@ -189,32 +194,42 @@ pub fn annotate(ctx: &Ctx, args: &AnnotateArgs) -> Result<()> {
     let client = Client::new(&target.viewer, &target.token);
     let reply = match client.post_url(&target.url, &payload) {
         Ok(r) => r,
-        Err(e) => {
-            ctx.out.line(&body);
-            return Err(e.context("post the annotation to the viewer"));
-        }
+        Err(e) => return Err(e.context(unposted("post the annotation to the viewer", &body))),
     };
     if !reply.ok() {
-        ctx.out.line(&body);
         bail!(
-            "{} returned HTTP {}\n{}",
-            target.url,
-            reply.status,
-            reply.body.trim()
+            "{}",
+            unposted(
+                &format!(
+                    "{} returned HTTP {}\n{}",
+                    target.url,
+                    reply.status,
+                    reply.body.trim()
+                ),
+                &body
+            )
         );
     }
 
     let id = serde_json::from_str::<Value>(&reply.body)
         .ok()
         .and_then(|v| v.get("id").and_then(|i| i.as_i64()));
-    ctx.out.line(match id {
-        Some(id) => format!("posted #{id}"),
-        None => "posted".to_string(),
-    });
-    if let Some(u) = &viewer {
-        ctx.out.line(u);
-    }
-    Ok(())
+    value["status"] = json!("posted");
+    value["branch"] = json!(target.branch);
+    value["comment_id"] = match id {
+        Some(id) => json!(id),
+        None => Value::Null,
+    };
+    Ok(value)
+}
+
+/// A failure message that still carries the feedback it could not deliver.
+///
+/// The envelope has no field for "here is the thing that failed to send", so it
+/// rides in the message: losing ten minutes of somebody's review to a 400 is the
+/// one outcome this command must never have.
+fn unposted(why: &str, body: &str) -> String {
+    format!("{why}\n\nunposted feedback:\n{body}")
 }
 
 /// What plannotator writes to `--result-file`: one record, one decision.
@@ -394,16 +409,6 @@ fn which(bin: &str) -> Option<PathBuf> {
 
 // --- comments --------------------------------------------------------------
 
-/// One row of the viewer's comment feed, normalised.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Comment {
-    pub id: i64,
-    pub author: String,
-    pub created_at: String,
-    pub line: Option<i64>,
-    pub body: String,
-}
-
 /// Percent-encode a query-string value. Only the unreserved set survives.
 pub fn pct(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -441,70 +446,7 @@ pub fn comments_url(
     url
 }
 
-/// Read the rows out of the viewer's answer.
-///
-/// The contract is "ordered rows with integer ids". The rows may arrive as a
-/// bare array or wrapped in an object; both are accepted, and each field has a
-/// couple of accepted spellings, so a viewer revision that renames `created`
-/// to `created_at` does not break the command. Whatever arrives is still passed
-/// through verbatim under `--json`.
-pub fn parse_comments(body: &str) -> Result<(Value, Vec<Comment>)> {
-    let value: Value =
-        serde_json::from_str(body).context("the viewer's /comments answer is not JSON")?;
-    let rows = match &value {
-        Value::Array(a) => a.clone(),
-        Value::Object(o) => o
-            .get("comments")
-            .or_else(|| o.get("rows"))
-            .or_else(|| o.get("data"))
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    let pick = |row: &Value, keys: &[&str]| -> String {
-        keys.iter()
-            .find_map(|k| row.get(*k).and_then(|v| v.as_str()))
-            .unwrap_or("")
-            .to_string()
-    };
-    let comments = rows
-        .iter()
-        .map(|row| Comment {
-            id: row.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
-            author: pick(row, &["author", "author_login", "user", "login"]),
-            created_at: pick(row, &["created_at", "created", "at", "timestamp"]),
-            line: row
-                .get("line")
-                .and_then(|v| v.as_i64())
-                .or_else(|| row.get("line_number").and_then(|v| v.as_i64())),
-            body: pick(row, &["body", "text", "comment"]),
-        })
-        .collect();
-    Ok((value, comments))
-}
-
-/// One block per comment: a header line, then the body indented under it.
-pub fn render_comments(comments: &[Comment]) -> Vec<String> {
-    if comments.is_empty() {
-        return vec!["no comments".to_string()];
-    }
-    let mut out = Vec::new();
-    for (i, c) in comments.iter().enumerate() {
-        if i > 0 {
-            out.push(String::new());
-        }
-        let who = if c.author.is_empty() { "someone" } else { &c.author };
-        let line = c.line.map(|l| format!(" line {l}")).unwrap_or_default();
-        out.push(format!("#{} {who}{line} · {}", c.id, age_of(&c.created_at)));
-        for l in c.body.lines() {
-            out.push(format!("    {l}"));
-        }
-    }
-    out
-}
-
-pub fn comments(ctx: &Ctx, args: &CommentsArgs) -> Result<()> {
+pub fn comments(ctx: &Ctx, args: &CommentsArgs) -> Result<Vec<Value>> {
     let (name, p) = ctx.profile()?;
     let Some(viewer) = p.viewer_url.as_deref().filter(|v| !v.is_empty()) else {
         bail!(
@@ -538,18 +480,44 @@ pub fn comments(ctx: &Ctx, args: &CommentsArgs) -> Result<()> {
     if !reply.ok() {
         bail!("{url} returned HTTP {}\n{}", reply.status, reply.body.trim());
     }
-    let (raw, comments) = parse_comments(&reply.body)?;
+    rows_of(&reply.body)
+}
 
-    // --json passes the viewer's answer through untouched: an agent should see
-    // exactly what the API said, not this CLI's reading of it.
-    if ctx.out.is_json() {
-        ctx.out.json(&raw);
-        return Ok(());
-    }
-    for line in render_comments(&comments) {
-        ctx.out.line(line);
-    }
-    Ok(())
+/// The viewer's rows, verbatim, as a list of objects.
+///
+/// The wrapper the viewer chose (a bare array, or an object with `comments` /
+/// `rows` / `data`) is this command's business, not the caller's; the rows
+/// inside it are passed through untouched, so a field the viewer grows arrives
+/// without a CLI release.
+pub fn rows_of(body: &str) -> Result<Vec<Value>> {
+    let value: Value =
+        serde_json::from_str(body).context("the viewer's /comments answer is not JSON")?;
+    Ok(match value {
+        Value::Array(a) => a,
+        Value::Object(o) => o
+            .get("comments")
+            .or_else(|| o.get("rows"))
+            .or_else(|| o.get("data"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    })
+}
+
+/// The newest `created_at` across the rows, for the `--since` an agent should
+/// poll with next. Timestamps are RFC 3339 with a fixed offset, so the string
+/// order is the time order.
+pub fn newest_timestamp(rows: &[Value]) -> Option<String> {
+    rows.iter()
+        .filter_map(|row| {
+            ["created_at", "created", "at", "timestamp"]
+                .iter()
+                .find_map(|k| row.get(*k).and_then(Value::as_str))
+        })
+        .filter(|s| !s.is_empty())
+        .max()
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -576,20 +544,6 @@ mod tests {
     fn since_is_passed_through_as_given() {
         let u = comments_url("https://v", "r", "p.md", None, Some("2026-08-18T00:00:00Z"));
         assert!(u.ends_with("&since=2026-08-18T00%3A00%3A00Z"));
-    }
-
-    #[test]
-    fn rows_parse_wrapped_or_bare() {
-        let wrapped = r#"{"comments":[{"id":7,"author":"rob","created_at":"2026-08-18T00:00:00Z","line":12,"body":"no"}]}"#;
-        let (_, c) = parse_comments(wrapped).unwrap();
-        assert_eq!(c.len(), 1);
-        assert_eq!(c[0].id, 7);
-        assert_eq!(c[0].line, Some(12));
-
-        let bare = r#"[{"id":1,"user":"ann","at":"2026-08-18T00:00:00Z","text":"yes"}]"#;
-        let (_, c) = parse_comments(bare).unwrap();
-        assert_eq!(c[0].author, "ann");
-        assert_eq!(c[0].body, "yes");
     }
 
     #[test]
@@ -677,18 +631,38 @@ mod tests {
     }
 
     #[test]
-    fn rendering_indents_the_body_under_its_header() {
-        let c = vec![Comment {
-            id: 3,
-            author: "rob".into(),
-            created_at: "not-a-date".into(),
-            line: Some(4),
-            body: "first\nsecond".into(),
-        }];
-        let lines = render_comments(&c);
-        assert_eq!(lines[0], "#3 rob line 4 · not-a-date");
-        assert_eq!(lines[1], "    first");
-        assert_eq!(lines[2], "    second");
-        assert_eq!(render_comments(&[]), vec!["no comments"]);
+    fn rows_arrive_wrapped_or_bare_and_are_passed_through_untouched() {
+        let wrapped = r#"{"comments":[{"id":7,"author":"rob","created_at":"2026-08-18T00:00:00Z","line":12,"body":"no"}]}"#;
+        let rows = rows_of(wrapped).unwrap();
+        assert_eq!(rows.len(), 1);
+        // Untouched: the viewer's own keys, not a normalised copy of them.
+        assert_eq!(rows[0]["id"], 7);
+        assert_eq!(rows[0]["line"], 12);
+        assert_eq!(rows[0]["author"], "rob");
+
+        let bare = r#"[{"id":1,"user":"ann","at":"2026-08-18T00:00:00Z","text":"yes"}]"#;
+        let rows = rows_of(bare).unwrap();
+        assert_eq!(rows[0]["user"], "ann");
+        assert_eq!(rows[0]["text"], "yes");
+
+        assert!(rows_of("not json").is_err());
+        assert!(rows_of("{}").unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_newest_timestamp_is_what_an_agent_polls_from_next() {
+        let rows = rows_of(
+            r#"[{"id":1,"created_at":"2026-08-18T00:00:00Z"},
+                {"id":2,"created_at":"2026-08-19T09:30:00Z"},
+                {"id":3,"created":"2026-08-17T00:00:00Z"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            newest_timestamp(&rows),
+            Some("2026-08-19T09:30:00Z".to_string())
+        );
+        assert_eq!(newest_timestamp(&[]), None);
+        // A row with no readable timestamp cannot invent one.
+        assert_eq!(newest_timestamp(&rows_of(r#"[{"id":1}]"#).unwrap()), None);
     }
 }

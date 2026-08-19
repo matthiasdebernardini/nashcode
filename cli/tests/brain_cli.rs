@@ -1,10 +1,10 @@
 //! `nashcode brain` end to end: the real binary against a real `/brain` answer
 //! served from a loopback listener this test owns. No network, no host, no viewer.
 //!
-//! Two contracts are load-bearing here and both are asserted. `--json` emits the
-//! *digest*, not the stanza the viewer sent. And every failure path exits 0: this
-//! command runs from a session-start hook, so a dead viewer must cost one line,
-//! not the session.
+//! Two contracts are load-bearing here and both are asserted. The result is the
+//! *digest*, not the stanza the viewer sent. And every failure path exits 0 with
+//! an `ok: true` envelope: this command runs from a session-start hook, so a
+//! dead viewer must cost one `status` field, not the session.
 //!
 //! `fixtures/brain.json` is not invented. It was captured from the viewer's own
 //! `GET /brain?repo=demo` over a `testbed_with` fixture carrying stacked branches,
@@ -127,6 +127,17 @@ fn first_line(head: &str) -> String {
     head.lines().next().unwrap_or_default().to_string()
 }
 
+/// The one JSON value the run wrote to stdout.
+fn envelope(out: &std::process::Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not one JSON value ({e})\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
 /// True when no ancestor of `dir` is a git or jj working copy.
 ///
 /// `brain` walks up from the cwd looking for one, and on a machine whose TMPDIR
@@ -137,7 +148,7 @@ fn has_no_repo_above(dir: &std::path::Path) -> bool {
 }
 
 #[test]
-fn json_mode_emits_the_digest_and_asks_the_viewer_for_json() {
+fn the_result_is_the_digest_and_the_viewer_is_asked_for_json() {
     let dir = tempfile::tempdir().unwrap();
     let (port, server) = one_shot_server("200 OK", FIXTURE);
     let config = write_config(dir.path(), Some(port));
@@ -145,11 +156,14 @@ fn json_mode_emits_the_digest_and_asks_the_viewer_for_json() {
     let out = nashcode(&config, dir.path(), &["--json", "brain", "demo"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let v = envelope(&out);
     assert_eq!(v["ok"], true);
-    assert_eq!(v["generated_at"], "2026-08-19T12:00:00Z");
+    assert_eq!(v["exit_code"], 0);
+    let result = &v["result"];
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["generated_at"], "2026-08-19T12:00:00Z");
 
-    let repo = &v["repos"][0];
+    let repo = &result["repos"][0];
     assert_eq!(repo["name"], "demo");
     assert_eq!(repo["default_branch"], "main");
     // The digest, not the stanza: the aggregate's cards and plan summaries are gone.
@@ -204,27 +218,24 @@ fn json_mode_emits_the_digest_and_asks_the_viewer_for_json() {
 }
 
 #[test]
-fn human_mode_is_one_labelled_group_per_section() {
+fn the_digest_is_the_only_thing_on_stdout_and_the_stanza_never_leaks() {
     let dir = tempfile::tempdir().unwrap();
     let (port, server) = one_shot_server("200 OK", FIXTURE);
     let config = write_config(dir.path(), Some(port));
 
     let out = nashcode(&config, dir.path(), &["brain", "demo"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let text = String::from_utf8_lossy(&out.stdout);
 
-    assert!(text.starts_with("demo\n"), "{text}");
-    assert!(text.contains("main f26f8ed ci:passed"), "{text}");
-    assert!(text.contains("part-1 0214c77 +1 ci:failed"), "{text}");
-    assert!(text.contains("5 files · 0 symbols · 5 chunks · indexed 3 days ago"), "{text}");
-    assert!(text.contains("plans/api.md (7 open)"), "{text}");
-    assert!(text.contains("plans/board.md"), "{text}");
-    assert!(text.contains("3 submissions"), "{text}");
-    assert!(text.contains("ci_run part-1 failed"), "{text}");
-    // The activity log is the last five rows, not all nine.
-    assert_eq!(text.matches("comment main").count(), 3, "{text}");
-    // Nothing from the aggregate leaked into the text.
-    assert!(!text.contains("cards") && !text.contains("embedded"), "{text}");
+    // Exactly one JSON value, and none of the aggregate's bulk inside it.
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("\"cards\""), "{text}");
+    assert!(!text.contains("embedded_chunks"), "{text}");
+    assert!(!text.contains("\"activity\""), "{text}");
+
+    let repo = &envelope(&out)["result"]["repos"][0];
+    assert_eq!(repo["name"], "demo");
+    assert_eq!(repo["code"]["files"], 5);
+    assert_eq!(repo["recent"].as_array().unwrap().len(), 5);
 
     server.served();
 }
@@ -268,26 +279,27 @@ fn outside_a_repository_it_digests_the_whole_brain() {
 
     // No filter on the wire, and the same digest shape as a single repository.
     assert_eq!(first_line(&server.head()), "GET /brain HTTP/1.1");
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["repos"].as_array().unwrap().len(), 1);
+    let v = envelope(&out);
+    assert_eq!(v["result"]["repos"].as_array().unwrap().len(), 1);
 }
 
 #[test]
-fn a_dead_viewer_is_one_line_and_exit_zero() {
+fn a_dead_viewer_is_a_status_and_exit_zero() {
     let dir = tempfile::tempdir().unwrap();
     let config = write_config(dir.path(), Some(dead_port()));
 
-    let out = nashcode(&config, dir.path(), &["brain", "demo"]);
-    assert_eq!(out.status.code(), Some(0), "a session-start hook must survive this");
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(text.lines().count(), 1, "{text}");
-    assert!(text.contains("viewer unreachable"), "{text}");
-
-    let out = nashcode(&config, dir.path(), &["--json", "brain", "demo"]);
-    assert_eq!(out.status.code(), Some(0));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ok"], false);
-    assert!(v["error"].as_str().unwrap().contains("viewer unreachable"), "{v}");
+    for args in [&["brain", "demo"][..], &["--json", "brain", "demo"][..]] {
+        let out = nashcode(&config, dir.path(), args);
+        assert_eq!(out.status.code(), Some(0), "a session-start hook must survive this");
+        let v = envelope(&out);
+        // The command succeeded; the viewer is what is down.
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["result"]["status"], "unavailable");
+        assert!(
+            v["result"]["error"].as_str().unwrap().contains("viewer unreachable"),
+            "{v}"
+        );
+    }
 }
 
 #[test]
@@ -298,9 +310,10 @@ fn a_viewer_that_answers_with_an_error_status_is_reported_not_parsed() {
 
     let out = nashcode(&config, dir.path(), &["--json", "brain", "demo"]);
     assert_eq!(out.status.code(), Some(0));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ok"], false);
-    assert!(v["error"].as_str().unwrap().contains("503"), "{v}");
+    let v = envelope(&out);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["result"]["status"], "unavailable");
+    assert!(v["result"]["error"].as_str().unwrap().contains("503"), "{v}");
     server.served();
 }
 
@@ -314,17 +327,19 @@ fn an_unconfigured_profile_still_exits_zero() {
     let config = write_config(dir.path(), None);
     let out = nashcode(&config, dir.path(), &["brain"]);
     assert_eq!(out.status.code(), Some(0));
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(text.lines().count(), 1, "{text}");
-    assert!(text.contains("no viewer URL"), "{text}");
-    assert!(text.contains("nashcode setup --viewer"), "{text}");
+    let v = envelope(&out);
+    assert_eq!(v["ok"], true);
+    let why = v["result"]["error"].as_str().unwrap();
+    assert!(why.contains("no viewer URL"), "{why}");
+    assert!(why.contains("nashcode setup --viewer"), "{why}");
 
     // No profile store at all.
     let missing = dir.path().join("absent.toml");
     let out = nashcode(&missing, dir.path(), &["--json", "brain"]);
     assert_eq!(out.status.code(), Some(0));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ok"], false);
+    let v = envelope(&out);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["result"]["status"], "unavailable");
 }
 
 #[test]
@@ -335,9 +350,9 @@ fn a_viewer_that_answers_html_is_reported_rather_than_half_read() {
 
     let out = nashcode(&config, dir.path(), &["--json", "brain", "demo"]);
     assert_eq!(out.status.code(), Some(0));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ok"], false);
-    assert!(v["error"].as_str().unwrap().contains("not JSON"), "{v}");
+    let v = envelope(&out);
+    assert_eq!(v["result"]["status"], "unavailable");
+    assert!(v["result"]["error"].as_str().unwrap().contains("not JSON"), "{v}");
     server.served();
 }
 
@@ -361,9 +376,9 @@ fn a_viewer_that_accepts_and_never_answers_times_out_rather_than_hanging() {
         elapsed < Duration::from_secs(30),
         "waited {elapsed:?}; a session-start hook cannot block that long"
     );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ok"], false);
-    assert!(v["error"].as_str().unwrap().contains("unreachable"), "{v}");
+    let v = envelope(&out);
+    assert_eq!(v["result"]["status"], "unavailable");
+    assert!(v["result"]["error"].as_str().unwrap().contains("unreachable"), "{v}");
 }
 
 #[test]
@@ -374,8 +389,12 @@ fn a_repo_the_viewer_has_never_heard_of_is_named_in_the_answer() {
 
     let out = nashcode(&config, dir.path(), &["brain", "typo-repo"]);
     assert_eq!(out.status.code(), Some(0));
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(text.trim_end(), "no repository named typo-repo on the viewer", "{text}");
+    let v = envelope(&out);
+    assert_eq!(v["result"]["status"], "unavailable");
+    assert_eq!(
+        v["result"]["error"],
+        "no repository named typo-repo on the viewer"
+    );
     server.served();
 
     // With no name asked for, an empty viewer is an empty viewer, not a typo.
@@ -383,6 +402,8 @@ fn a_repo_the_viewer_has_never_heard_of_is_named_in_the_answer() {
     let config = write_config(dir.path(), Some(port));
     let out = nashcode(&config, dir.path(), &["brain"]);
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end(), "no repositories");
+    let v = envelope(&out);
+    assert_eq!(v["result"]["status"], "ok");
+    assert_eq!(v["result"]["repos"].as_array().unwrap().len(), 0);
     server.served();
 }

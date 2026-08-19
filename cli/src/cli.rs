@@ -1,10 +1,19 @@
 //! The command surface.
 //!
-//! Help text here is the CLI's documentation. It assumes the reader has never
-//! heard of celld, so the top-level `--help` explains the architecture before
+//! Built on `agcli`: every command answers with one JSON envelope on stdout and
+//! a typed exit code, and the reserved agent flags (`--select`, `--compact`,
+//! `--quiet`, `--yes`, `--dry-run`, and a `--json` that is accepted and ignored)
+//! come free. `grep` is the one exception — it owes callers ripgrep's
+//! `path:line:content` and ripgrep's exit codes, so it is a raw passthrough
+//! command that owns its own argv and its own stdout.
+//!
+//! The descriptions here are the CLI's documentation. They assume the reader
+//! has never heard of celld, so the root tree explains the architecture before
 //! it lists commands.
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use crate::commands::{Ctx, brain, code, doctor, grep, invite, plan, profiles, repo, setup};
+use crate::output::Out;
+use agcli::{AgentCli, Command, CommandError, CommandOutput, CommandRequest, ExitCode, NextAction};
 
 pub const ABOUT: &str = "Run your own git host on your own box, behind your own tailnet.";
 
@@ -30,43 +39,21 @@ run garbage collection, and check the deployment's health.
 
 Everything server-side runs through the system `ssh`, so your SSH config,
 your agent, and your jump hosts keep working, and nashcode never holds a key.
-Every command takes --json for scripts and agents.
+
+Nobody types this CLI: an agent drives it. Every command answers with one JSON
+envelope on stdout and a typed exit code — 0 success, 2 usage, 3 not found,
+4 auth, 5 upstream API — and every error carries a `fix` you can run. Progress
+notes go to stderr. `grep` is the exception: it speaks ripgrep's output and
+ripgrep's exit codes, because that is what makes it usable on reflex.
 
 Getting started:
   nashcode setup                    build a deployment and save it as a profile
   nashcode init                     version the current folder on that server
   nashcode doctor                   check that everything still works";
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "nashcode",
-    version,
-    about = ABOUT,
-    long_about = LONG_ABOUT,
-    propagate_version = true,
-    disable_help_subcommand = true
-)]
-pub struct Cli {
-    /// Emit one JSON value on stdout instead of human text.
-    #[arg(long, global = true)]
-    pub json: bool,
+// --- shared help prose ------------------------------------------------------
 
-    /// Act on this profile instead of the active one.
-    #[arg(long, global = true, value_name = "NAME")]
-    pub profile: Option<String>,
-
-    /// Suppress progress notes on stderr.
-    #[arg(long, short, global = true)]
-    pub quiet: bool,
-
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum Command {
-    /// Build a deployment on a host you can SSH to.
-    #[command(long_about = "\
+const SETUP_DOC: &str = "\
 Build a deployment on a host you can SSH to.
 
 Seven steps, each of which can be re-run safely:
@@ -87,30 +74,22 @@ Seven steps, each of which can be re-run safely:
               no credentials, delete it.
   7. Profile  save the result locally so every other command can find it.
 
-Every prompt has a flag, so the whole wizard runs unattended. Bucket
-credentials are read from the environment when the flags are absent, so they
-need never appear in a shell history: AWS_ACCESS_KEY_ID and
-AWS_SECRET_ACCESS_KEY.")]
-    Setup(SetupArgs),
+Nothing is ever asked interactively: every answer is a flag, and a missing one
+is a usage error naming the flag. Bucket credentials are read from the
+environment when the flags are absent, so they need never appear in a shell
+history: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. A Tailscale auth key can
+come from TS_AUTHKEY the same way. `--dry-run` returns every remote script it
+would have run and touches nothing.";
 
-    /// Make a saved profile the active one.
-    Use(UseArgs),
-
-    /// List saved profiles.
-    Profiles,
-
-    /// Print the push token for a profile, for CI or a credential helper.
-    #[command(long_about = "\
+const TOKEN_DOC: &str = "\
 Print the push token for a profile.
 
-This is the one command that writes a secret to stdout. The token is dgit's
-GIT_TOKEN: HTTP Basic with any username and this as the password authorises a
-push, and it also authorises the admin calls behind `nashcode rm`, `gc`, and
-`desc`. Treat it like a deploy key.")]
-    Token,
+This is the one command that writes a secret into the envelope. The token is
+dgit's GIT_TOKEN: HTTP Basic with any username and this as the password
+authorises a push, and it also authorises the admin calls behind `nashcode rm`,
+`gc`, and `desc`. Treat it like a deploy key.";
 
-    /// Version the current directory: create the repository and push it.
-    #[command(long_about = "\
+const INIT_DOC: &str = "\
 Version the current directory on the active profile's server.
 
 Point it at a folder of text files and the folder becomes a repository:
@@ -123,22 +102,18 @@ Point it at a folder of text files and the folder becomes a repository:
 
 The default name is the directory's name. Re-running is safe: an existing
 repository is described, not replaced, and an existing working copy is left
-as it is.")]
-    Init(InitArgs),
+as it is.";
 
-    /// Create an empty repository on the server.
-    #[command(long_about = "\
+const NEW_DOC: &str = "\
 Create an empty repository on the server.
 
 dgit creates a repository on first push, but that leaves it with no
 description and no section, so this instead calls PUT /<name>/config, which
 both creates and describes it. When run inside a working copy, it also wires
 `origin` and hands the token to git's credential helper, so the token stays
-out of the remote URL and out of your shell history.")]
-    New(NewArgs),
+out of the remote URL and out of your shell history.";
 
-    /// List the repositories on the server.
-    #[command(long_about = "\
+const LS_DOC: &str = "\
 List the repositories on the server.
 
 Public repositories only: dgit's index page filters private ones out before
@@ -147,39 +122,23 @@ list dgit has. A private repository is still there — clone it by name.
 
 dgit publishes no JSON list endpoint, so this reads the index page and parses
 the listing table. The parse is deliberately forgiving of markup changes; if a
-future dgit breaks it, `--json` will return an empty list rather than wrong
-data.")]
-    Ls,
+future dgit breaks it, the result is an empty list rather than wrong data.";
 
-    /// Clone a repository from the server.
-    Clone(CloneArgs),
-
-    /// Delete a repository from the server.
-    Rm(RmArgs),
-
-    /// Prune unreachable objects in a repository.
-    #[command(long_about = "\
+const GC_DOC: &str = "\
 Prune unreachable objects in a repository (POST /<name>/gc).
 
 dgit also runs this by itself, from a timer, after a forced update or a ref
 deletion, so it is rarely needed by hand. Objects inside stored packfiles are
-kept: dgit cannot delete from the middle of a pack without repacking it.")]
-    Gc(GcArgs),
+kept: dgit cannot delete from the middle of a pack without repacking it.";
 
-    /// Set a repository's description, owner, section, or private flag.
-    Desc(DescArgs),
-
-    /// Point this working copy's `origin` at the server.
-    #[command(long_about = "\
+const REMOTE_DOC: &str = "\
 Point this working copy's `origin` at the active profile's server.
 
 Uses `jj git remote` in a jj repository and `git remote` in a git one. The
 token goes to git's credential helper, never into the remote URL, so `git
-remote -v` and any file you commit stay free of secrets.")]
-    Remote(RemoteArgs),
+remote -v` and any file you commit stay free of secrets.";
 
-    /// Give someone their own push token, list them, or take one back.
-    #[command(long_about = "\
+const INVITE_DOC: &str = "\
 Give someone their own push token, list the invited, or take a token back.
 
 dgit accepts extra push tokens from its GIT_TOKENS var, comma-separated,
@@ -190,62 +149,41 @@ restarts celld — the same mechanism `setup` uses. Each change ends with an
 auth probe: an invite proves the new token is accepted, a revoke proves the
 old one no longer is.
 
-`nashcode invite <name>` prints the token once, with the remote URL and the
+`nashcode invite <name>` returns the token once, with the remote URL and the
 one-liner that stores it via `git credential approve`. Re-inviting a name
-rotates that person's token. `--list` prints names only, never tokens.
+rotates that person's token. `--list` returns names only, never tokens.
 
 A token is push access, not network access. Reaching the server at all is
 Tailscale's job: add the person to your tailnet or share the node with them.
-nashcode does not touch Tailscale ACLs.")]
-    Invite(InviteArgs),
+nashcode does not touch Tailscale ACLs.";
 
-    /// Check that the deployment still works, one line per check.
-    #[command(long_about = "\
-Check a deployment, one line per check.
-
-Local checks always run: the profile exists, the server answers, its TLS
-certificate is trusted, and the token is accepted. The token check is a
-request dgit rejects on grounds of a malformed body, so it proves the
-credential without creating or changing anything.
-
-Host checks run over SSH when the profile has an ssh destination: the celld
-service is active, it answers on loopback, the node is on the tailnet, the
-`tailscale serve` proxy that injects the identity headers is configured, and
-celld can reach the bucket. Checks that cannot run are reported as skipped,
-never as passing.")]
-    Doctor,
-
-    /// Work with plan files under plans/.
-    #[command(subcommand, long_about = "\
+const PLAN_DOC: &str = "\
 Work with plan files under plans/.
 
 A plan is a markdown file in `plans/` at the root of a repository. It is a
 convention, not a format: the viewer renders the directory, and humans comment
 on the rendered page. `nashcode annotate` opens one locally, and
-`nashcode comments` pulls the replies back down.")]
-    Plan(PlanCommand),
+`nashcode comments` pulls the replies back down.";
 
-    /// Open a plan in plannotator for local review.
-    #[command(long_about = "\
-Open a plan file in plannotator, a local annotation tool.
+const ANNOTATE_DOC: &str = "\
+Open a plan file in plannotator, a local annotation tool, and carry the answer
+back to the viewer.
 
-plannotator is a separate program. When it is not installed, this prints where
+plannotator is a separate program. When it is not installed, this reports where
 to get it and does nothing else. When the active profile has a viewer URL, the
-plan's URL on the viewer is printed too, which is the link to send to someone
+plan's URL on the viewer comes back too, which is the link to send to someone
 who should comment on it.
 
-What you write in plannotator is posted back to the viewer as one comment on the
-plan, so the agent polling `nashcode comments` hears it. Approving posts too:
-`Approved.`, plus your notes when you left any. Dismissing posts nothing. If the
-comment cannot be sent, your feedback is printed here instead, with the reason.
+The agent launches plannotator FOR the human, so launching is the default. What
+the human writes is posted back to the viewer as one comment on the plan, so the
+agent polling `nashcode comments` hears it. Approving posts too: `Approved.`,
+plus the notes when there are any. Dismissing posts nothing. If the comment
+cannot be sent, the feedback comes back in the error rather than being lost.
 
-With --json nothing is launched: the output only reports the file, where
-plannotator is (null when absent), and the viewer URL — plannotator is
-interactive, and an agent asking for JSON does not want an editor opening.")]
-    Annotate(AnnotateArgs),
+`--no-launch` is the inspect-only form: it launches nothing and only reports the
+file, where plannotator is (null when absent), and the viewer URL.";
 
-    /// Rebuild the viewer's code index for a repository.
-    #[command(long_about = "\
+const INDEX_DOC: &str = "\
 Ask the viewer to rebuild a repository's code index, and report what it holds.
 
 The viewer indexes by itself, every time a merge lands on the default branch, so
@@ -264,43 +202,58 @@ and text search carries on working.
 Three indexes come out of it: `git grep` for exact text (no stored index at all),
 vectors for `what is this about`, and a symbol graph for `who calls this`. Query
 them at GET /<repo>/code/text, /code/similar, /code/def, /code/refs, and
-/code/callers, or ask POST /brain/ask, which can call all five.")]
-    Index(IndexArgs),
+/code/callers, or ask POST /brain/ask, which can call all five.";
 
-    /// Read the human comments left on a plan in the viewer.
-    #[command(long_about = "\
+const COMMENTS_DOC: &str = "\
 Read the human comments left on a plan in the viewer.
 
 This is the return path for an agent that writes plans: the agent creates a
 plan, a person comments on it in the viewer's web interface, and this command
-brings those comments back as text or JSON.
+brings those comments back as a bounded list of rows.
 
 It reads GET /<repo>/comments from the viewer, which is a different service
 from dgit and has its own URL. The profile must therefore have a viewer URL;
-`nashcode setup --viewer` records one.")]
-    Comments(CommentsArgs),
+`nashcode setup --viewer` records one.";
 
-    /// What the viewer knows about the work in flight, digested.
-    #[command(long_about = "\
-Read the viewer's work state and print the short version.
+const BRAIN_DOC: &str = "\
+Read the viewer's work state and return the short version.
 
 GET /brain is an aggregate: every branch, every plan, every card and a hundred
 activity rows per repository. This command is the digest of it — branches with
 their tip and CI state, what the code index holds and how old it is, the plan
 files and how many comments wait on them, the latest architecture submission,
-and the last five things that happened. --json emits that digest, not the raw
+and the last five things that happened. The result is that digest, not the raw
 stanza; `curl /brain` is still there when you want the whole thing.
 
 The repository defaults to the name `origin` points at. Run it outside a
 repository and it digests every repository the viewer knows.
 
 It always exits 0. This is meant for a session-start hook, so a viewer that is
-down, unreachable, or not yet configured prints one line saying so and gets out
-of the way.")]
-    Brain(BrainArgs),
+down, unreachable, or not yet configured comes back as `status: unavailable`
+with the reason, and gets out of the way.";
 
-    /// Search the code: rg's flags, grep's output, the index's answers.
-    #[command(long_about = "\
+/// `doctor` is agcli's own command: it owns the description, the report shape,
+/// and the exit code a failing check drives. Its prose therefore has nowhere to
+/// live on the command itself, so it rides in the root tree as a `doctor` field,
+/// where an introspecting agent still finds it.
+const DOCTOR_DOC: &str = "\
+Check a deployment, one entry per check.
+
+Local checks always run: the profile exists, the server answers, its TLS
+certificate is trusted, and the token is accepted. The token check is a
+request dgit rejects on grounds of a malformed body, so it proves the
+credential without creating or changing anything.
+
+Host checks run over SSH when the profile has an ssh destination: the celld
+service is active, it answers on loopback, the node is on the tailnet, the
+`tailscale serve` proxy that injects the identity headers is configured, and
+celld can reach the bucket. Checks that cannot run are reported as skipped,
+never as passing.";
+
+/// `grep`'s own help. It is a raw command, so the framework never prints help
+/// for it: `nashcode grep --help` reaches the handler and this is what it
+/// writes.
+pub const GREP_DOC: &str = "\
 Search the code. The surface is ripgrep's, the answers come from the index.
 
   nashcode grep retry
@@ -325,15 +278,12 @@ pass falls back to the index.
 
 Exit codes are grep's: 0 when something matched, 1 when nothing did. A viewer
 that cannot be reached degrades to plain local rg with one `#` line saying so.
-Only having neither a checkout nor an index is an error, and that exits 2.")]
-    Grep(GrepArgs),
-}
+Only having neither a checkout nor an index is an error, and that exits 2.
 
-#[derive(Debug, Subcommand)]
-pub enum PlanCommand {
-    /// Create plans/<slug>.md from a template.
-    New(PlanNewArgs),
-}
+This command bypasses the JSON envelope on purpose — grep's output IS its
+contract. `nashcode grep --json` gives the same facts as one JSON value.";
+
+// --- the provider list ------------------------------------------------------
 
 /// Object stores celld can use safely.
 ///
@@ -341,20 +291,26 @@ pub enum PlanCommand {
 /// writes and read-after-write consistency; a store without them lets two
 /// nodes own one repository at the same time, and it fails silently rather
 /// than loudly. See https://celld.dev/docs/fencing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     /// Amazon S3. No endpoint needed; set a real region.
-    #[value(name = "aws-s3")]
     AwsS3,
     /// Cloudflare R2. Region is `auto`; endpoint is your account's S3 API URL.
-    #[value(name = "r2")]
     R2,
     /// Tigris. Region is `auto`; endpoint is https://t3.storage.dev.
-    #[value(name = "tigris")]
     Tigris,
 }
 
 impl Provider {
+    pub fn from_id(id: &str) -> Option<Provider> {
+        match id {
+            "aws-s3" | "aws" | "s3" => Some(Provider::AwsS3),
+            "r2" => Some(Provider::R2),
+            "tigris" => Some(Provider::Tigris),
+            _ => None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Provider::AwsS3 => "Amazon S3",
@@ -371,7 +327,7 @@ impl Provider {
         }
     }
 
-    /// The region celld should use when the user does not name one.
+    /// The region celld should use when the caller does not name one.
     pub fn default_region(self) -> &'static str {
         match self {
             Provider::AwsS3 => "us-east-1",
@@ -390,7 +346,7 @@ impl Provider {
 
     pub fn endpoint_hint(self) -> &'static str {
         match self {
-            Provider::AwsS3 => "leave blank for Amazon S3",
+            Provider::AwsS3 => "leave unset for Amazon S3",
             Provider::R2 => "https://<account-id>.r2.cloudflarestorage.com",
             Provider::Tigris => "https://t3.storage.dev",
         }
@@ -401,295 +357,788 @@ impl Provider {
     }
 }
 
-#[derive(Debug, Args)]
+// --- argument records -------------------------------------------------------
+//
+// These stay plain structs. The command bodies read them, the handlers below
+// fill them from the parsed request, and neither half has to know how the other
+// works.
+
+#[derive(Debug, Default)]
 pub struct SetupArgs {
-    /// SSH destination of the host, e.g. me@build-box.
-    #[arg(long, value_name = "USER@HOST")]
     pub host: Option<String>,
-
-    /// Name to save the deployment under. Defaults to the host's short name.
-    #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
-
-    /// Object-store provider.
-    #[arg(long, value_enum)]
     pub provider: Option<Provider>,
-
-    /// Bucket name, or a full celld bucket URL such as s3://my-cells/prefix.
-    #[arg(long, value_name = "BUCKET")]
     pub bucket: Option<String>,
-
-    /// Storage region. `auto` for R2 and Tigris.
-    #[arg(long, value_name = "REGION")]
     pub region: Option<String>,
-
-    /// S3 endpoint URL. Leave unset for Amazon S3.
-    #[arg(long, value_name = "URL")]
     pub endpoint: Option<String>,
-
-    /// Access key id. Falls back to $AWS_ACCESS_KEY_ID.
-    #[arg(long, value_name = "ID")]
     pub access_key_id: Option<String>,
-
-    /// Secret access key. Prefer $AWS_SECRET_ACCESS_KEY: a flag lands in your
-    /// shell history.
-    #[arg(long, value_name = "SECRET")]
     pub secret_access_key: Option<String>,
-
-    /// The host already has bucket credentials (instance role, ~/.aws, ADC).
-    #[arg(long, conflicts_with_all = ["access_key_id", "secret_access_key"])]
     pub creds_on_host: bool,
-
-    /// Site name shown in the web interface. Defaults to the tailnet hostname.
-    #[arg(long, value_name = "NAME")]
     pub site_name: Option<String>,
-
-    /// Site description shown under the title.
-    #[arg(long, value_name = "TEXT")]
     pub site_desc: Option<String>,
-
-    /// Default owner shown against repositories.
-    #[arg(long, value_name = "NAME")]
     pub site_owner: Option<String>,
-
-    /// Use this push token instead of generating one. Careful: a flag lands
-    /// in your shell history; letting nashcode generate one does not.
-    #[arg(long, value_name = "TOKEN")]
     pub token: Option<String>,
-
-    /// Tailscale auth key, so `tailscale up` needs no browser.
-    /// Prefer $TS_AUTHKEY.
-    #[arg(long, value_name = "KEY")]
     pub tailscale_authkey: Option<String>,
-
-    /// Also publish the nashcode viewer on HTTPS :8443.
-    #[arg(long)]
     pub viewer: bool,
-
-    /// Loopback port the viewer listens on.
-    #[arg(long, default_value_t = 8090, value_name = "PORT")]
     pub viewer_port: u16,
-
-    /// Loopback port celld listens on.
-    #[arg(long, default_value_t = 8080, value_name = "PORT")]
     pub listen_port: u16,
-
-    /// Skip the end-to-end push/clone check.
-    #[arg(long)]
     pub skip_verify: bool,
-
-    /// Print every remote script instead of running it. Touches nothing.
-    #[arg(long)]
     pub dry_run: bool,
-
-    /// Never prompt. Missing answers become errors instead of questions.
-    #[arg(long, short = 'y')]
-    pub yes: bool,
 }
 
-#[derive(Debug, Args)]
-pub struct UseArgs {
-    /// Profile to activate.
-    pub name: String,
-}
-
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct InitArgs {
-    /// Repository name. Defaults to the current directory's name.
     pub name: Option<String>,
-
-    /// Hide the repository from the index and require the token to read it.
-    #[arg(long)]
     pub private: bool,
-
-    /// One-line description.
-    #[arg(long, value_name = "TEXT")]
     pub desc: Option<String>,
-
-    /// Section heading to file it under on the index page.
-    #[arg(long, value_name = "NAME")]
     pub section: Option<String>,
-
-    /// Create the working copy with git even when jj is available.
-    #[arg(long, conflicts_with = "jj")]
     pub git: bool,
-
-    /// Create the working copy with jj (colocated). Default when jj is on PATH.
-    #[arg(long)]
     pub jj: bool,
-
-    /// Create and wire the repository, but do not commit or push.
-    #[arg(long)]
     pub no_push: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct NewArgs {
-    /// Repository name. Letters, digits, dot, dash, underscore.
     pub name: String,
-
-    /// Hide the repository from the index and require the token to read it.
-    #[arg(long)]
     pub private: bool,
-
-    /// One-line description.
-    #[arg(long, value_name = "TEXT")]
     pub desc: Option<String>,
-
-    /// Section heading to file it under on the index page.
-    #[arg(long, value_name = "NAME")]
     pub section: Option<String>,
-
-    /// Owner shown against the repository.
-    #[arg(long, value_name = "NAME")]
     pub owner: Option<String>,
-
-    /// Do not touch the current directory's working copy.
-    #[arg(long)]
     pub no_remote: bool,
-
-    /// After wiring the remote, make the working copy a colocated jj repo.
-    /// On by default when $NASHCODE_JJ=1.
-    #[arg(long)]
     pub jj: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct CloneArgs {
-    /// Repository name on the server.
     pub name: String,
-
-    /// Directory to clone into. Defaults to the repository name.
     pub dir: Option<String>,
-
-    /// Make the clone a colocated jj repo. On by default when $NASHCODE_JJ=1.
-    #[arg(long)]
     pub jj: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct RmArgs {
-    /// Repository to delete.
     pub name: String,
-
-    /// Do not ask for confirmation.
-    #[arg(long, short = 'y')]
-    pub yes: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct GcArgs {
-    /// Repository to sweep.
     pub name: String,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct DescArgs {
-    /// Repository to change.
     pub name: String,
-
-    /// New description.
-    #[arg(long, value_name = "TEXT")]
     pub desc: Option<String>,
-
-    /// New section heading.
-    #[arg(long, value_name = "NAME")]
     pub section: Option<String>,
-
-    /// New owner.
-    #[arg(long, value_name = "NAME")]
     pub owner: Option<String>,
-
-    /// Hide it from the index and gate reads behind the token.
-    #[arg(long, conflicts_with = "public")]
     pub private: bool,
-
-    /// Show it on the index and allow anonymous reads.
-    #[arg(long)]
     pub public: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct RemoteArgs {
-    /// Repository name on the server. Defaults to the directory's name.
     pub name: Option<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct InviteArgs {
-    /// Person to invite. Letters, digits, dash, underscore.
-    /// Re-inviting a name rotates their token.
-    #[arg(conflicts_with_all = ["list", "revoke"])]
     pub name: Option<String>,
-
-    /// List the invited names. Never prints tokens.
-    #[arg(long, conflicts_with = "revoke")]
     pub list: bool,
-
-    /// Remove this person's token, redeploy, and verify it now fails.
-    #[arg(long, value_name = "NAME")]
     pub revoke: Option<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct PlanNewArgs {
-    /// Plan title. The filename is a slug of it.
     pub title: Vec<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct AnnotateArgs {
-    /// Path to the plan, e.g. plans/rewrite-the-parser.md.
     pub file: String,
+    /// Report where things are without launching plannotator.
+    pub no_launch: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct IndexArgs {
-    /// Repository on the viewer. Defaults to the name `origin` points at.
     pub repo: Option<String>,
-
-    /// Report what the index holds without queueing a new run.
-    #[arg(long)]
     pub status: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct BrainArgs {
-    /// Repository on the viewer. Defaults to the name `origin` points at, and
-    /// outside a repository to every repository the viewer knows.
     pub repo: Option<String>,
 }
 
-#[derive(Debug, Args)]
-pub struct GrepArgs {
-    /// PATTERN, then optional paths, then any rg flag you care to type.
-    ///
-    /// Nothing here is parsed by clap: an unknown flag must never be an error,
-    /// and clap has no setting for "accept anything". The command reads this
-    /// list itself (`commands::grep::parse`).
-    #[arg(
-        value_name = "PATTERN [PATH...]",
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        num_args = 0..
-    )]
-    pub args: Vec<String>,
-}
-
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct CommentsArgs {
-    /// Plan file the comments are attached to, e.g. plans/rewrite.md.
     pub file: String,
-
-    /// Only comments left against this branch.
-    #[arg(long, value_name = "BRANCH")]
     pub branch: Option<String>,
-
-    /// Only comments newer than this RFC 3339 timestamp.
-    #[arg(long, value_name = "RFC3339")]
     pub since: Option<String>,
-
-    /// Repository on the viewer. Defaults to the name `origin` points at.
-    #[arg(long, value_name = "NAME")]
     pub repo: Option<String>,
+}
+
+// --- the handler boundary ---------------------------------------------------
+
+/// What every command gets from the request: the profile it acts on and whether
+/// progress chatter is wanted.
+fn context(req: &CommandRequest<'_>) -> Ctx {
+    Ctx {
+        out: Out::new(req.quiet()),
+        profile_name: req.flag("profile").map(str::to_string),
+    }
+}
+
+fn text(req: &CommandRequest<'_>, key: &str) -> Option<String> {
+    req.flag(key).map(str::to_string).filter(|v| !v.is_empty())
+}
+
+/// A declared boolean flag. agcli stores `--flag` as the string `"true"`, and an
+/// explicit `--flag=false` has to keep meaning false.
+fn on(req: &CommandRequest<'_>, key: &str) -> bool {
+    req.flag(key).is_some_and(|v| {
+        !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off" | ""
+        )
+    })
+}
+
+fn port(req: &CommandRequest<'_>, key: &str, default: u16) -> u16 {
+    req.flag(key).and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Which failure class an anyhow error belongs to, read off the wording the
+/// command bodies already use.
+///
+/// An agent branches on the exit code, so the classification has to be about
+/// *what to do next*: a missing profile or repository is something to create,
+/// a rejected token is something to replace, an upstream HTTP or ssh failure is
+/// something to retry or diagnose with `doctor`.
+pub fn classify(message: &str) -> (&'static str, i32) {
+    let m = message.to_ascii_lowercase();
+    let has = |needle: &str| m.contains(needle);
+
+    if has("http 401")
+        || has("http 403")
+        || has("token was rejected")
+        || has("no git_token")
+        || has("server has no token")
+    {
+        return ("AUTH", ExitCode::AUTH);
+    }
+    if has("no active profile")
+        || has("no profile named")
+        || has("no such repository")
+        || has("http 404")
+        || has("holds no token")
+        || has("does not exist")
+        // A profile that names no viewer, no server, or no host is a profile
+        // missing the resource the command needs — same class, same remedy.
+        || has("has no viewer url")
+        || has("has no server url")
+        || has("has no ssh destination")
+    {
+        return ("NOT_FOUND", ExitCode::NOT_FOUND);
+    }
+    // Refused before anything left the machine: the invocation was wrong, not
+    // the deployment.
+    if has("is not a valid")
+        || has("is not a usable")
+        || has("is required")
+        || has("nothing to change")
+        || has("give the plan a title")
+        || has("say what to do")
+    {
+        return ("USAGE", ExitCode::USAGE);
+    }
+    if has("returned http")
+        || has("failed on the host")
+        || has("cannot reach")
+        || has("cannot run a shell")
+        || has("cannot connect")
+        || has("ssh exited")
+        || has("dgit server")
+    {
+        return ("API", ExitCode::API);
+    }
+    ("ERROR", ExitCode::ERROR)
+}
+
+/// An anyhow error from a command body, mapped to the envelope. The wording the
+/// body chose survives verbatim as the message; `fix` is the command to run.
+fn oops(error: anyhow::Error, fix: impl Into<String>) -> CommandError {
+    let message = format!("{error:#}");
+    let (code, exit) = classify(&message);
+    CommandError::new(message, code, fix).exit_code(exit)
+}
+
+/// A bad invocation. Not a failure of the deployment, so it never carries one of
+/// the other codes.
+fn misuse(message: impl Into<String>, fix: impl Into<String>) -> CommandError {
+    CommandError::new(message, "USAGE", fix).exit_code(ExitCode::USAGE)
+}
+
+// --- the tree ---------------------------------------------------------------
+
+/// Build the CLI. `main` runs it; the tests audit it.
+pub fn build() -> AgentCli {
+    AgentCli::new("nashcode", LONG_ABOUT)
+        .version(env!("CARGO_PKG_VERSION"))
+        .root_field("doctor", serde_json::json!({ "description": DOCTOR_DOC }))
+        .command(setup_command())
+        .command(use_command())
+        .command(profiles_command())
+        .command(token_command())
+        .command(init_command())
+        .command(new_command())
+        .command(ls_command())
+        .command(clone_command())
+        .command(rm_command())
+        .command(gc_command())
+        .command(desc_command())
+        .command(remote_command())
+        .command(invite_command())
+        .command(plan_command())
+        .command(annotate_command())
+        .command(index_command())
+        .command(comments_command())
+        .command(brain_command())
+        .command(grep_command())
+        .doctor(doctor::checks())
+}
+
+fn setup_command() -> Command {
+    Command::new("setup", SETUP_DOC)
+        .usage(
+            "nashcode setup [--host <user@host>] [--name <name>] [--provider <id>] \
+             [--bucket <bucket>] [--region <region>] [--endpoint <url>] \
+             [--access-key-id <id>] [--secret-access-key <secret>] [--creds-on-host] \
+             [--site-name <name>] [--site-desc <text>] [--site-owner <name>] \
+             [--token <token>] [--tailscale-authkey <key>] [--viewer] \
+             [--viewer-port <port>] [--listen-port <port>] [--skip-verify]",
+        )
+        .handles_dry_run()
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let provider_id = text(req, "provider");
+            let args = SetupArgs {
+                host: text(req, "host"),
+                name: text(req, "name"),
+                provider: provider_id.as_deref().and_then(Provider::from_id),
+                bucket: text(req, "bucket"),
+                region: text(req, "region"),
+                endpoint: text(req, "endpoint"),
+                access_key_id: text(req, "access-key-id"),
+                secret_access_key: text(req, "secret-access-key"),
+                creds_on_host: on(req, "creds-on-host"),
+                site_name: text(req, "site-name"),
+                site_desc: text(req, "site-desc"),
+                site_owner: text(req, "site-owner"),
+                token: text(req, "token"),
+                tailscale_authkey: text(req, "tailscale-authkey"),
+                viewer: on(req, "viewer"),
+                viewer_port: port(req, "viewer-port", 8090),
+                listen_port: port(req, "listen-port", 8080),
+                skip_verify: on(req, "skip-verify"),
+                dry_run: req.dry_run(),
+            };
+            Box::pin(async move {
+                if let Some(id) = &provider_id
+                    && args.provider.is_none()
+                {
+                    let known: Vec<&str> = Provider::all().iter().map(|p| p.id()).collect();
+                    return Err(misuse(
+                        format!("`{id}` is not a store nashcode offers"),
+                        format!("nashcode setup --provider {}", known.join("|")),
+                    ));
+                }
+                let value = setup::run(&ctx, &args).map_err(|e| {
+                    let fix = setup_fix(&format!("{e:#}"));
+                    oops(e, fix)
+                })?;
+                Ok(CommandOutput::new(value)
+                    .next_action(NextAction::new(
+                        "nashcode init [<name>]",
+                        "Version a folder on the deployment you just built",
+                    ))
+                    .next_action(NextAction::new(
+                        "nashcode doctor",
+                        "Verify the deployment end to end",
+                    )))
+            })
+        })
+}
+
+/// `setup` fails in the middle of a seven-step wizard, so the fix depends on
+/// which step gave up. Anything unrecognised gets the re-run, which is safe:
+/// every step is idempotent.
+fn setup_fix(message: &str) -> String {
+    let m = message.to_ascii_lowercase();
+    if m.contains("--provider") || m.contains("--bucket") || m.contains("--host") {
+        return "nashcode setup --host <user@host> --provider <aws-s3|r2|tigris> --bucket <name>"
+            .to_string();
+    }
+    if m.contains("credentials") {
+        return "AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… nashcode setup …, or add --creds-on-host"
+            .to_string();
+    }
+    "nashcode setup --dry-run … to see the scripts, then re-run: every step is idempotent"
+        .to_string()
+}
+
+fn use_command() -> Command {
+    Command::new(
+        "use",
+        "Make a saved profile the active one.\n\n\
+         Every other command then acts on it, unless it is given --profile.",
+    )
+    .usage("nashcode use <name>")
+    .handler(|req, _ctx| {
+        let ctx = context(req);
+        let name = req.arg(0).unwrap_or_default().to_string();
+        Box::pin(async move {
+            if name.is_empty() {
+                return Err(misuse(
+                    "no profile named",
+                    "nashcode profiles   # then: nashcode use <name>",
+                ));
+            }
+            let value = profiles::use_profile(&ctx, &name)
+                .map_err(|e| oops(e, "nashcode profiles"))?;
+            Ok(CommandOutput::new(value))
+        })
+    })
+}
+
+fn profiles_command() -> Command {
+    Command::new(
+        "profiles",
+        "List the saved profiles, and say which one is active.",
+    )
+    .usage("nashcode profiles")
+    .handler(|req, _ctx| {
+        let ctx = context(req);
+        Box::pin(async move {
+            let value = profiles::list(&ctx).map_err(|e| oops(e, "nashcode setup"))?;
+            Ok(CommandOutput::new(value))
+        })
+    })
+}
+
+fn token_command() -> Command {
+    Command::new("token", TOKEN_DOC)
+        .usage("nashcode token [--profile <name>]")
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            Box::pin(async move {
+                let value = profiles::token(&ctx)
+                    .map_err(|e| oops(e, "nashcode profiles   # then: nashcode use <name>"))?;
+                Ok(CommandOutput::new(value))
+            })
+        })
+}
+
+/// What an agent does next once a repository exists.
+fn after_repo() -> Vec<NextAction> {
+    vec![
+        NextAction::new(
+            "nashcode plan new <title>",
+            "Start a plan a human can comment on",
+        ),
+        NextAction::new(
+            "nashcode index [<repo>]",
+            "Build the viewer's code index for it",
+        ),
+        NextAction::new("nashcode brain [<repo>]", "Read the repository's state"),
+    ]
+}
+
+fn init_command() -> Command {
+    Command::new("init", INIT_DOC)
+        .usage(
+            "nashcode init [<name>] [--private] [--desc <text>] [--section <name>] \
+             [--git] [--jj] [--no-push] [--profile <name>]",
+        )
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let args = InitArgs {
+                name: req.arg(0).map(str::to_string),
+                private: on(req, "private"),
+                desc: text(req, "desc"),
+                section: text(req, "section"),
+                git: on(req, "git"),
+                jj: on(req, "jj"),
+                no_push: on(req, "no-push"),
+            };
+            Box::pin(async move {
+                if args.git && args.jj {
+                    return Err(misuse(
+                        "--git and --jj ask for different working copies",
+                        "nashcode init --jj   # or --git, not both",
+                    ));
+                }
+                let value = repo::init(&ctx, &args).map_err(|e| oops(e, "nashcode doctor"))?;
+                Ok(CommandOutput::new(value).next_actions(after_repo()))
+            })
+        })
+}
+
+fn new_command() -> Command {
+    Command::new("new", NEW_DOC)
+        .usage(
+            "nashcode new <name> [--private] [--desc <text>] [--section <name>] \
+             [--owner <name>] [--no-remote] [--jj] [--profile <name>]",
+        )
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let name = req.arg(0).map(str::to_string);
+            let args = NewArgs {
+                name: name.clone().unwrap_or_default(),
+                private: on(req, "private"),
+                desc: text(req, "desc"),
+                section: text(req, "section"),
+                owner: text(req, "owner"),
+                no_remote: on(req, "no-remote"),
+                jj: on(req, "jj"),
+            };
+            Box::pin(async move {
+                if name.is_none() {
+                    return Err(misuse(
+                        "no repository name",
+                        "nashcode new <name>",
+                    ));
+                }
+                let value = repo::new(&ctx, &args).map_err(|e| oops(e, "nashcode doctor"))?;
+                Ok(CommandOutput::new(value).next_actions(after_repo()))
+            })
+        })
+}
+
+fn ls_command() -> Command {
+    Command::new("ls", LS_DOC)
+        .usage("nashcode ls [--profile <name>]")
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            Box::pin(async move {
+                let rows = repo::ls(&ctx).map_err(|e| oops(e, "nashcode doctor"))?;
+                Ok(CommandOutput::list(rows))
+            })
+        })
+}
+
+fn clone_command() -> Command {
+    Command::new(
+        "clone",
+        "Clone a repository from the server into a new directory.\n\n\
+         The push token is handed to git's credential helper first, so a private \
+         repository clones without asking for a password.",
+    )
+    .usage("nashcode clone <name> [<dir>] [--jj] [--profile <name>]")
+    .handler(|req, _ctx| {
+        let ctx = context(req);
+        let name = req.arg(0).map(str::to_string);
+        let args = CloneArgs {
+            name: name.clone().unwrap_or_default(),
+            dir: req.arg(1).map(str::to_string),
+            jj: on(req, "jj"),
+        };
+        Box::pin(async move {
+            if name.is_none() {
+                return Err(misuse("no repository name", "nashcode ls"));
+            }
+            let value = repo::clone(&ctx, &args).map_err(|e| oops(e, "nashcode ls"))?;
+            Ok(CommandOutput::new(value))
+        })
+    })
+}
+
+fn rm_command() -> Command {
+    Command::new(
+        "rm",
+        "Delete a repository from the server, and every commit in it.\n\n\
+         There is no confirmation prompt — nobody is at a terminal — so this \
+         refuses to run without --yes.",
+    )
+    .usage("nashcode rm <name> [--profile <name>]")
+    .handler(|req, _ctx| {
+        let ctx = context(req);
+        let name = req.arg(0).map(str::to_string);
+        let confirmed = req.assume_yes();
+        Box::pin(async move {
+            let Some(name) = name else {
+                return Err(misuse("no repository name", "nashcode rm <name> --yes"));
+            };
+            if !confirmed {
+                return Err(misuse(
+                    format!("refusing to delete `{name}` without --yes"),
+                    format!("nashcode rm {name} --yes"),
+                ));
+            }
+            let args = RmArgs { name };
+            let value = repo::rm(&ctx, &args).map_err(|e| oops(e, "nashcode ls"))?;
+            Ok(CommandOutput::new(value))
+        })
+    })
+}
+
+fn gc_command() -> Command {
+    Command::new("gc", GC_DOC)
+        .usage("nashcode gc <name> [--profile <name>]")
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let name = req.arg(0).map(str::to_string);
+            Box::pin(async move {
+                let Some(name) = name else {
+                    return Err(misuse("no repository name", "nashcode gc <name>"));
+                };
+                let value =
+                    repo::gc(&ctx, &GcArgs { name }).map_err(|e| oops(e, "nashcode ls"))?;
+                Ok(CommandOutput::new(value))
+            })
+        })
+}
+
+fn desc_command() -> Command {
+    Command::new(
+        "desc",
+        "Set a repository's description, owner, section, or private flag.\n\n\
+         One PUT /<name>/config carrying only the fields you named; anything you \
+         leave out is left alone.",
+    )
+    .usage(
+        "nashcode desc <name> [--desc <text>] [--section <name>] [--owner <name>] \
+         [--private] [--public] [--profile <name>]",
+    )
+    .handler(|req, _ctx| {
+        let ctx = context(req);
+        let name = req.arg(0).map(str::to_string);
+        let args = DescArgs {
+            name: name.clone().unwrap_or_default(),
+            desc: text(req, "desc"),
+            section: text(req, "section"),
+            owner: text(req, "owner"),
+            private: on(req, "private"),
+            public: on(req, "public"),
+        };
+        Box::pin(async move {
+            if name.is_none() {
+                return Err(misuse("no repository name", "nashcode ls"));
+            }
+            if args.private && args.public {
+                return Err(misuse(
+                    "--private and --public ask for opposite things",
+                    "nashcode desc <name> --private   # or --public, not both",
+                ));
+            }
+            let value = repo::desc(&ctx, &args).map_err(|e| oops(e, "nashcode ls"))?;
+            Ok(CommandOutput::new(value))
+        })
+    })
+}
+
+fn remote_command() -> Command {
+    Command::new("remote", REMOTE_DOC)
+        .usage("nashcode remote [<name>] [--profile <name>]")
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let args = RemoteArgs {
+                name: req.arg(0).map(str::to_string),
+            };
+            Box::pin(async move {
+                let value = repo::remote(&ctx, &args).map_err(|e| oops(e, "nashcode doctor"))?;
+                Ok(CommandOutput::new(value))
+            })
+        })
+}
+
+fn invite_command() -> Command {
+    Command::new("invite", INVITE_DOC)
+        .usage("nashcode invite [<name>] [--list] [--revoke <name>] [--profile <name>]")
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let args = InviteArgs {
+                name: req.arg(0).map(str::to_string),
+                list: on(req, "list"),
+                revoke: text(req, "revoke"),
+            };
+            Box::pin(async move {
+                let asked = usize::from(args.name.is_some())
+                    + usize::from(args.list)
+                    + usize::from(args.revoke.is_some());
+                if asked > 1 {
+                    return Err(misuse(
+                        "say one thing at a time: a name to invite, --list, or --revoke <name>",
+                        "nashcode invite --list",
+                    ));
+                }
+                if asked == 0 {
+                    return Err(misuse(
+                        "say what to do: `nashcode invite <name>`, `--list`, or `--revoke <name>`",
+                        "nashcode invite --list",
+                    ));
+                }
+                let value = invite::run(&ctx, &args).map_err(|e| oops(e, "nashcode doctor"))?;
+                Ok(CommandOutput::new(value))
+            })
+        })
+}
+
+fn plan_command() -> Command {
+    Command::new("plan", PLAN_DOC).subcommand(
+        Command::new(
+            "new",
+            "Create plans/<slug>.md from a template.\n\n\
+             The filename is a slug of the title. It refuses to clobber a plan \
+             that already exists.",
+        )
+        .usage("nashcode plan new <title...>")
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let args = PlanNewArgs {
+                title: req.positionals().to_vec(),
+            };
+            Box::pin(async move {
+                let value = plan::new(&ctx, &args)
+                    .map_err(|e| oops(e, "nashcode plan new \"replace the parser\""))?;
+                let file = value["relative"].as_str().unwrap_or_default().to_string();
+                Ok(CommandOutput::new(value)
+                    .next_action(NextAction::new(
+                        format!("nashcode annotate {file}"),
+                        "Hand the plan to a human to review",
+                    ))
+                    .next_action(NextAction::new(
+                        format!("nashcode comments {file}"),
+                        "Read what they said",
+                    )))
+            })
+        }),
+    )
+}
+
+fn annotate_command() -> Command {
+    Command::new("annotate", ANNOTATE_DOC)
+        .usage("nashcode annotate <file> [--no-launch] [--profile <name>]")
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let file = req.arg(0).map(str::to_string);
+            let args = AnnotateArgs {
+                file: file.clone().unwrap_or_default(),
+                no_launch: on(req, "no-launch"),
+            };
+            Box::pin(async move {
+                let Some(file) = file else {
+                    return Err(misuse("no plan file", "nashcode annotate plans/<file>.md"));
+                };
+                let value = plan::annotate(&ctx, &args)
+                    .map_err(|e| oops(e, format!("nashcode comments {file}")))?;
+                let since = crate::timefmt::now_rfc3339();
+                Ok(CommandOutput::new(value).next_action(NextAction::new(
+                    format!("nashcode comments {file} --since={since}"),
+                    "Read anything left on the plan from here on",
+                )))
+            })
+        })
+}
+
+fn index_command() -> Command {
+    Command::new("index", INDEX_DOC)
+        .usage("nashcode index [<repo>] [--status] [--profile <name>]")
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let args = IndexArgs {
+                repo: req.arg(0).map(str::to_string),
+                status: on(req, "status"),
+            };
+            let named = args.repo.clone().unwrap_or_default();
+            Box::pin(async move {
+                let value = code::run(&ctx, &args)
+                    .map_err(|e| oops(e, "nashcode setup --viewer   # the index lives in the viewer"))?;
+                let suffix = if named.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {named}")
+                };
+                Ok(CommandOutput::new(value)
+                    .next_action(NextAction::new(
+                        format!("nashcode index{suffix} --status"),
+                        "Check whether the queued run finished",
+                    ))
+                    .next_action(NextAction::new(
+                        format!("nashcode brain{suffix}"),
+                        "Read the repository's state, index included",
+                    )))
+            })
+        })
+}
+
+fn comments_command() -> Command {
+    Command::new("comments", COMMENTS_DOC)
+        .usage(
+            "nashcode comments <file> [--branch <branch>] [--since <rfc3339>] \
+             [--repo <name>] [--profile <name>]",
+        )
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let file = req.arg(0).map(str::to_string);
+            let args = CommentsArgs {
+                file: file.clone().unwrap_or_default(),
+                branch: text(req, "branch"),
+                since: text(req, "since"),
+                repo: text(req, "repo"),
+            };
+            let echo = (args.branch.clone(), args.repo.clone());
+            Box::pin(async move {
+                let Some(file) = file else {
+                    return Err(misuse("no plan file", "nashcode comments plans/<file>.md"));
+                };
+                let rows = plan::comments(&ctx, &args).map_err(|e| {
+                    oops(e, "nashcode setup --viewer   # comments live in the viewer")
+                })?;
+                let newest = plan::newest_timestamp(&rows);
+                let mut poll = format!("nashcode comments {file}");
+                if let Some(repo) = &echo.1 {
+                    poll.push_str(&format!(" --repo={repo}"));
+                }
+                if let Some(branch) = &echo.0 {
+                    poll.push_str(&format!(" --branch={branch}"));
+                }
+                if let Some(newest) = &newest {
+                    poll.push_str(&format!(" --since={newest}"));
+                }
+                Ok(CommandOutput::list(rows).next_action(NextAction::new(
+                    poll,
+                    match newest {
+                        Some(_) => "Poll for anything newer than the newest comment above",
+                        None => "Poll again for the first comment",
+                    },
+                )))
+            })
+        })
+}
+
+fn brain_command() -> Command {
+    Command::new("brain", BRAIN_DOC)
+        .usage("nashcode brain [<repo>] [--profile <name>]")
+        .handler(|req, _ctx| {
+            let ctx = context(req);
+            let args = BrainArgs {
+                repo: req.arg(0).map(str::to_string),
+            };
+            Box::pin(async move {
+                // Never an Err. A session-start hook runs this, and the cost of
+                // a wrong answer is one unhelpful field; the cost of a nonzero
+                // exit is the session.
+                Ok(CommandOutput::new(brain::run(&ctx, &args)))
+            })
+        })
+}
+
+fn grep_command() -> Command {
+    Command::new("grep", GREP_DOC)
+        .usage("nashcode grep [rg-flags...] <pattern> [path...]")
+        .raw_handler(|args, _ctx| {
+            let args = args.to_vec();
+            Box::pin(async move { grep::run(&args) })
+        })
 }

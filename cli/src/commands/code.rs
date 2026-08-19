@@ -78,7 +78,7 @@ pub fn render_status(value: &Value) -> Vec<String> {
 }
 
 /// `nashcode index [repo] [--status]`.
-pub fn run(ctx: &Ctx, args: &IndexArgs) -> Result<()> {
+pub fn run(ctx: &Ctx, args: &IndexArgs) -> Result<Value> {
     let (name, profile) = ctx.profile()?;
     let Some(viewer) = profile.viewer_url.as_deref().filter(|v| !v.is_empty()) else {
         bail!(
@@ -122,20 +122,17 @@ pub fn run(ctx: &Ctx, args: &IndexArgs) -> Result<()> {
     let status: Value = serde_json::from_str(&reply.body)
         .unwrap_or_else(|_| json!({ "error": reply.body.trim() }));
 
-    if ctx.out.is_json() {
-        // The viewer's own answer, passed through, plus whether this call queued a
-        // run. An agent should see what the API said, not this command's reading.
-        let mut value = status;
-        if let Some(object) = value.as_object_mut() {
-            object.insert("queued".to_string(), json!(!args.status));
-        }
-        ctx.out.json(&value);
-        return Ok(());
+    // The viewer's own answer, passed through, plus whether this call queued a
+    // run and the one-line reading of it. An agent should see what the API said,
+    // not only this command's summary of it.
+    let summary = render_status(&status);
+    let mut value = status;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("repo".to_string(), json!(repo));
+        object.insert("queued".to_string(), json!(!args.status));
+        object.insert("summary".to_string(), json!(summary));
     }
-    for line in render_status(&status) {
-        ctx.out.line(line);
-    }
-    Ok(())
+    Ok(value)
 }
 
 #[cfg(test)]

@@ -29,10 +29,9 @@
 
 use super::Ctx;
 use crate::api::Client;
-use crate::cli::GrepArgs;
+use crate::output::Out;
 use crate::timefmt::ago;
 use crate::vcs;
-use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -253,39 +252,38 @@ pub fn parse(args: &[String]) -> Flags {
     flags
 }
 
-/// grep's arguments exactly as typed, straight from the process.
+/// The global flags typed *before* the subcommand.
 ///
-/// clap removes the first `--` before any value reaches [`parse`], and `--` is part of
-/// grep's surface: `nashcode grep -- -Zthreads` searches for a pattern that begins with
-/// a dash. So the list is re-read from the process rather than taken from clap, from
-/// the first token that is not a global flag — the subcommand — onwards.
-pub fn raw_args() -> Vec<String> {
+/// `grep` is a raw passthrough command: agcli hands it every token after
+/// `grep`, verbatim, and nothing before it. That is exactly right for the
+/// pattern — `nashcode grep -- -Zthreads` arrives with its `--` intact — but the
+/// two flags that belong to nashcode rather than to rg (`--profile`, and the
+/// `--json` an agent types out of habit) sit on the other side of the command
+/// name. So they are read back off the process's own argument list, scanning
+/// only as far as the first non-flag token, which is the subcommand.
+pub fn preceding_flags() -> (bool, Option<String>) {
     let mut args = std::env::args().skip(1);
+    let mut json = false;
+    let mut profile = None;
     while let Some(arg) = args.next() {
-        // The one global flag that takes a separate value.
+        if let Some(value) = arg.strip_prefix("--profile=") {
+            profile = Some(value.to_owned());
+            continue;
+        }
         if arg == "--profile" {
-            args.next();
+            profile = args.next();
+            continue;
+        }
+        if arg == "--json" {
+            json = true;
             continue;
         }
         if arg.starts_with('-') {
             continue;
         }
-        return args.collect();
+        break; // the subcommand: everything after it is grep's own.
     }
-    Vec::new()
-}
-
-/// The list this invocation should be read from: the process's own, falling back to
-/// clap's when there is no process list to read (a direct call, or a test).
-fn arguments(args: &GrepArgs) -> Vec<String> {
-    let raw = raw_args();
-    if raw.is_empty() { args.args.clone() } else { raw }
-}
-
-/// Does this invocation want JSON? Read before the profile is, because grep's own
-/// argument list is where a `--json` typed after the subcommand ends up.
-pub fn wants_json(args: &GrepArgs) -> bool {
-    parse(&arguments(args)).json
+    (json, profile)
 }
 
 // ---- path filters ------------------------------------------------------------------
@@ -1078,15 +1076,22 @@ pub fn as_json(report: &Report) -> Value {
 ///
 /// Exits the way grep does — 0 with hits, 1 without — and 2 only for a usage mistake or
 /// for having neither a working tree to search nor an index to ask.
-pub fn run(ctx: &Ctx, args: &GrepArgs) -> Result<()> {
-    let flags = parse(&arguments(args));
+pub fn run(args: &[String]) -> i32 {
+    let (json_before, profile) = preceding_flags();
+    let flags = parse(args);
+    let ctx = Ctx {
+        out: Out::new(false),
+        profile_name: profile,
+    };
+    let wants_json = flags.json || json_before;
+
     if flags.help {
         print_help(&mut std::io::stdout());
-        std::process::exit(0);
+        return 0;
     }
     if flags.pattern.is_none() {
-        usage(
-            ctx,
+        return usage(
+            wants_json,
             "no pattern: nashcode grep [flags] PATTERN [path...]",
             "nashcode grep --help",
         );
@@ -1110,7 +1115,7 @@ pub fn run(ctx: &Ctx, args: &GrepArgs) -> Result<()> {
             .as_ref()
             .and_then(|ws| ws.origin_repo_name().ok().flatten().or_else(|| ws.default_repo_name()))
     });
-    let index = ask_index(ctx, repo.as_deref(), &flags, &paths, &filter);
+    let index = ask_index(&ctx, repo.as_deref(), &flags, &paths, &filter);
 
     // Text comes from the tree when there is one, and from the index otherwise. Never
     // both: the same line from two sources is the same line twice.
@@ -1175,41 +1180,53 @@ pub fn run(ctx: &Ctx, args: &GrepArgs) -> Result<()> {
             .unreachable
             .clone()
             .unwrap_or_else(|| "the repository has no index".to_owned());
-        fail(ctx, &format!("{why}; {index_why}"), "nashcode index <repo>");
+        return fail(
+            wants_json,
+            &format!("{why}; {index_why}"),
+            "nashcode index <repo>",
+        );
     }
 
     let rendered = render(&report);
     for note in &rendered.notes {
         eprintln!("{note}");
     }
-    ctx.out.emit(as_json(&report), || {
+    if wants_json {
+        print_value(&as_json(&report));
+    } else {
         for line in &rendered.out {
-            ctx.out.line(line);
+            println!("{line}");
         }
-    });
-    std::process::exit(if report.hits() > 0 { 0 } else { 1 });
+    }
+    i32::from(report.hits() == 0)
+}
+
+/// One JSON value on stdout, the way every other nashcode command answers —
+/// except that grep builds it itself, because it owns its stdout.
+fn print_value(value: &Value) {
+    println!("{}", serde_json::to_string_pretty(value).unwrap_or_default());
 }
 
 /// A usage mistake: help where a person can read it, an envelope where a machine can.
-fn usage(ctx: &Ctx, why: &str, fix: &str) -> ! {
-    if ctx.out.is_json() {
-        ctx.out.json(&json!({ "ok": false, "error": why, "fix": fix }));
+fn usage(wants_json: bool, why: &str, fix: &str) -> i32 {
+    if wants_json {
+        print_value(&json!({ "ok": false, "error": why, "fix": fix }));
     } else {
         eprintln!("nashcode grep: {why}");
         print_help(&mut std::io::stderr());
     }
-    std::process::exit(2)
+    2
 }
 
 /// The one real failure: nothing to search and nothing to ask.
-fn fail(ctx: &Ctx, why: &str, fix: &str) -> ! {
-    if ctx.out.is_json() {
-        ctx.out.json(&json!({ "ok": false, "error": why, "fix": fix }));
+fn fail(wants_json: bool, why: &str, fix: &str) -> i32 {
+    if wants_json {
+        print_value(&json!({ "ok": false, "error": why, "fix": fix }));
     } else {
         eprintln!("nashcode grep: {why}");
         eprintln!("nashcode grep: fix: {fix}");
     }
-    std::process::exit(2)
+    2
 }
 
 /// Ask the viewer, and turn every way that can fail into one comment line.
@@ -1249,14 +1266,14 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// clap never sees grep's arguments, so it can never print grep's help either.
+/// The framework never parses grep's arguments, so it can never print grep's
+/// help either: `--help` reaches this handler like any other flag.
 fn print_help(to: &mut impl std::io::Write) {
-    use clap::CommandFactory;
-    let mut command = crate::cli::Cli::command();
-    if let Some(grep) = command.find_subcommand_mut("grep") {
-        let text = grep.clone().render_long_help();
-        let _ = writeln!(to, "{text}");
-    }
+    let _ = writeln!(
+        to,
+        "Usage: nashcode grep [rg-flags...] <pattern> [path...]\n\n{}",
+        crate::cli::GREP_DOC
+    );
 }
 
 #[cfg(test)]

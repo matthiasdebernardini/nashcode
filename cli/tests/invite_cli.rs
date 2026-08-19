@@ -111,7 +111,7 @@ impl Host {
     }
 }
 
-fn json(out: &std::process::Output) -> serde_json::Value {
+fn envelope(out: &std::process::Output) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
         panic!(
             "stdout is not one JSON value\nstdout: {}\nstderr: {}",
@@ -119,6 +119,19 @@ fn json(out: &std::process::Output) -> serde_json::Value {
             String::from_utf8_lossy(&out.stderr)
         )
     })
+}
+
+/// The result the command answered with.
+fn json(out: &std::process::Output) -> serde_json::Value {
+    envelope(out)["result"].clone()
+}
+
+/// The message of the error it answered with.
+fn error(out: &std::process::Output) -> String {
+    envelope(out)["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no error in {}", envelope(out)))
+        .to_string()
 }
 
 #[test]
@@ -197,7 +210,7 @@ fn revoke_removes_the_name_and_verifies_the_token_is_dead() {
     let before = host.mapping();
     let out = host.run(&["--json", "invite", "--revoke", ".*"]);
     assert!(!out.status.success());
-    assert!(json(&out)["error"].as_str().unwrap().contains("not a usable"));
+    assert!(error(&out).contains("not a usable"));
     assert_eq!(host.mapping(), before, "mapping must be untouched");
 
     // From here the probe answers 401: the revoked token is rejected.
@@ -225,8 +238,7 @@ fn revoke_removes_the_name_and_verifies_the_token_is_dead() {
     // Revoking an unknown name is an error, not a silent no-op.
     let out = host.run(&["--json", "invite", "--revoke", "mallory"]);
     assert!(!out.status.success());
-    let v = json(&out);
-    assert!(v["error"].as_str().unwrap().contains("revoke"), "{v}");
+    assert!(error(&out).contains("revoke"), "{}", error(&out));
 }
 
 #[test]
@@ -239,12 +251,11 @@ fn list_prints_names_and_never_token_material() {
 
     let out = host.run(&["--json", "invite", "--list"]);
     assert!(out.status.success());
-    let v = json(&out);
-    assert_eq!(v, serde_json::json!({ "names": ["alice", "bob"] }));
+    assert_eq!(json(&out), serde_json::json!({ "names": ["alice", "bob"] }));
 
-    let human = host.run(&["invite", "--list"]);
-    let text = String::from_utf8_lossy(&human.stdout).to_string()
-        + &String::from_utf8_lossy(&human.stderr);
+    // Nothing anywhere on either stream is token material.
+    let text = String::from_utf8_lossy(&out.stdout).to_string()
+        + &String::from_utf8_lossy(&out.stderr);
     assert!(text.contains("alice") && text.contains("bob"), "{text}");
     for tok in [&alice, &bob] {
         assert!(!text.contains(tok.as_str()), "token leaked by --list");
@@ -273,8 +284,7 @@ fn an_unreachable_probe_never_reports_a_revoke_as_verified() {
 
     let out = host.run(&["--json", "invite", "--revoke", "alice"]);
     assert!(!out.status.success());
-    let v = json(&out);
-    let err = v["error"].as_str().unwrap();
+    let err = error(&out);
     assert!(err.contains("could not confirm"), "{err}");
     assert!(err.contains("doctor"), "{err}");
     assert!(err.contains("000"), "{err}");
@@ -287,8 +297,7 @@ fn a_failed_probe_fails_the_invite() {
     let host = Host::new("401");
     let out = host.run(&["--json", "invite", "alice"]);
     assert!(!out.status.success());
-    let v = json(&out);
-    assert!(v["error"].as_str().unwrap().contains("invite failed"), "{v}");
+    assert!(error(&out).contains("invite failed"), "{}", error(&out));
 }
 
 #[test]
@@ -297,16 +306,17 @@ fn bad_arguments_and_bad_profiles_fail_clearly() {
 
     // No action.
     let out = host.run(&["--json", "invite"]);
-    assert!(!out.status.success());
-    assert!(json(&out)["error"].as_str().unwrap().contains("--list"), "usage hint expected");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(error(&out).contains("--list"), "usage hint expected");
 
-    // Conflicting actions are a clap error before anything runs.
+    // Conflicting actions are refused before anything runs.
     let out = host.run(&["invite", "alice", "--list"]);
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    assert!(error(&out).contains("one thing at a time"), "{}", error(&out));
 
     // A bad name never reaches the host.
     let out = host.run(&["--json", "invite", "not a name"]);
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
     assert!(!host.mapping_path().exists());
 
     // A profile with no ssh destination cannot invite.
@@ -316,6 +326,6 @@ fn bad_arguments_and_bad_profiles_fail_clearly() {
     )
     .unwrap();
     let out = host.run(&["--json", "invite", "alice"]);
-    assert!(!out.status.success());
-    assert!(json(&out)["error"].as_str().unwrap().contains("ssh"));
+    assert_eq!(out.status.code(), Some(3), "the profile names no host");
+    assert!(error(&out).contains("ssh"));
 }

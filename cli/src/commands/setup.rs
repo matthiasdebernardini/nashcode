@@ -11,7 +11,7 @@ use crate::profile::{Profile, Store, suggest_name};
 use crate::remote::{self, Deploy};
 use crate::ssh::{Output, Ssh, parse_kv};
 use anyhow::{Context, Result, bail};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// The one warning this CLI insists on showing.
@@ -28,21 +28,23 @@ fail silently: two nodes can own one repository and acknowledged pushes can
 disappear. Those four are not offered here.
 Read the mechanism: https://celld.dev/docs/fencing";
 
-pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
+pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<Value> {
     let out = &ctx.out;
+    // Under --dry-run every remote script is collected instead of run, and comes
+    // back in the result: stdout belongs to the envelope, so a preview cannot be
+    // printed, it has to be *returned*.
+    let mut scripts: Vec<Value> = Vec::new();
 
     // ---- 1. host ---------------------------------------------------------
     out.step("[1/7] host");
     let host = ask(
-        out,
-        args.yes,
         "SSH destination of the host (user@host)",
         "--host",
         args.host.clone(),
         None,
     )?;
     let ssh = Ssh::new(&host).dry_run(args.dry_run);
-    let facts = preflight(out, &ssh, args.dry_run)?;
+    let facts = preflight(out, &mut scripts, &ssh, args.dry_run)?;
 
     // ---- 2. bucket -------------------------------------------------------
     out.step("[2/7] bucket");
@@ -51,14 +53,17 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
             out.step(line);
         }
     }
-    let provider = match args.provider {
-        Some(p) => p,
-        None if args.yes => bail!("--provider is required with --yes"),
-        None => choose_provider(out)?,
+    let Some(provider) = args.provider else {
+        bail!(
+            "--provider is required: one of {}",
+            Provider::all()
+                .iter()
+                .map(|p| p.id())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     };
     let bucket_input = ask(
-        out,
-        args.yes,
         "bucket name (or a full s3://bucket/prefix URL)",
         "--bucket",
         args.bucket.clone(),
@@ -66,14 +71,12 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
     )?;
     let bucket = normalise_bucket(&bucket_input);
     let region = ask(
-        out,
-        args.yes,
         "storage region",
         "--region",
         args.region.clone(),
         Some(provider.default_region().to_string()),
     )?;
-    let endpoint = resolve_endpoint(out, args, provider)?;
+    let endpoint = resolve_endpoint(args, provider)?;
     // These three land raw in the systemd unit, the EnvironmentFile, and the
     // celld command line; reject anything those places cannot carry.
     reject_unsafe_value("bucket", &bucket)?;
@@ -86,7 +89,7 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
     // ---- 3. install ------------------------------------------------------
     out.step("[3/7] install tailscale, celld, node, esbuild, git");
     let install = run_script(
-        out,
+        &mut scripts,
         &ssh,
         args.dry_run,
         "install",
@@ -120,16 +123,12 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
         None => generate_token(),
     };
     let site_name = ask(
-        out,
-        args.yes,
         "site name shown in the web interface",
         "--site-name",
         args.site_name.clone(),
         Some(short_host(&host)),
     )?;
     let site_owner = ask(
-        out,
-        args.yes,
         "default owner shown against repositories",
         "--site-owner",
         args.site_owner.clone(),
@@ -162,8 +161,8 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
         viewer_https_port: 8443,
     };
 
-    run_script(out, &ssh, args.dry_run, "deploy", &remote::deploy_script(&deploy), true)?;
-    run_script(out, &ssh, args.dry_run, "service", &remote::service_script(&deploy), true)?;
+    run_script(&mut scripts, &ssh, args.dry_run, "deploy", &remote::deploy_script(&deploy), true)?;
+    run_script(&mut scripts, &ssh, args.dry_run, "service", &remote::service_script(&deploy), true)?;
 
     // ---- 5. tailnet ------------------------------------------------------
     out.step("[5/7] tailnet");
@@ -171,8 +170,8 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
         .tailscale_authkey
         .clone()
         .or_else(|| std::env::var("TS_AUTHKEY").ok().filter(|s| !s.is_empty()));
-    let dns_name = join_tailnet(out, &ssh, args.dry_run, authkey.as_deref())?;
-    run_script(out, &ssh, args.dry_run, "serve", &remote::serve_script(&deploy), false)?;
+    let dns_name = join_tailnet(out, &mut scripts, &ssh, args.dry_run, authkey.as_deref())?;
+    run_script(&mut scripts, &ssh, args.dry_run, "serve", &remote::serve_script(&deploy), false)?;
 
     let url = if args.dry_run || dns_name.is_empty() {
         if !args.dry_run {
@@ -197,7 +196,7 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
     } else {
         out.step("[6/7] verify: push with the token, clone anonymously, delete");
         run_script(
-            out,
+            &mut scripts,
             &ssh,
             args.dry_run,
             "verify",
@@ -236,29 +235,18 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<()> {
         store.save()?
     };
 
-    out.emit(
-        json!({
-            "profile": profile_name,
-            "url": url,
-            "viewer_url": viewer_url,
-            "ssh": host,
-            "bucket": bucket,
-            "endpoint": endpoint,
-            "region": region,
-            "config": path,
-            "dry_run": args.dry_run,
-        }),
-        || {
-            out.line(format!("profile `{profile_name}` is active"));
-            out.line(format!("  git  {url}"));
-            if let Some(v) = &viewer_url {
-                out.line(format!("  web  {v}"));
-            }
-            out.line("");
-            out.line("Next: cd into a folder of files and run `nashcode init`.");
-        },
-    );
-    Ok(())
+    Ok(json!({
+        "profile": profile_name,
+        "url": url,
+        "viewer_url": viewer_url,
+        "ssh": host,
+        "bucket": bucket,
+        "endpoint": endpoint,
+        "region": region,
+        "config": path,
+        "dry_run": args.dry_run,
+        "scripts": scripts,
+    }))
 }
 
 // --- steps -----------------------------------------------------------------
@@ -268,9 +256,9 @@ struct Facts {
     home: String,
 }
 
-fn preflight(out: &Out, ssh: &Ssh, dry_run: bool) -> Result<Facts> {
+fn preflight(out: &Out, scripts: &mut Vec<Value>, ssh: &Ssh, dry_run: bool) -> Result<Facts> {
     if dry_run {
-        print_script(out, "preflight", &remote::preflight_script());
+        record(scripts, "preflight", &remote::preflight_script());
         return Ok(Facts {
             user: "USER".into(),
             home: "/home/USER".into(),
@@ -324,10 +312,16 @@ fn preflight(out: &Out, ssh: &Ssh, dry_run: bool) -> Result<Facts> {
 }
 
 /// `tailscale up`, then wait for the node to come up, and report its DNS name.
-fn join_tailnet(out: &Out, ssh: &Ssh, dry_run: bool, authkey: Option<&str>) -> Result<String> {
+fn join_tailnet(
+    out: &Out,
+    scripts: &mut Vec<Value>,
+    ssh: &Ssh,
+    dry_run: bool,
+    authkey: Option<&str>,
+) -> Result<String> {
     if dry_run {
-        print_script(out, "tailscale up", &remote::tailscale_up_script(authkey));
-        print_script(out, "tailscale status", &remote::tailscale_status_script());
+        record(scripts, "tailscale up", &remote::tailscale_up_script(authkey));
+        record(scripts, "tailscale status", &remote::tailscale_status_script());
         return Ok(String::new());
     }
     let up = ssh
@@ -358,7 +352,7 @@ fn join_tailnet(out: &Out, ssh: &Ssh, dry_run: bool, authkey: Option<&str>) -> R
 // --- plumbing --------------------------------------------------------------
 
 fn run_script(
-    out: &Out,
+    scripts: &mut Vec<Value>,
     ssh: &Ssh,
     dry_run: bool,
     what: &str,
@@ -366,7 +360,7 @@ fn run_script(
     stream: bool,
 ) -> Result<Output> {
     if dry_run {
-        print_script(out, what, script);
+        record(scripts, what, script);
         return Ok(Output {
             code: 0,
             stdout: String::new(),
@@ -381,52 +375,33 @@ fn run_script(
     res.require(what)
 }
 
-fn print_script(out: &Out, what: &str, script: &str) {
-    out.line(format!("# ---- {what} ----"));
-    out.line(script.trim_end());
-    out.line("");
+/// A script a dry run would have executed, kept for the result.
+fn record(scripts: &mut Vec<Value>, what: &str, script: &str) {
+    scripts.push(json!({ "step": what, "script": script.trim_end() }));
 }
 
-/// Prompt, or take the flag, or fail with the flag's name.
+/// Take the flag, fall back to the default, or name the flag that is missing.
+///
+/// Nothing is ever asked. Nobody is at a terminal: an agent runs this, and an
+/// agent cannot answer a prompt, so a missing answer is a usage error naming the
+/// flag that would have supplied it.
 fn ask(
-    out: &Out,
-    yes: bool,
     label: &str,
     flag: &str,
     value: Option<String>,
     default: Option<String>,
 ) -> Result<String> {
+    let _ = label;
     if let Some(v) = value.filter(|v| !v.is_empty()) {
         return Ok(v);
     }
-    if !out.interactive() || yes {
-        if let Some(d) = default {
-            return Ok(d);
-        }
-        bail!("{flag} is required when nashcode cannot prompt");
-    }
-    let mut input = dialoguer::Input::<String>::new().with_prompt(label);
     if let Some(d) = default {
-        input = input.default(d);
+        return Ok(d);
     }
-    input.interact_text().context("read answer")
+    bail!("{flag} is required")
 }
 
-fn choose_provider(out: &Out) -> Result<Provider> {
-    if !out.interactive() {
-        bail!("--provider is required when nashcode cannot prompt");
-    }
-    let labels: Vec<&str> = Provider::all().iter().map(|p| p.label()).collect();
-    let idx = dialoguer::Select::new()
-        .with_prompt("object store")
-        .items(&labels)
-        .default(0)
-        .interact()
-        .context("read the provider choice")?;
-    Ok(Provider::all()[idx])
-}
-
-fn resolve_endpoint(out: &Out, args: &SetupArgs, provider: Provider) -> Result<Option<String>> {
+fn resolve_endpoint(args: &SetupArgs, provider: Provider) -> Result<Option<String>> {
     if let Some(e) = args.endpoint.clone().filter(|e| !e.is_empty()) {
         return Ok(Some(e));
     }
@@ -436,18 +411,15 @@ fn resolve_endpoint(out: &Out, args: &SetupArgs, provider: Provider) -> Result<O
     if provider == Provider::AwsS3 {
         return Ok(None); // the AWS SDK default is right
     }
-    if args.yes || !out.interactive() {
-        bail!("--endpoint is required for {}", provider.label());
-    }
-    let e = dialoguer::Input::<String>::new()
-        .with_prompt(format!("S3 endpoint ({})", provider.endpoint_hint()))
-        .interact_text()
-        .context("read the endpoint")?;
-    Ok(Some(e).filter(|s| !s.is_empty()))
+    bail!(
+        "--endpoint is required for {} ({})",
+        provider.label(),
+        provider.endpoint_hint()
+    )
 }
 
 /// Credentials, in the order that keeps them out of shell history: the flag if
-/// given, then the environment, then a hidden prompt.
+/// given, then the environment.
 fn resolve_credentials(out: &Out, args: &SetupArgs) -> Result<(Option<String>, Option<String>)> {
     if args.creds_on_host {
         out.step("using the credentials already on the host");
@@ -467,27 +439,10 @@ fn resolve_credentials(out: &Out, args: &SetupArgs) -> Result<(Option<String>, O
     if let (Some(id), Some(secret)) = (&id, &secret) {
         return Ok((Some(id.clone()), Some(secret.clone())));
     }
-    if args.yes || !out.interactive() {
-        bail!(
-            "no bucket credentials. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, \
-             or pass --creds-on-host if the box already has them."
-        );
-    }
-    let id = match id {
-        Some(v) => v,
-        None => dialoguer::Input::<String>::new()
-            .with_prompt("access key id")
-            .interact_text()
-            .context("read the access key id")?,
-    };
-    let secret = match secret {
-        Some(v) => v,
-        None => dialoguer::Password::new()
-            .with_prompt("secret access key")
-            .interact()
-            .context("read the secret access key")?,
-    };
-    Ok((Some(id), Some(secret)))
+    bail!(
+        "no bucket credentials. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, \
+         or pass --creds-on-host if the box already has them."
+    )
 }
 
 /// Bucket, region, and endpoint go into the systemd unit's ExecStart (no

@@ -1,4 +1,4 @@
-//! The `--json` contract at the binary level: one JSON value on stdout, the
+//! The envelope contract at the binary level: one JSON value on stdout, the
 //! documented shape, and the documented exit codes. No test here touches a
 //! network, a host, or the user's real profile store.
 
@@ -12,21 +12,40 @@ fn nashcode(config: &std::path::Path, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+/// The one JSON value the run wrote to stdout.
+fn envelope(out: &std::process::Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not one JSON value ({e})\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
 #[test]
-fn doctor_reports_the_check_shape_and_exits_nonzero_without_a_profile() {
+fn doctor_reports_the_check_shape_and_a_typed_exit_without_a_profile() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("absent.toml");
 
     let out = nashcode(&config, &["--json", "doctor"]);
-    assert_eq!(out.status.code(), Some(1));
+    // The report itself ran, so the envelope is ok; the missing profile is what
+    // the exit code carries.
+    assert_eq!(out.status.code(), Some(3));
 
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ok"], false);
-    assert_eq!(v["failed"], 1);
-    let checks = v["checks"].as_array().unwrap();
-    assert_eq!(checks[0]["id"], "profile");
+    let v = envelope(&out);
+    assert_eq!(v["ok"], true, "the report succeeded: {v}");
+    assert_eq!(v["exit_code"], 3);
+    assert_eq!(v["result"]["healthy"], false);
+
+    let checks = v["result"]["checks"].as_array().unwrap();
+    assert_eq!(checks[0]["name"], "profile");
     assert_eq!(checks[0]["status"], "fail");
     assert!(checks[0]["detail"].as_str().unwrap().contains("nashcode setup"));
+    // A failure an agent can act on carries the command to run next.
+    assert!(checks[0]["fix"].as_str().unwrap().contains("nashcode setup"));
+    // Nothing after the profile could run, and a skip is never a pass.
+    assert!(checks[1..].iter().all(|c| c["status"] == "skip"), "{v}");
 }
 
 #[test]
@@ -67,12 +86,12 @@ fn doctor_probes_the_profiles_listen_port_not_a_hardcoded_one() {
     assert!(script.contains("http://127.0.0.1:9944/"), "{script}");
     assert!(!script.contains("8080"), "hardcoded port survives: {script}");
 
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let loopback = v["checks"]
+    let v = envelope(&out);
+    let loopback = v["result"]["checks"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|c| c["id"] == "loopback")
+        .find(|c| c["name"] == "loopback")
         .expect("a loopback check");
     assert!(
         loopback["detail"].as_str().unwrap().contains("127.0.0.1:9944"),
@@ -92,26 +111,27 @@ fn profiles_use_and_token_round_trip_through_the_store() {
     )
     .unwrap();
 
-    let out = nashcode(&config, &["--json", "profiles"]);
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["active"], "a");
-    assert_eq!(v["profiles"].as_array().unwrap().len(), 2);
+    let v = envelope(&nashcode(&config, &["--json", "profiles"]));
+    assert_eq!(v["result"]["active"], "a");
+    assert_eq!(v["result"]["profiles"].as_array().unwrap().len(), 2);
 
     let out = nashcode(&config, &["--json", "use", "b"]);
     assert!(out.status.success());
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["active"], "b");
+    assert_eq!(envelope(&out)["result"]["active"], "b");
 
     // --profile overrides the active selection without changing it.
-    let out = nashcode(&config, &["--json", "--profile", "a", "token"]);
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["token"], "aaaa");
+    let v = envelope(&nashcode(&config, &["--json", "--profile", "a", "token"]));
+    assert_eq!(v["result"]["token"], "aaaa");
 
     // The active profile (now b) holds no token: that is an error, not "".
     let out = nashcode(&config, &["--json", "token"]);
-    assert!(!out.status.success());
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(v["error"].as_str().unwrap().contains("no token"));
+    assert_eq!(out.status.code(), Some(3), "a missing token is not found");
+    let v = envelope(&out);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "NOT_FOUND");
+    assert!(v["error"]["message"].as_str().unwrap().contains("no token"));
+    // Every error names the command to run next.
+    assert!(v["fix"].as_str().unwrap().starts_with("nashcode "), "{v}");
 }
 
 #[test]
@@ -132,10 +152,12 @@ fn a_bad_repo_name_dies_before_it_can_become_a_url_path() {
         vec!["--json", "clone", "../evil"],
     ] {
         let out = nashcode(&config, &args);
-        assert!(!out.status.success(), "{args:?} should fail");
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?} is a bad invocation");
+        let v = envelope(&out);
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"]["code"], "USAGE", "{args:?}: {v}");
         assert!(
-            v["error"].as_str().unwrap().contains("not a valid"),
+            v["error"]["message"].as_str().unwrap().contains("not a valid"),
             "{args:?}: {v}"
         );
     }
@@ -156,11 +178,27 @@ fn plan_new_writes_the_template_inside_a_repo() {
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["relative"], "plans/replace-the-parser.md");
+    let v = envelope(&out);
+    assert_eq!(v["result"]["relative"], "plans/replace-the-parser.md");
     let text = std::fs::read_to_string(repo.join("plans/replace-the-parser.md")).unwrap();
     assert!(text.starts_with("# Replace the Parser\n"));
     assert!(text.contains("## Steps"));
+
+    // The plan is a dead end without a reviewer, so the trail carries on to one.
+    let actions: Vec<&str> = v["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["command"].as_str())
+        .collect();
+    assert!(
+        actions.contains(&"nashcode annotate plans/replace-the-parser.md"),
+        "{actions:?}"
+    );
+    assert!(
+        actions.contains(&"nashcode comments plans/replace-the-parser.md"),
+        "{actions:?}"
+    );
 
     // Re-running refuses to clobber the plan.
     let out = Command::new(env!("CARGO_BIN_EXE_nashcode"))
@@ -173,7 +211,7 @@ fn plan_new_writes_the_template_inside_a_repo() {
 }
 
 #[test]
-fn setup_dry_run_prints_scripts_and_writes_nothing() {
+fn setup_dry_run_returns_the_scripts_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
 
@@ -192,8 +230,38 @@ fn setup_dry_run_prints_scripts_and_writes_nothing() {
         ],
     );
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("set -eu"), "dry run should print the scripts");
-    assert!(text.contains("tailscale"), "{text}");
+
+    // Stdout belongs to the envelope, so a preview is returned rather than
+    // printed: every script the run would have executed, in order.
+    let v = envelope(&out);
+    assert_eq!(v["result"]["dry_run"], true);
+    let scripts = v["result"]["scripts"].as_array().unwrap();
+    let steps: Vec<&str> = scripts.iter().filter_map(|s| s["step"].as_str()).collect();
+    assert!(steps.contains(&"preflight"), "{steps:?}");
+    assert!(steps.contains(&"deploy"), "{steps:?}");
+    assert!(steps.contains(&"tailscale up"), "{steps:?}");
+    assert!(
+        scripts.iter().all(|s| s["script"].as_str().unwrap().contains("set -e")),
+        "every remote script is set -e"
+    );
     assert!(!config.exists(), "dry run must not write a profile");
+}
+
+#[test]
+fn setup_names_the_flag_it_is_missing_rather_than_asking_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+
+    // No --provider: nothing prompts any more, so this is a usage error whose
+    // fix lists what to pass.
+    let out = nashcode(&config, &["setup", "--host", "me@example-host", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(2));
+    let v = envelope(&out);
+    assert_eq!(v["error"]["code"], "USAGE");
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("--provider is required"),
+        "{v}"
+    );
+    assert!(v["fix"].as_str().unwrap().contains("--provider"), "{v}");
+    assert!(!config.exists());
 }

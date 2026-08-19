@@ -16,7 +16,6 @@ use crate::api::Client;
 use crate::cli::BrainArgs;
 use crate::timefmt::{ago, age_of};
 use crate::vcs;
-use anyhow::Result;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -48,10 +47,14 @@ pub fn brain_url(viewer: &str, repo: Option<&str>) -> String {
 
 /// The whole stanza, reduced to what an agent reads first.
 ///
-/// Shape: `{"ok": true, "generated_at": …, "repos": [<repo digest>]}`. One repo or
-/// all of them take the same shape, so a caller never branches on which it asked
-/// for. Every section is optional: a stanza that has not grown a field yet loses
-/// that line and nothing else.
+/// Shape: `{"status": "ok", "generated_at": …, "repos": [<repo digest>]}`. One
+/// repo or all of them take the same shape, so a caller never branches on which
+/// it asked for. Every section is optional: a stanza that has not grown a field
+/// yet loses that line and nothing else.
+///
+/// `status` rather than `ok`, because the envelope around this is always
+/// `ok: true` — a viewer that is down is a fact about the deployment, not a
+/// failure of the command.
 pub fn digest(stanza: &Value) -> Value {
     let all = stanza
         .get("repos")
@@ -59,7 +62,7 @@ pub fn digest(stanza: &Value) -> Value {
         .map(Vec::as_slice)
         .unwrap_or_default();
     let repos: Vec<Value> = all.iter().take(REPO_CAP).map(repo_digest).collect();
-    let mut out = json!({ "ok": true, "repos": repos });
+    let mut out = json!({ "status": "ok", "repos": repos });
     if all.len() > REPO_CAP {
         out["elided"] = json!(all.len() - REPO_CAP);
     }
@@ -69,14 +72,16 @@ pub fn digest(stanza: &Value) -> Value {
     out
 }
 
-/// The failure shape. Same `ok` key as the success shape, so a caller reads one
-/// field to know which it got.
+/// The unavailable shape. Same `status` key as the success shape, so a caller
+/// reads one field to know which of the two it got.
 pub fn failure(reason: &str) -> Value {
-    json!({ "ok": false, "error": reason })
+    json!({ "status": "unavailable", "error": reason })
 }
 
 fn repo_digest(repo: &Value) -> Value {
-    let name = repo.get("name").and_then(Value::as_str).unwrap_or("?");
+    // Cleaned here, not at a render site: the digest IS the output now, and a
+    // repository name is a string somebody else chose.
+    let name = clean(repo.get("name").and_then(Value::as_str).unwrap_or("?"));
 
     // A mirror that could not be refreshed answers with the reason and nothing
     // else. Say that, rather than rendering five empty sections.
@@ -138,7 +143,7 @@ fn branches_digest(repo: &Value) -> Vec<Value> {
                 .map(|branch| {
                     let tip = branch.get("tip").and_then(Value::as_str).unwrap_or_default();
                     json!({
-                        "branch": branch.get("branch").and_then(Value::as_str).unwrap_or("?"),
+                        "branch": clean(branch.get("branch").and_then(Value::as_str).unwrap_or("?")),
                         "tip": short(tip),
                         "ahead": branch.get("ahead").and_then(Value::as_i64).unwrap_or(0),
                         "ci": branch.get("ci").and_then(Value::as_str).unwrap_or("none"),
@@ -287,162 +292,17 @@ fn clean(text: &str) -> String {
     text.chars().filter(|c| !c.is_control() && *c != '\u{7f}').collect()
 }
 
-/// The digest as text: a header per repository, then one labelled group per
-/// section. Sections with nothing in them print nothing.
-pub fn render(digest: &Value) -> Vec<String> {
-    if digest.get("ok").and_then(Value::as_bool) == Some(false) {
-        let why = digest
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("the viewer did not answer");
-        return vec![clean(&one_line(why))];
-    }
-    let repos = digest
-        .get("repos")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    if repos.is_empty() {
-        return vec!["no repositories".to_string()];
-    }
-    let mut lines = Vec::new();
-    for (i, repo) in repos.iter().enumerate() {
-        if i > 0 {
-            lines.push(String::new());
-        }
-        lines.extend(render_repo(repo));
-    }
-    if let Some(n) = digest.get("elided").and_then(Value::as_i64) {
-        lines.push(String::new());
-        lines.push(format!(
-            "and {n} more {}; name one to see it",
-            if n == 1 { "repository" } else { "repositories" }
-        ));
-    }
-    lines
-}
-
-fn render_repo(repo: &Value) -> Vec<String> {
-    let name = clean(repo.get("name").and_then(Value::as_str).unwrap_or("?"));
-    let mut lines = Vec::new();
-
-    if repo.get("available").and_then(Value::as_bool) == Some(false) {
-        let why = repo
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("unavailable");
-        lines.push(format!("{name}: unavailable — {}", clean(&one_line(why))));
-        return lines;
-    }
-
-    let stale = if repo.get("stale").and_then(Value::as_bool) == Some(true) {
-        " (mirror stale)"
-    } else {
-        ""
-    };
-    lines.push(format!("{name}{stale}"));
-
-    if let Some(error) = repo.get("error").and_then(Value::as_str) {
-        lines.push(row("error", error));
-    }
-
-    if let Some(branches) = repo.get("branches").and_then(Value::as_array) {
-        let text = branches
-            .iter()
-            .map(|b| {
-                let ahead = b["ahead"].as_i64().unwrap_or(0);
-                let ahead = if ahead > 0 { format!(" +{ahead}") } else { String::new() };
-                format!(
-                    "{} {}{ahead} ci:{}",
-                    b["branch"].as_str().unwrap_or("?"),
-                    b["tip"].as_str().unwrap_or(""),
-                    b["ci"].as_str().unwrap_or("none"),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" · ");
-        lines.push(row("branches", &text));
-    }
-
-    if let Some(code) = repo.get("code") {
-        let text = if code["indexed"].as_bool() == Some(true) {
-            format!(
-                "{} files · {} symbols · {} chunks · indexed {}",
-                code["files"].as_i64().unwrap_or(0),
-                code["symbols"].as_i64().unwrap_or(0),
-                code["chunks"].as_i64().unwrap_or(0),
-                code["age"].as_str().unwrap_or("at an unknown time"),
-            )
-        } else {
-            "not indexed".to_string()
-        };
-        lines.push(row("code", &text));
-    }
-
-    if let Some(plans) = repo.get("plans").and_then(Value::as_array) {
-        let text = plans
-            .iter()
-            .map(|p| {
-                let open = p["open_comments"].as_i64().unwrap_or(0);
-                let path = p["path"].as_str().unwrap_or("?");
-                if open > 0 {
-                    format!("{path} ({open} open)")
-                } else {
-                    path.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" · ");
-        lines.push(row("plans", &text));
-    }
-
-    if let Some(arch) = repo.get("architecture") {
-        let mut parts = Vec::new();
-        if let Some(who) = arch["latest_author"].as_str() {
-            parts.push(who.to_string());
-        }
-        if let Some(age) = arch["age"].as_str() {
-            parts.push(age.to_string());
-        }
-        if let Some(n) = arch["submissions"].as_i64() {
-            parts.push(format!("{n} submissions"));
-        }
-        lines.push(row("arch", &parts.join(" · ")));
-    }
-
-    if let Some(recent) = repo.get("recent").and_then(Value::as_array) {
-        for (i, event) in recent.iter().enumerate() {
-            let parts: Vec<&str> = [
-                event["type"].as_str().unwrap_or(""),
-                event["branch"].as_str().unwrap_or(""),
-                event["status"].as_str().unwrap_or(""),
-                event["age"].as_str().unwrap_or(""),
-            ]
-            .into_iter()
-            .filter(|p| !p.is_empty())
-            .collect();
-            lines.push(row(if i == 0 { "recent" } else { "" }, &parts.join(" ")));
-        }
-    }
-
-    lines
-}
-
-/// One labelled line. Every caller passes text that came off the wire, so the
-/// sanitising happens here rather than at each of the eight call sites.
-fn row(label: &str, text: &str) -> String {
-    format!("  {label:<9}{}", clean(text))
-}
-
 /// `nashcode brain [repo]`.
 ///
-/// Exits 0 whatever happens. This runs from a session-start hook, and the cost of
-/// a wrong answer is one unhelpful line; the cost of a nonzero exit is the
-/// session.
-pub fn run(ctx: &Ctx, args: &BrainArgs) -> Result<()> {
+/// Never fails. This runs from a session-start hook, and the cost of a wrong
+/// answer is one unhelpful field; the cost of a nonzero exit is the session. So
+/// there is no `Result` here to get wrong: every path answers with a value, and
+/// the caller wraps it in an `ok: true` envelope whose `status` says which kind
+/// of answer it is.
+pub fn run(ctx: &Ctx, args: &BrainArgs) -> Value {
     let (viewer, token) = match viewer_url(ctx) {
         Ok(pair) => pair,
-        Err(reason) => return report(ctx, &reason),
+        Err(reason) => return unavailable(&reason),
     };
 
     // An explicit name wins. Otherwise the repository `origin` points at, the way
@@ -460,14 +320,14 @@ pub fn run(ctx: &Ctx, args: &BrainArgs) -> Result<()> {
     let client = Client::with_timeout(&viewer, &token, TIMEOUT);
     let reply = match client.get_json(&url) {
         Ok(reply) => reply,
-        Err(e) => return report(ctx, &format!("viewer unreachable: {e:#}")),
+        Err(e) => return unavailable(&format!("viewer unreachable: {e:#}")),
     };
     if !reply.ok() {
-        return report(ctx, &format!("{url} returned HTTP {}", reply.status));
+        return unavailable(&format!("{url} returned HTTP {}", reply.status));
     }
     let stanza: Value = match serde_json::from_str(&reply.body) {
         Ok(value) => value,
-        Err(e) => return report(ctx, &format!("the viewer's /brain answer is not JSON: {e}")),
+        Err(e) => return unavailable(&format!("the viewer's /brain answer is not JSON: {e}")),
     };
 
     let digest = digest(&stanza);
@@ -477,27 +337,19 @@ pub fn run(ctx: &Ctx, args: &BrainArgs) -> Result<()> {
     if digest["repos"].as_array().is_some_and(|rows| rows.is_empty())
         && let Some(asked) = &repo
     {
-        return report(ctx, &format!("no repository named {asked} on the viewer"));
+        return unavailable(&format!("no repository named {asked} on the viewer"));
     }
 
-    ctx.out.emit(digest.clone(), || {
-        for line in render(&digest) {
-            ctx.out.line(line);
-        }
-    });
-    Ok(())
+    digest
 }
 
-/// One line, exit 0. In `--json`, the same fact as `{"ok": false, "error": …}`.
+/// The soft answer: exit 0, `status: unavailable`, and the reason.
 ///
 /// The reason is collapsed to a single line here rather than at each call site: a
 /// git error or a TOML parse failure arrives with newlines in it, and the one-line
 /// promise is what makes this command safe in a session-start hook.
-fn report(ctx: &Ctx, reason: &str) -> Result<()> {
-    let reason = one_line(reason);
-    let value = failure(&reason);
-    ctx.out.emit(value, || ctx.out.line(clean(&reason)));
-    Ok(())
+fn unavailable(reason: &str) -> Value {
+    failure(&clean(&one_line(reason)))
 }
 
 /// The viewer this profile names, or the reason there is none.
@@ -587,7 +439,7 @@ mod tests {
     #[test]
     fn the_digest_keeps_the_facts_and_drops_the_aggregate() {
         let d = digest(&stanza());
-        assert_eq!(d["ok"], true);
+        assert_eq!(d["status"], "ok");
         assert_eq!(d["generated_at"], "2026-08-19T12:00:00Z");
         let repo = only_repo(&d);
         assert_eq!(repo["name"], "demo");
@@ -630,7 +482,6 @@ mod tests {
         let repo = only_repo(&digest(&s));
         assert_eq!(repo["code"]["indexed"], false);
         assert!(repo["code"].get("age").is_none());
-        assert!(render(&digest(&s)).iter().any(|l| l.contains("code") && l.contains("not indexed")));
     }
 
     #[test]
@@ -688,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unavailable_repo_is_one_line_and_keeps_the_reason() {
+    fn an_unavailable_repo_is_the_reason_and_nothing_else() {
         let s = json!({
             "generated_at": "2026-08-19T12:00:00Z",
             "repos": [{ "name": "dead", "available": false, "error": "mirror fetch failed" }]
@@ -696,37 +547,8 @@ mod tests {
         let repo = only_repo(&digest(&s));
         assert_eq!(repo["available"], false);
         assert_eq!(repo["error"], "mirror fetch failed");
-        let lines = render(&digest(&s));
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("dead: unavailable"));
-        assert!(lines[0].contains("mirror fetch failed"));
-    }
-
-    #[test]
-    fn the_text_is_one_labelled_group_per_section() {
-        let lines = render(&digest(&stanza()));
-        assert_eq!(lines[0], "demo");
-        let find = |label: &str| {
-            lines
-                .iter()
-                .find(|l| l.starts_with(&format!("  {label}")))
-                .unwrap_or_else(|| panic!("no {label} line in {lines:#?}"))
-                .clone()
-        };
-        let branches = find("branches");
-        assert!(branches.contains("main a1b2c3d ci:ok"), "{branches}");
-        assert!(branches.contains("feature/x d4e5f6a +2 ci:fail"), "{branches}");
-        assert!(find("code").contains("42 files · 88 symbols · 130 chunks · indexed 3 days ago"));
-        let plans = find("plans");
-        assert!(plans.contains("plans/a.md (2 open)"), "{plans}");
-        assert!(plans.contains("plans/b.md") && !plans.contains("plans/b.md ("), "{plans}");
-        assert!(find("arch").contains("rob"));
-        assert!(find("arch").contains("3 submissions"));
-        // Five recent rows: the first is labelled, the rest hang under it.
-        let recent: Vec<&String> = lines.iter().filter(|l| l.contains("merge b")).collect();
-        assert_eq!(recent.len(), 5);
-        assert!(recent[0].starts_with("  recent   merge b3"), "{:?}", recent[0]);
-        assert!(recent[1].starts_with("           merge b4"), "{:?}", recent[1]);
+        // No empty sections dressed up as an answer.
+        assert_eq!(repo.as_object().unwrap().len(), 3, "{repo}");
     }
 
     #[test]
@@ -758,8 +580,6 @@ mod tests {
         let d = digest(&json!({ "repos": repos }));
         assert_eq!(d["repos"].as_array().unwrap().len(), REPO_CAP);
         assert_eq!(d["elided"], 3);
-        let lines = render(&d);
-        assert!(lines.last().unwrap().contains("and 3 more repositories"), "{lines:#?}");
 
         // At the cap exactly, nothing is elided and nothing is said.
         let repos: Vec<Value> = (0..REPO_CAP)
@@ -767,26 +587,23 @@ mod tests {
             .collect();
         let d = digest(&json!({ "repos": repos }));
         assert!(d.get("elided").is_none());
-        assert!(!render(&d).iter().any(|l| l.contains("more repositor")));
     }
 
     #[test]
     fn a_multi_line_reason_is_collapsed_to_the_one_line_this_command_promises() {
         assert_eq!(one_line("a\nb\n  c\t d "), "a b c d");
         let value = failure(&one_line("parse error\n  at line 3\n  in config.toml"));
-        assert_eq!(render(&value), vec!["parse error at line 3 in config.toml"]);
+        assert_eq!(value["error"], "parse error at line 3 in config.toml");
 
         // The same applies to a mirror message arriving inside a repo row.
         let s = json!({
             "repos": [{ "name": "dead", "available": false, "error": "fatal: bad band\nremote hung up" }]
         });
-        let lines = render(&digest(&s));
-        assert_eq!(lines.len(), 1, "{lines:#?}");
-        assert!(lines[0].ends_with("fatal: bad band remote hung up"), "{}", lines[0]);
+        assert_eq!(only_repo(&digest(&s))["error"], "fatal: bad band remote hung up");
     }
 
     #[test]
-    fn control_characters_from_the_wire_never_reach_the_terminal() {
+    fn control_characters_from_the_wire_never_reach_the_digest() {
         let s = json!({
             "repos": [{
                 "name": "evil\u{1b}[2J\u{7f}repo",
@@ -795,33 +612,39 @@ mod tests {
                 "branches": [{ "branch": "ma\u{1b}[31min", "tip": "abc1234", "ahead": 0, "ci": "ok" }]
             }]
         });
-        for line in render(&digest(&s)) {
+        let repo = only_repo(&digest(&s));
+        for name in [repo["name"].as_str().unwrap(), repo["branches"][0]["branch"].as_str().unwrap()] {
             assert!(
-                !line.chars().any(|c| c.is_control() || c == '\u{7f}'),
-                "escape survived into {line:?}"
+                !name.chars().any(|c| c.is_control() || c == '\u{7f}'),
+                "escape survived into {name:?}"
             );
         }
         // Only the control bytes go. What is left is inert text, still readable,
         // rather than a name silently replaced by nothing.
-        assert_eq!(render(&digest(&s))[0], "evil[2Jrepo");
+        assert_eq!(repo["name"], "evil[2Jrepo");
+        assert_eq!(repo["branches"][0]["branch"], "ma[31min");
     }
 
     #[test]
-    fn a_dead_viewer_renders_as_the_one_line_it_is() {
+    fn a_dead_viewer_is_a_status_not_an_error_envelope() {
         let value = failure("viewer unreachable: connection refused");
-        assert_eq!(value["ok"], false);
-        assert_eq!(render(&value), vec!["viewer unreachable: connection refused"]);
+        assert_eq!(value["status"], "unavailable");
+        assert_eq!(value["error"], "viewer unreachable: connection refused");
+        // No `ok` key: the envelope around this one is always ok.
+        assert!(value.get("ok").is_none(), "{value}");
     }
 
     #[test]
-    fn an_empty_brain_says_so_rather_than_printing_nothing() {
-        assert_eq!(render(&digest(&json!({ "repos": [] }))), vec!["no repositories"]);
+    fn an_empty_brain_is_an_empty_list_rather_than_a_missing_key() {
+        let d = digest(&json!({ "repos": [] }));
+        assert_eq!(d["status"], "ok");
+        assert_eq!(d["repos"].as_array().unwrap().len(), 0);
     }
 
     #[test]
     fn every_section_is_optional() {
         let s = json!({ "repos": [{ "name": "bare", "available": true }] });
-        let lines = render(&digest(&s));
-        assert_eq!(lines, vec!["bare"]);
+        let repo = only_repo(&digest(&s));
+        assert_eq!(repo, json!({ "name": "bare", "available": true }));
     }
 }

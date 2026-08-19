@@ -14,6 +14,64 @@ NASHCODE=http://nashcode.example    # the viewer
 REPO=alpha
 ```
 
+## The `nashcode` CLI
+
+Nobody types it: you drive it. So it answers the way you read — **one JSON envelope on
+stdout, always**, and a typed exit code you branch on instead of parsing prose.
+
+```json
+{ "ok": true, "command": "nashcode ls", "timestamp": "…", "exit_code": 0,
+  "result": { … }, "next_actions": [ … ] }
+```
+
+A failure swaps `result` for `error` and adds `fix`:
+
+```json
+{ "ok": false, "exit_code": 4,
+  "error": { "message": "…returned HTTP 401 — the profile's token was rejected…",
+             "code": "AUTH", "retryable": false },
+  "fix": "nashcode token   # compare it with GIT_TOKEN in ~/dgit/wrangler.celld.jsonc" }
+```
+
+| exit | meaning | what to do |
+|---|---|---|
+| 0 | it worked | read `result` |
+| 1 | something else broke | read the message |
+| 2 | bad invocation | run `fix`; it is the corrected line |
+| 3 | no such profile, repo, viewer, or token | create it |
+| 4 | the token was rejected (401/403) | rotate it |
+| 5 | dgit, the viewer, or an ssh script failed | `nashcode doctor` |
+
+`fix` is a command, never advice. Run it.
+
+`next_actions` is the trail: after `plan new` it names the `annotate` and `comments` calls
+for that file; after `comments` it names the same call with `--since=` of the newest
+comment it just returned, so a polling loop needs no bookkeeping. `--quiet` drops them.
+
+Four flags work on every command without being declared:
+
+- `--select=a,b,c` — project the result to those fields. Lists advertise their own paths
+  in `result.fields` (`items.id,items.body`); paste them back unedited.
+- `--compact` — drop null and empty fields.
+- `--quiet` — no `next_actions`, no progress on stderr.
+- `--json` — accepted and ignored. Output is always JSON; the flag survives so calls you
+  already have memorised keep working.
+
+`--yes` and `--dry-run` are reserved too: `nashcode rm <name>` refuses without `--yes`
+(there is no prompt to answer), and `nashcode setup --dry-run` returns every remote script
+it would have run in `result.scripts` instead of running any.
+
+`--profile <name>` acts on a saved profile other than the active one. Progress notes go to
+stderr; stdout is only ever the envelope.
+
+Two commands are deliberately different:
+
+- **`nashcode grep`** answers in ripgrep's format with ripgrep's exit codes (0 hits,
+  1 none), because that is what makes it usable on reflex. It keeps its own `--json`.
+- **`nashcode brain`** never fails. See "State" below.
+
+Run `nashcode` with no arguments for the command tree, or `nashcode help <command>`.
+
 ## The loop
 
 1. Write a plan to `plans/<name>.md` on a branch. Push it.
@@ -115,6 +173,12 @@ notes, or `Approved.` when they had none. It arrives as a whole-file comment on 
 the working copy is on, so a poller watching `?file=plans/retries.md` sees it like any
 other. Dismissing posts nothing.
 
+Launching is what the command is for, so it launches by default — you open the tool for the
+human. `--no-launch` is the inspect-only form: it reports the file, where plannotator is
+(`null` when it is not installed), and the plan's viewer URL, and opens nothing. When the
+comment cannot be posted, the feedback comes back inside the error message rather than
+being lost, and the `next_action` is the `comments --since=<now>` call to poll with.
+
 ## 5. Revise
 
 Edit the plan, commit, push. The comments stay put. Ones anchored to a line whose file has
@@ -181,12 +245,13 @@ line apiece.
 ```sh
 nashcode brain            # the repo `origin` points at; every repo outside one
 nashcode brain alpha
-nashcode brain --json     # the digest as JSON, not the raw stanza
+nashcode brain alpha --select=repos.branches,repos.code
 ```
 
-It always exits 0, so it is safe in a session-start hook: a viewer that is down or not
-configured prints one line saying so and gets out of the way, and `--json` says
-`{"ok": false, "error": "…"}`. Use `curl /brain` when you want the whole document.
+It always exits 0, so it is safe in a session-start hook. A viewer that is down or not
+configured is still an `ok: true` envelope, with `result.status` set to `unavailable` and
+`result.error` saying why; a live one sets `result.status` to `ok`. Nothing about a dead
+viewer can take a session down with it. Use `curl /brain` when you want the whole document.
 
 `POST /brain/ask` puts Claude in front of the same document for judgment calls.
 

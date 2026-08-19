@@ -1,6 +1,10 @@
 //! `nashcode comments` end to end: the real binary, a real HTTP round trip,
 //! and a canned viewer answer — served from a listener on 127.0.0.1 that this
 //! test owns, so nothing here needs a network or a host.
+//!
+//! The result is a bounded list, so an agent gets `{items, count, total,
+//! truncated, fields}` and a `--select` it can paste back. The rows inside it
+//! are the viewer's own, untouched.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -65,8 +69,18 @@ fn nashcode(config: &std::path::Path, cwd: &std::path::Path, args: &[&str]) -> s
         .unwrap()
 }
 
+fn envelope(out: &std::process::Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not one JSON value ({e})\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
 #[test]
-fn json_mode_passes_the_viewers_answer_through_untouched() {
+fn the_rows_are_a_bounded_list_of_the_viewers_own_objects() {
     let dir = tempfile::tempdir().unwrap();
     let (port, server) = one_shot_server(FIXTURE);
     let config = write_config(dir.path(), Some(port));
@@ -88,9 +102,22 @@ fn json_mode_passes_the_viewers_answer_through_untouched() {
     );
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
-    let got: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let result = &envelope(&out)["result"];
     let want: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-    assert_eq!(got, want, "--json must be a byte-faithful passthrough");
+    // The wrapper is the CLI's business; the rows inside it are the viewer's,
+    // passed through key for key.
+    assert_eq!(result["items"], want["comments"]);
+    assert_eq!(result["count"], 2);
+    assert_eq!(result["total"], 2);
+    assert_eq!(result["truncated"], false);
+    // The row schema comes back as --select paths an agent can paste unedited.
+    let fields: Vec<&str> = result["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f.as_str())
+        .collect();
+    assert!(fields.contains(&"items.id") && fields.contains(&"items.body"), "{fields:?}");
 
     let request_line = server.join().unwrap();
     assert_eq!(
@@ -100,7 +127,7 @@ fn json_mode_passes_the_viewers_answer_through_untouched() {
 }
 
 #[test]
-fn human_mode_renders_author_line_and_indented_body() {
+fn the_next_action_polls_from_the_newest_comment_returned() {
     let dir = tempfile::tempdir().unwrap();
     let (port, server) = one_shot_server(FIXTURE);
     let config = write_config(dir.path(), Some(port));
@@ -111,10 +138,22 @@ fn human_mode_renders_author_line_and_indented_body() {
         &["comments", "plans/rewrite-the-parser.md", "--repo", "demo"],
     );
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("#1 rob line 12"), "{text}");
-    assert!(text.contains("    This step assumes"), "{text}");
-    assert!(text.contains("    Ship step 1 first"), "{text}");
+
+    // The whole point of the polling loop: the next call asks only for what it
+    // has not already seen.
+    let v = envelope(&out);
+    let actions: Vec<&str> = v["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["command"].as_str())
+        .collect();
+    assert!(
+        actions.contains(
+            &"nashcode comments plans/rewrite-the-parser.md --repo=demo --since=2026-08-17T14:05:30Z"
+        ),
+        "{actions:?}"
+    );
     server.join().unwrap();
 }
 
@@ -128,20 +167,12 @@ fn a_profile_without_a_viewer_url_fails_with_a_clear_pointer() {
         dir.path(),
         &["comments", "plans/x.md", "--repo", "demo"],
     );
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("no viewer URL"), "{err}");
-    assert!(err.contains("nashcode setup --viewer"), "{err}");
-
-    // And in --json mode, stdout still carries exactly one JSON value.
-    let out = nashcode(
-        &config,
-        dir.path(),
-        &["--json", "comments", "plans/x.md", "--repo", "demo"],
-    );
-    assert!(!out.status.success());
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(v["error"].as_str().unwrap().contains("no viewer URL"));
+    assert_eq!(out.status.code(), Some(3), "the viewer is a resource, missing");
+    let v = envelope(&out);
+    let why = v["error"]["message"].as_str().unwrap();
+    assert!(why.contains("no viewer URL"), "{why}");
+    assert!(why.contains("nashcode setup --viewer"), "{why}");
+    assert!(v["fix"].as_str().unwrap().contains("--viewer"), "{v}");
 }
 
 #[test]

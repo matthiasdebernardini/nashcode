@@ -4,7 +4,11 @@
 //! The fake plannotator is the point of most of this. It records the argv it was
 //! handed, refuses to overwrite a result file that already exists (plannotator's
 //! own rule), and prints the decision on stdout the way the real one does — so a
-//! test can prove that copy never reaches the user's terminal.
+//! test can prove that copy never reaches our own stdout, which carries exactly
+//! one envelope.
+//!
+//! Launching is the default: the agent opens plannotator FOR the human.
+//! `--no-launch` is the inspect-only form.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -115,6 +119,16 @@ fn config(dir: &Path, viewer: Option<u16>) -> PathBuf {
     path
 }
 
+fn envelope(out: &std::process::Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not one JSON value ({e})\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
 fn nashcode(config: &Path, bin: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
     let path = format!(
         "{}:{}",
@@ -151,27 +165,56 @@ fn plannotator_is_launched_gated_with_a_result_file_that_does_not_exist_yet() {
 
     // Dismissed says so and posts nothing, and plannotator's own copy of the
     // decision record never reaches our stdout.
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("dismissed, nothing posted"), "{text}");
-    assert!(!text.contains("\"decision\""), "{text}");
+    let v = envelope(&out);
+    assert_eq!(v["result"]["launched"], true);
+    assert_eq!(v["result"]["status"], "dismissed, nothing posted");
+    assert!(v["result"].get("feedback").is_none(), "{v}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("\"decision\""),
+        "plannotator's own stdout leaked into ours"
+    );
 }
 
 #[test]
-fn json_mode_launches_nothing() {
+fn no_launch_reports_where_everything_is_and_opens_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let work = repo(dir.path());
     let bin = plannotator(dir.path(), r#"{"decision":"approved"}"#, 0);
     let cfg = config(dir.path(), None);
 
-    let out = nashcode(&cfg, &bin, &work, &["--json", "annotate", "plans/x.md"]);
+    let out = nashcode(&cfg, &bin, &work, &["annotate", "plans/x.md", "--no-launch"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(
         !dir.path().join("argv.txt").exists(),
-        "--json must not open an editor"
+        "--no-launch must not open an editor"
     );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["file"], "plans/x.md");
-    assert!(v["plannotator"].as_str().unwrap().ends_with("plannotator"));
+    let result = &envelope(&out)["result"];
+    assert_eq!(result["file"], "plans/x.md");
+    assert_eq!(result["launched"], false);
+    assert!(result["plannotator"].as_str().unwrap().ends_with("plannotator"));
+}
+
+#[test]
+fn an_absent_plannotator_is_reported_with_where_to_get_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = repo(dir.path());
+    // An empty directory on PATH: no plannotator anywhere the CLI will look.
+    let empty = dir.path().join("empty-bin");
+    std::fs::create_dir_all(&empty).unwrap();
+    let cfg = config(dir.path(), None);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_nashcode"))
+        .args(["annotate", "plans/x.md"])
+        .env("NASHCODE_CONFIG", &cfg)
+        .env("PATH", &empty)
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "a missing tool is not a failure");
+    let result = &envelope(&out)["result"];
+    assert!(result["plannotator"].is_null(), "{result}");
+    assert_eq!(result["launched"], false);
+    assert!(result["hint"].as_str().unwrap().contains("plannotator"));
 }
 
 #[test]
@@ -188,11 +231,10 @@ fn an_annotated_decision_becomes_one_whole_file_comment() {
 
     let out = nashcode(&cfg, &bin, &work, &["annotate", "plans/x.md"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("posted #7"),
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
-    );
+    let result = &envelope(&out)["result"];
+    assert_eq!(result["status"], "posted");
+    assert_eq!(result["comment_id"], 7);
+    assert_eq!(result["branch"], "review/x");
 
     let request = server.join().unwrap();
     assert!(
@@ -224,11 +266,13 @@ fn a_refused_post_prints_the_feedback_and_then_fails() {
     let cfg = config(dir.path(), Some(port));
 
     let out = nashcode(&cfg, &bin, &work, &["annotate", "plans/x.md"]);
-    assert!(!out.status.success(), "a refused post must not report success");
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("step 2 is wrong"), "feedback was lost: {text}");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("400"), "{err}");
+    assert_eq!(out.status.code(), Some(5), "a refused post is an upstream failure");
+    let v = envelope(&out);
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(message.contains("400"), "{message}");
+    // Ten minutes of somebody's review must survive the failure that stopped it
+    // from being delivered.
+    assert!(message.contains("step 2 is wrong"), "feedback was lost: {message}");
     server.join().unwrap();
 }
 
@@ -245,11 +289,11 @@ fn with_nowhere_to_post_the_feedback_is_printed_and_the_command_succeeds() {
     let cfg = config(dir.path(), None);
 
     let out = nashcode(&cfg, &bin, &work, &["annotate", "plans/x.md"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("Approved.\n\ngood plan"), "{text}");
-    assert!(text.contains("not posted:"), "{text}");
-    assert!(text.contains("no viewer URL"), "{text}");
+    assert!(out.status.success(), "having nowhere to post is a configuration");
+    let result = &envelope(&out)["result"];
+    assert_eq!(result["feedback"], "Approved.\n\ngood plan");
+    assert_eq!(result["status"], "not posted");
+    assert!(result["not_posted"].as_str().unwrap().contains("no viewer URL"));
 }
 
 #[test]

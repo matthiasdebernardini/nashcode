@@ -6,7 +6,7 @@ use crate::cli::{CloneArgs, DescArgs, GcArgs, InitArgs, NewArgs, RemoteArgs, RmA
 use crate::profile::Profile;
 use crate::vcs::{self, Workspace};
 use anyhow::{Context, Result, bail};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::path::Path;
 
 /// Wire `origin` and hand the push token to git's credential store.
@@ -59,7 +59,7 @@ fn create(client: &Client, name: &str, cfg: &RepoConfig) -> Result<crate::api::C
     client.put_config(name, cfg)
 }
 
-pub fn new(ctx: &Ctx, args: &NewArgs) -> Result<()> {
+pub fn new(ctx: &Ctx, args: &NewArgs) -> Result<Value> {
     let (_, p, client) = ctx.client()?;
     let cfg = RepoConfig {
         description: args.desc.clone(),
@@ -86,31 +86,20 @@ pub fn new(ctx: &Ctx, args: &NewArgs) -> Result<()> {
     }
 
     let url = p.repo_url(&args.name);
-    ctx.out.emit(
-        json!({
-            "name": args.name,
-            "url": url,
-            "web": format!("{}/{}/", p.url.trim_end_matches('/'), args.name),
-            "description": echo.description,
-            "section": echo.section,
-            "private": echo.private,
-            "remote": remote,
-            "jj_colocated": colocated,
-        }),
-        || {
-            ctx.out.line(format!("created {}", args.name));
-            ctx.out
-                .line(format!("  {}/{}/", p.url.trim_end_matches('/'), args.name));
-            if remote.is_some() {
-                ctx.out.line(format!("  origin -> {url}"));
-            }
-        },
-    );
-    Ok(())
+    Ok(json!({
+        "name": args.name,
+        "url": url,
+        "web": format!("{}/{}/", p.url.trim_end_matches('/'), args.name),
+        "description": echo.description,
+        "section": echo.section,
+        "private": echo.private,
+        "remote": remote,
+        "jj_colocated": colocated,
+    }))
 }
 
 /// `nashcode init` — turn the current directory into a versioned repository.
-pub fn init(ctx: &Ctx, args: &InitArgs) -> Result<()> {
+pub fn init(ctx: &Ctx, args: &InitArgs) -> Result<Value> {
     let (_, p, client) = ctx.client()?;
     let cwd = std::env::current_dir().context("read current directory")?;
     let name = match &args.name {
@@ -158,26 +147,15 @@ pub fn init(ctx: &Ctx, args: &InitArgs) -> Result<()> {
         pushed = commit_and_push(ctx, &ws)?;
     }
 
-    ctx.out.emit(
-        json!({
-            "name": name,
-            "url": url,
-            "web": format!("{}/{}/", p.url.trim_end_matches('/'), name),
-            "vcs": ws.kind.as_str(),
-            "root": ws.root,
-            "private": echo.private,
-            "pushed": pushed,
-        }),
-        || {
-            ctx.out.line(format!("{} is now versioned as `{name}`", ws.root.display()));
-            ctx.out
-                .line(format!("  {}/{}/", p.url.trim_end_matches('/'), name));
-            if !pushed {
-                ctx.out.line("  nothing pushed yet");
-            }
-        },
-    );
-    Ok(())
+    Ok(json!({
+        "name": name,
+        "url": url,
+        "web": format!("{}/{}/", p.url.trim_end_matches('/'), name),
+        "vcs": ws.kind.as_str(),
+        "root": ws.root,
+        "private": echo.private,
+        "pushed": pushed,
+    }))
 }
 
 /// Commit whatever is uncommitted and push it. Returns false when there was
@@ -245,34 +223,27 @@ fn commit_and_push(ctx: &Ctx, ws: &Workspace) -> Result<bool> {
     Ok(true)
 }
 
-pub fn ls(ctx: &Ctx) -> Result<()> {
+/// The repository rows, for a bounded list result. The profile's URL is not one
+/// of them: every row carries its own, so a projection down to `items.url`
+/// still answers "where is this".
+pub fn ls(ctx: &Ctx) -> Result<Vec<Value>> {
     let (_, p, client) = ctx.client()?;
-    let repos = client.list()?;
-    ctx.out.emit(
-        json!({ "url": p.url, "count": repos.len(), "repos": repos }),
-        || {
-            if repos.is_empty() {
-                ctx.out.line("no repositories");
-                return;
-            }
-            let width = repos.iter().map(|r| r.name.len()).max().unwrap_or(4);
-            for r in &repos {
-                let desc = if r.description.is_empty() {
-                    "-"
-                } else {
-                    &r.description
-                };
-                ctx.out.line(format!(
-                    "{:width$}  {:<10}  {}",
-                    r.name,
-                    r.idle,
-                    desc,
-                    width = width
-                ));
-            }
-        },
-    );
-    Ok(())
+    let base = p.url.trim_end_matches('/');
+    Ok(client
+        .list()?
+        .into_iter()
+        .map(|r| {
+            json!({
+                "name": r.name,
+                "description": r.description,
+                "owner": r.owner,
+                "section": r.section,
+                "idle": r.idle,
+                "url": p.repo_url(&r.name),
+                "web": format!("{base}/{}/", r.name),
+            })
+        })
+        .collect())
 }
 
 /// Repository names go straight into URL paths, so a bad one must die here:
@@ -287,7 +258,7 @@ fn require_valid_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn clone(ctx: &Ctx, args: &CloneArgs) -> Result<()> {
+pub fn clone(ctx: &Ctx, args: &CloneArgs) -> Result<Value> {
     require_valid_name(&args.name)?;
     let (_, p, _) = ctx.client()?;
     let url = p.repo_url(&args.name);
@@ -316,68 +287,26 @@ pub fn clone(ctx: &Ctx, args: &CloneArgs) -> Result<()> {
         }
     }
 
-    ctx.out.emit(
-        json!({ "name": args.name, "url": url, "dir": dir, "jj_colocated": colocated }),
-        || ctx.out.line(format!("cloned {} into {dir}", args.name)),
-    );
-    Ok(())
+    Ok(json!({ "name": args.name, "url": url, "dir": dir, "jj_colocated": colocated }))
 }
 
-pub fn rm(ctx: &Ctx, args: &RmArgs) -> Result<()> {
+/// Delete a repository. The `--yes` gate is the surface's business: by the time
+/// this runs, the caller has already said yes.
+pub fn rm(ctx: &Ctx, args: &RmArgs) -> Result<Value> {
     require_valid_name(&args.name)?;
     let (_, p, client) = ctx.client()?;
-    if !args.yes {
-        if !ctx.out.interactive() {
-            bail!("refusing to delete `{}` without --yes", args.name);
-        }
-        let prompt = format!(
-            "Delete `{}` from {}? Every commit in it goes with it.",
-            args.name, p.url
-        );
-        let confirmed = dialoguer::Confirm::new()
-            .with_prompt(prompt)
-            .default(false)
-            .interact()
-            .context("read confirmation")?;
-        if !confirmed {
-            ctx.out.emit(json!({ "name": args.name, "deleted": false }), || {
-                ctx.out.line("cancelled")
-            });
-            return Ok(());
-        }
-    }
     client.delete(&args.name)?;
-    ctx.out
-        .emit(json!({ "name": args.name, "deleted": true }), || {
-            ctx.out.line(format!("deleted {}", args.name))
-        });
-    Ok(())
+    Ok(json!({ "name": args.name, "deleted": true, "url": p.url }))
 }
 
-pub fn gc(ctx: &Ctx, args: &GcArgs) -> Result<()> {
+pub fn gc(ctx: &Ctx, args: &GcArgs) -> Result<Value> {
     require_valid_name(&args.name)?;
     let (_, _, client) = ctx.client()?;
     let r = client.gc(&args.name)?;
-    ctx.out.emit(
-        json!({ "name": args.name, "removed": r.removed, "kept": r.kept, "skipped": r.skipped }),
-        || {
-            if r.skipped {
-                ctx.out.line(format!(
-                    "{}: skipped, too large to sweep ({} objects kept)",
-                    args.name, r.kept
-                ));
-            } else {
-                ctx.out.line(format!(
-                    "{}: removed {}, kept {}",
-                    args.name, r.removed, r.kept
-                ));
-            }
-        },
-    );
-    Ok(())
+    Ok(json!({ "name": args.name, "removed": r.removed, "kept": r.kept, "skipped": r.skipped }))
 }
 
-pub fn desc(ctx: &Ctx, args: &DescArgs) -> Result<()> {
+pub fn desc(ctx: &Ctx, args: &DescArgs) -> Result<Value> {
     require_valid_name(&args.name)?;
     let (_, _, client) = ctx.client()?;
     let cfg = RepoConfig {
@@ -396,36 +325,16 @@ pub fn desc(ctx: &Ctx, args: &DescArgs) -> Result<()> {
         bail!("nothing to change. Pass --desc, --section, --owner, --private, or --public.");
     }
     let echo = client.put_config(&args.name, &cfg)?;
-    ctx.out.emit(
-        json!({
-            "name": args.name,
-            "description": echo.description,
-            "owner": echo.owner,
-            "section": echo.section,
-            "private": echo.private,
-        }),
-        || {
-            ctx.out.line(format!(
-                "{}: {}{}{}",
-                args.name,
-                if echo.description.is_empty() {
-                    "[no description]".to_string()
-                } else {
-                    echo.description.clone()
-                },
-                if echo.section.is_empty() {
-                    String::new()
-                } else {
-                    format!("  section={}", echo.section)
-                },
-                if echo.private { "  private" } else { "" },
-            ))
-        },
-    );
-    Ok(())
+    Ok(json!({
+        "name": args.name,
+        "description": echo.description,
+        "owner": echo.owner,
+        "section": echo.section,
+        "private": echo.private,
+    }))
 }
 
-pub fn remote(ctx: &Ctx, args: &RemoteArgs) -> Result<()> {
+pub fn remote(ctx: &Ctx, args: &RemoteArgs) -> Result<Value> {
     let (_, p) = ctx.profile()?;
     let ws = vcs::require_cwd()?;
     let name = match &args.name {
@@ -438,9 +347,5 @@ pub fn remote(ctx: &Ctx, args: &RemoteArgs) -> Result<()> {
         bail!("`{name}` is not a valid dgit repository name");
     }
     let url = wire_remote(ctx, &p, &ws, &name)?;
-    ctx.out.emit(
-        json!({ "name": name, "url": url, "vcs": ws.kind.as_str(), "root": ws.root }),
-        || ctx.out.line(format!("origin -> {url}")),
-    );
-    Ok(())
+    Ok(json!({ "name": name, "url": url, "vcs": ws.kind.as_str(), "root": ws.root }))
 }

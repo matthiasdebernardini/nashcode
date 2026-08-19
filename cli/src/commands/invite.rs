@@ -12,9 +12,9 @@ use crate::profile::Profile;
 use crate::remote;
 use crate::ssh::{Ssh, parse_kv};
 use anyhow::{Result, bail};
-use serde_json::json;
+use serde_json::{Value, json};
 
-pub fn run(ctx: &Ctx, args: &InviteArgs) -> Result<()> {
+pub fn run(ctx: &Ctx, args: &InviteArgs) -> Result<Value> {
     let (pname, p) = ctx.profile()?;
     if p.ssh.is_empty() {
         bail!(
@@ -47,7 +47,7 @@ fn listen(p: &Profile) -> String {
     format!("127.0.0.1:{}", p.listen_port())
 }
 
-fn invite(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
+fn invite(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<Value> {
     if !valid_invite_name(name) {
         bail!(
             "`{name}` is not a usable invite name. Letters, digits, dash, and \
@@ -70,35 +70,20 @@ fn invite(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
         "printf 'protocol=https\\nhost=%s\\nusername=%s\\npassword=%s\\n\\n' \
          '{host}' '{name}' '{token}' | git credential approve"
     );
-    ctx.out.emit(
-        json!({
-            "name": name,
-            "token": token,
-            "url": p.url,
-            "credential_line": credential_line,
-            "probe": probe,
-            "verified": kv.get("NASHCODE_INVITE").map(String::as_str) == Some("ok"),
-        }),
-        || {
-            ctx.out.line(format!("{name} can now push to {}", p.url));
-            ctx.out.line("send them this, once:");
-            ctx.out.line("");
-            ctx.out.line(format!("  server  {}", p.url));
-            ctx.out.line(format!("  token   {token}"));
-            ctx.out.line("  store it:");
-            ctx.out.line(format!("    {credential_line}"));
-            ctx.out.line("");
-            ctx.out.line(
-                "The token is push access, not network access. Add them to your \
+    Ok(json!({
+        "name": name,
+        "token": token,
+        "url": p.url,
+        "credential_line": credential_line,
+        "probe": probe,
+        "verified": kv.get("NASHCODE_INVITE").map(String::as_str) == Some("ok"),
+        "note": "The token is push access, not network access. Add them to your \
                  tailnet or share the node with them; nashcode does not manage \
                  Tailscale ACLs.",
-            );
-        },
-    );
-    Ok(())
+    }))
 }
 
-fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
+fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<Value> {
     // Same gate as invite: the name lands in a grep pattern on the host, so
     // `--revoke '.*'` must die here, not wipe the mapping there.
     if !valid_invite_name(name) {
@@ -134,22 +119,14 @@ fn revoke(ctx: &Ctx, p: &Profile, ssh: &Ssh, name: &str) -> Result<()> {
             ),
         }
     }
-    ctx.out.emit(
-        json!({
-            "revoked": name,
-            "probe": probe,
-            "verified": kv.get("NASHCODE_REVOKE").map(String::as_str) == Some("ok"),
-        }),
-        || {
-            ctx.out.line(format!(
-                "revoked {name}; their token now fails the auth probe (HTTP {probe})"
-            ));
-        },
-    );
-    Ok(())
+    Ok(json!({
+        "revoked": name,
+        "probe": probe,
+        "verified": kv.get("NASHCODE_REVOKE").map(String::as_str) == Some("ok"),
+    }))
 }
 
-fn list(ctx: &Ctx, ssh: &Ssh) -> Result<()> {
+fn list(_ctx: &Ctx, ssh: &Ssh) -> Result<Value> {
     let out = ssh.script(&remote::invites_list_script())?.require("list invites")?;
     // Names only — one NASHCODE_INVITE_NAME line each. parse_kv would collapse
     // the repeated key, so read them by hand.
@@ -159,16 +136,7 @@ fn list(ctx: &Ctx, ssh: &Ssh) -> Result<()> {
         .filter_map(|l| l.strip_prefix("NASHCODE_INVITE_NAME="))
         .map(str::to_string)
         .collect();
-    ctx.out.emit(json!({ "names": names }), || {
-        if names.is_empty() {
-            ctx.out.line("no invites");
-        } else {
-            for n in &names {
-                ctx.out.line(n);
-            }
-        }
-    });
-    Ok(())
+    Ok(json!({ "names": names }))
 }
 
 #[cfg(test)]
