@@ -90,6 +90,7 @@ graph LR
   viewer_ci --> viewer_hooks
   viewer_cli --> viewer_traces
   viewer_docs --> viewer_git
+  viewer_docs --> viewer_render
   viewer_mirror --> viewer_config
   viewer_mirror --> viewer_db
   viewer_mirror --> viewer_git
