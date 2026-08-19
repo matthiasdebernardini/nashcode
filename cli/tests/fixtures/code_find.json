@@ -1,0 +1,64 @@
+{
+  "repo": "demo",
+  "query": "backoff",
+  "indexed": true,
+  "commit": "59f7f0626796a45aea0de8fe97f94d5fb034d2de",
+  "indexed_at": "2026-08-16T12:00:00Z",
+  "age_seconds": 259200,
+  "rev": "59f7f0626796a45aea0de8fe97f94d5fb034d2de",
+  "hits": [
+    {
+      "layer": "definition",
+      "path": "src/net.rs",
+      "line": 4,
+      "text": "fn backoff(attempt: u32) {",
+      "name": "backoff",
+      "kind": "function",
+      "end_line": 6,
+      "references": 1,
+      "callers": 1
+    },
+    {
+      "layer": "reference",
+      "path": "src/net.rs",
+      "line": 10,
+      "text": "backoff",
+      "name": "backoff",
+      "kind": "call",
+      "caller": "retry"
+    },
+    {
+      "layer": "text",
+      "path": "src/net.rs",
+      "line": 4,
+      "text": "fn backoff(attempt: u32) {"
+    },
+    {
+      "layer": "text",
+      "path": "src/net.rs",
+      "line": 10,
+      "text": "        backoff(attempt);"
+    },
+    {
+      "layer": "semantic",
+      "path": "src/net.rs",
+      "line": 4,
+      "text": "fn backoff(attempt: u32) {",
+      "name": "backoff",
+      "end_line": 6,
+      "score": 0.7071067690849304
+    },
+    {
+      "layer": "semantic",
+      "path": "src/net.rs",
+      "line": 8,
+      "text": "pub fn retry(attempts: u32) {",
+      "name": "retry",
+      "end_line": 13,
+      "score": 0.5773502588272095
+    }
+  ],
+  "counts": { "definition": 1, "reference": 1, "text": 2, "semantic": 2 },
+  "truncated": false,
+  "semantic_available": true
+}

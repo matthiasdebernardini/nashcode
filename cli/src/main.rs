@@ -1,11 +1,15 @@
 use clap::Parser;
 use nashcode_cli::cli::{Cli, Command, PlanCommand};
-use nashcode_cli::commands::{Ctx, brain, code, doctor, invite, plan, profiles, repo, setup};
+use nashcode_cli::commands::{Ctx, brain, code, doctor, grep, invite, plan, profiles, repo, setup};
 use nashcode_cli::output::Out;
 
 fn main() {
     let cli = Cli::parse();
-    let out = Out::new(cli.json, cli.quiet);
+    // `grep` takes its whole argument list unparsed, so a `--json` typed after the
+    // subcommand — which is where an agent types it — lands in grep's list rather than
+    // in clap's. Grep's own parse is what decides the mode in that case.
+    let json = cli.json || matches!(&cli.command, Command::Grep(a) if grep::wants_json(a));
+    let out = Out::new(json, cli.quiet);
     let ctx = Ctx {
         out,
         profile_name: cli.profile.clone(),
@@ -31,6 +35,7 @@ fn main() {
         Command::Comments(a) => plan::comments(&ctx, a),
         Command::Index(a) => code::run(&ctx, a),
         Command::Brain(a) => brain::run(&ctx, a),
+        Command::Grep(a) => grep::run(&ctx, a),
     };
 
     if let Err(e) = result {

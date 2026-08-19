@@ -78,6 +78,21 @@ pub const MAX_WHERE_SYMBOLS: usize = 50;
 /// module in the repo.
 pub const MAX_WHERE_FILES: usize = 20;
 
+/// The most rows one `/code/find` answer carries, counted across all four layers.
+///
+/// The per-layer cap is the caller's `limit`, which tops out at [`MAX_LIMIT`]; four
+/// layers at that ceiling would be four hundred rows for one question. This is the
+/// running budget over the whole answer, spent in ranking order, so a query with a
+/// hundred definitions loses semantic hits rather than the definitions.
+pub const MAX_FIND_HITS: usize = 200;
+
+/// How few text hits count as "thin", and so buy an embeddings pass.
+///
+/// Three. A query with one or two text hits is usually a name that is spelled
+/// differently somewhere else in the repo, which is exactly what the semantic layer is
+/// for; past that the reader has enough exact evidence and the extra hits are noise.
+pub const THIN_TEXT: usize = 3;
+
 /// Why an index run could not start. A run that starts always finishes with a record,
 /// however much of it degraded.
 #[derive(Debug)]
@@ -510,31 +525,40 @@ pub async fn grep(
     query: &str,
     limit: usize,
 ) -> Result<TextResults, IndexError> {
+    grep_opts(mirror, rev, query, limit, false).await
+}
+
+/// `git grep`, with the one knob `/code/find` needs on top of [`grep`].
+///
+/// Split rather than folded into `grep` so the callers that want the plain search —
+/// `/code/text` and the brain's tools — keep the signature they have.
+pub async fn grep_opts(
+    mirror: &Repo,
+    rev: &str,
+    query: &str,
+    limit: usize,
+    ignore_case: bool,
+) -> Result<TextResults, IndexError> {
     if query.trim().is_empty() {
         return Ok(TextResults::default());
     }
     let wanted = limit.min(MAX_TEXT_MATCHES);
-    let (out, capped) = mirror
-        .run_capped(
-            &[
-                "grep",
-                // Line numbers, skip binaries, literal text, NUL-separated fields so a
-                // path containing a colon cannot be misread as a field boundary.
-                "-n",
-                "-I",
-                "--fixed-strings",
-                "--null",
-                "--no-color",
-                "--max-count",
-                &wanted.to_string(),
-                "-e",
-                query,
-                "--end-of-options",
-                rev,
-            ],
-            GREP_MAX_BYTES,
-        )
-        .await?;
+    let mut args: Vec<&str> = vec![
+        "grep",
+        // Line numbers, skip binaries, literal text, NUL-separated fields so a
+        // path containing a colon cannot be misread as a field boundary.
+        "-n",
+        "-I",
+        "--fixed-strings",
+        "--null",
+        "--no-color",
+    ];
+    if ignore_case {
+        args.push("-i");
+    }
+    let wanted_text = wanted.to_string();
+    args.extend(["--max-count", &wanted_text, "-e", query, "--end-of-options", rev]);
+    let (out, capped) = mirror.run_capped(&args, GREP_MAX_BYTES).await?;
     // Exit 1 is "no matches", which is an answer. Anything else with no output is
     // treated the same way: an empty list beats a 500.
     if out.stdout.is_empty() {
@@ -880,6 +904,560 @@ pub fn callers(db: &Db, repo: &str, symbol: &str) -> Vec<RefHit> {
         .into_iter()
         .filter(|hit| seen.insert((hit.caller.clone(), hit.path.clone())))
         .collect()
+}
+
+// ---- the fused query -------------------------------------------------------------
+
+/// One row of a `/code/find` answer, whichever layer produced it.
+///
+/// One shape for four layers on purpose: a caller that wants to print every hit as
+/// `path:line:text` — which is what `nashcode grep` does — must not have to branch on
+/// the layer to find the path. The layer-specific fields are absent rather than null,
+/// so a definition row is not a text row carrying five empty keys.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct FindHit {
+    /// `definition`, `reference`, `text`, or `semantic`.
+    pub layer: &'static str,
+    pub path: String,
+    pub line: i64,
+    /// The matched line, or the definition's own line. Always one line: this is the
+    /// content half of `path:line:content`.
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The last line of a definition or of a semantic chunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<i64>,
+    /// How many references the graph holds for this definition's name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub references: Option<usize>,
+    /// How many distinct functions call it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callers: Option<usize>,
+    /// The enclosing function of a reference, when the graph knows one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+    /// Cosine score, semantic layer only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+}
+
+/// How many rows each layer contributed.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, PartialEq, Eq)]
+pub struct FindCounts {
+    pub definition: usize,
+    pub reference: usize,
+    pub text: usize,
+    pub semantic: usize,
+}
+
+/// A whole `/code/find` answer.
+///
+/// The header is the point of the shape: `commit` and `age_seconds` say which tree
+/// every layer describes, because the index lags the working tree and a caller that
+/// cannot see the lag will trust a stale line number.
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq)]
+pub struct Find {
+    pub repo: String,
+    pub query: String,
+    pub indexed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_seconds: Option<i64>,
+    /// The revision the text layer was read at. The indexed commit, so that one
+    /// answer describes one tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    pub hits: Vec<FindHit>,
+    pub counts: FindCounts,
+    /// True when a layer had more to say than the caps allowed.
+    pub truncated: bool,
+    /// Whether the embeddings model is loaded at all. False is not an error: the
+    /// answer simply carries no semantic layer.
+    pub semantic_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_note: Option<String>,
+    /// Present only when there is nothing to show, saying which nothing it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// The extensions each `-t` name covers.
+///
+/// rg owns the real table and applies it to the working tree; this is the index's
+/// half of the same filter. An unknown name filters nothing rather than everything —
+/// a type this table has not heard of must not silently empty the answer.
+fn type_extensions(name: &str) -> &'static [&'static str] {
+    match name {
+        "rust" => &["rs"],
+        "py" | "python" => &["py", "pyi"],
+        "ts" | "typescript" => &["ts", "tsx", "mts", "cts"],
+        "js" | "javascript" => &["js", "jsx", "mjs", "cjs"],
+        "md" | "markdown" => &["md", "markdown"],
+        "toml" => &["toml"],
+        "json" => &["json"],
+        "yaml" | "yml" => &["yaml", "yml"],
+        "go" => &["go"],
+        "c" => &["c", "h"],
+        "cpp" | "c++" => &["cc", "cpp", "cxx", "hpp", "hh"],
+        "java" => &["java"],
+        "rb" | "ruby" => &["rb"],
+        "sh" | "bash" => &["sh", "bash"],
+        "html" => &["html", "htm"],
+        "css" => &["css"],
+        "sql" => &["sql"],
+        _ => &[],
+    }
+}
+
+/// Which paths one query covers: `-t` types, `-g` globs, and path arguments.
+///
+/// This runs *before* the row budget, which is the whole reason it lives on the
+/// server. Filtering a capped answer on the client throws away rows that were already
+/// counted against the cap, so a narrow search over a wide repo silently comes back
+/// short. Globs go through `globset`, ripgrep's own glob engine, so the two sides of a
+/// hybrid search cannot disagree about what `-g` means.
+#[derive(Debug, Default)]
+pub struct PathFilter {
+    extensions: Vec<String>,
+    allow: Option<globset::GlobSet>,
+    deny: Option<globset::GlobSet>,
+    prefixes: Vec<String>,
+}
+
+impl PathFilter {
+    pub fn new(types: &[String], globs: &[String], paths: &[String]) -> Self {
+        let mut extensions = Vec::new();
+        for name in types {
+            extensions.extend(type_extensions(name).iter().map(|e| (*e).to_owned()));
+        }
+        let mut allow = globset::GlobSetBuilder::new();
+        let mut deny = globset::GlobSetBuilder::new();
+        let (mut allows, mut denies) = (false, false);
+        for pattern in globs {
+            match pattern.strip_prefix('!') {
+                Some(negated) => {
+                    if let Ok(glob) = globset::Glob::new(negated) {
+                        deny.add(glob);
+                        denies = true;
+                    }
+                }
+                None => {
+                    if let Ok(glob) = globset::Glob::new(pattern) {
+                        allow.add(glob);
+                        allows = true;
+                    }
+                }
+            }
+        }
+        Self {
+            extensions,
+            allow: allows.then(|| allow.build().ok()).flatten(),
+            deny: denies.then(|| deny.build().ok()).flatten(),
+            prefixes: paths.to_vec(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.extensions.is_empty()
+            && self.allow.is_none()
+            && self.deny.is_none()
+            && self.prefixes.is_empty()
+    }
+
+    pub fn keeps(&self, path: &str) -> bool {
+        if !self.extensions.is_empty() {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            let extension = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+            if !self.extensions.iter().any(|want| want == extension) {
+                return false;
+            }
+        }
+        if self.allow.as_ref().is_some_and(|set| !set.is_match(path)) {
+            return false;
+        }
+        if self.deny.as_ref().is_some_and(|set| set.is_match(path)) {
+            return false;
+        }
+        if !self.prefixes.is_empty()
+            && !self
+                .prefixes
+                .iter()
+                .any(|prefix| path == prefix || path.starts_with(&format!("{prefix}/")))
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// What one `/code/find` call asked for beyond the query itself.
+#[derive(Debug, Default)]
+pub struct FindOptions {
+    pub limit: usize,
+    pub ignore_case: bool,
+    pub filter: PathFilter,
+}
+
+/// Definitions of a symbol, matched exactly or without regard to case.
+///
+/// The case-insensitive half is its own query rather than a filter over the exact
+/// one, because the point of `-i` is to find the name you did *not* spell right.
+/// `COLLATE NOCASE` gives up the `code_symbols_name` index and folds ASCII only;
+/// both are acceptable at the size these repos are, and neither is true of the
+/// default path.
+fn definitions_matching(db: &Db, repo: &str, symbol: &str, ignore_case: bool) -> Vec<SymbolHit> {
+    if !ignore_case {
+        return definitions(db, repo, symbol);
+    }
+    db.with(|conn| {
+        let mut statement = conn.prepare(
+            "SELECT f.path, s.name, s.kind, s.start_line, s.end_line, s.source
+             FROM code_symbols s JOIN code_files f ON f.repo = s.repo AND f.blob = s.blob
+             WHERE s.repo = ?1 AND s.name = ?2 COLLATE NOCASE
+             ORDER BY f.path, s.start_line",
+        )?;
+        let rows = statement
+            .query_map(rusqlite::params![repo, symbol], |row| {
+                Ok(SymbolHit {
+                    path: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    start_line: row.get(3)?,
+                    end_line: row.get(4)?,
+                    source: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .unwrap_or_default()
+}
+
+/// Every reference to a symbol, exactly or without regard to case.
+fn references_matching(
+    db: &Db,
+    repo: &str,
+    symbol: &str,
+    calls_only: bool,
+    ignore_case: bool,
+) -> Vec<RefHit> {
+    if !ignore_case {
+        return db.code_references(repo, symbol, calls_only).unwrap_or_default();
+    }
+    db.with(|conn| {
+        let mut statement = conn.prepare(
+            "SELECT f.path, r.name, r.caller, r.line, r.kind, r.source
+             FROM code_refs r JOIN code_files f ON f.repo = r.repo AND f.blob = r.blob
+             WHERE r.repo = ?1 AND r.name = ?2 COLLATE NOCASE AND (?3 = 0 OR r.kind = 'call')
+             ORDER BY f.path, r.line",
+        )?;
+        let rows = statement
+            .query_map(rusqlite::params![repo, symbol, i64::from(calls_only)], |row| {
+                Ok(RefHit {
+                    path: row.get(0)?,
+                    name: row.get(1)?,
+                    caller: row.get(2)?,
+                    line: row.get(3)?,
+                    kind: row.get(4)?,
+                    source: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .unwrap_or_default()
+}
+
+/// The distinct callers of a symbol, exactly or without regard to case.
+fn callers_matching(db: &Db, repo: &str, symbol: &str, ignore_case: bool) -> Vec<RefHit> {
+    let mut seen: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    references_matching(db, repo, symbol, true, ignore_case)
+        .into_iter()
+        .filter(|hit| seen.insert((hit.caller.clone(), hit.path.clone())))
+        .collect()
+}
+
+/// Is this query a bare identifier, and so worth asking the graph about?
+///
+/// The graph stores symbol names, not patterns. A query with a space, a dot, or a
+/// regex character in it can never match one, so the two indexed lookups are skipped
+/// rather than run and thrown away.
+fn is_identifier(query: &str) -> bool {
+    let mut chars = query.chars();
+    matches!(chars.next(), Some(first) if first.is_alphabetic() || first == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// The real source line behind each definition, in one `git grep`.
+///
+/// The symbol table stores a name, a kind, and a line — never the text of the line,
+/// because the text lives in git and copying it would be a second copy that can
+/// disagree with the first. One grep for the name across only the files that define
+/// it is enough to fill every definition's snippet, and it is one subprocess however
+/// many definitions there are.
+async fn definition_lines(
+    mirror: &Repo,
+    rev: &str,
+    symbol: &str,
+    paths: &[String],
+    ignore_case: bool,
+) -> std::collections::BTreeMap<(String, i64), String> {
+    use std::collections::BTreeMap;
+
+    let mut found = BTreeMap::new();
+    if paths.is_empty() {
+        return found;
+    }
+    let mut args: Vec<String> = ["grep", "-n", "-I", "--fixed-strings", "--null", "--no-color"]
+        .iter()
+        .map(|a| (*a).to_owned())
+        .collect();
+    if ignore_case {
+        args.push("-i".to_owned());
+    }
+    args.push("-e".to_owned());
+    args.push(symbol.to_owned());
+    args.push("--end-of-options".to_owned());
+    args.push(rev.to_owned());
+    args.push("--".to_owned());
+    args.extend(paths.iter().cloned());
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let Ok((out, _)) = mirror.run_capped(&borrowed, GREP_MAX_BYTES).await else {
+        return found;
+    };
+    for line in out.stdout.lines() {
+        let Some((_rev, rest)) = line.split_once(':') else { continue };
+        let mut fields = rest.splitn(3, '\0');
+        let (Some(path), Some(number), Some(text)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let Ok(number) = number.trim().parse::<i64>() else { continue };
+        found.insert((path.to_owned(), number), clip(text, GREP_MAX_LINE));
+    }
+    found
+}
+
+/// Spend part of a running budget, and say how much was spent.
+fn allot(budget: &mut usize, wanted: usize) -> usize {
+    let spent = (*budget).min(wanted);
+    *budget -= spent;
+    spent
+}
+
+/// `/code/find`: one question, four layers, one fixed ranking.
+///
+/// The routing is the whole point. An agent that has a name asks about a name; an
+/// agent that has a phrase asks about a phrase; neither should have to know which of
+/// four endpoints answers it. So: an exact symbol match puts the definitions first
+/// with their reference and caller counts, its references come next, the text pass
+/// over the same commit follows, and a thin text pass — fewer than [`THIN_TEXT`] hits
+/// — buys an embeddings pass labelled `semantic`.
+///
+/// A repo with no index answers empty with the hint that says how to get one. That is
+/// deliberate even though `git grep` would work without an index: `/code/find` is the
+/// index's front door, the honest answer to "search the index" on an unindexed repo is
+/// that there is no index, and `/code/text` is right there for the other question.
+pub async fn find(
+    db: &Db,
+    repo: &str,
+    mirror: &Repo,
+    embedder: Option<Arc<dyn Embedder>>,
+    query: &str,
+    options: &FindOptions,
+) -> Find {
+    let limit = options.limit.clamp(1, MAX_LIMIT);
+    let mut answer = Find {
+        repo: repo.to_owned(),
+        query: query.to_owned(),
+        semantic_available: embedder.is_some(),
+        ..Default::default()
+    };
+
+    let Some(last) = db.code_last_run(repo).ok().flatten() else {
+        answer.hint = Some(format!(
+            "this repo has never been indexed, so there is nothing to search; run \
+             POST /{repo}/code/index (or `nashcode index {repo}`) and ask again"
+        ));
+        return answer;
+    };
+    answer.indexed = true;
+    answer.age_seconds = age_seconds(&last.created_at);
+    answer.indexed_at = Some(last.created_at.clone());
+    let commit = last.run.commit.clone();
+    answer.commit = Some(commit.clone());
+    answer.rev = Some(commit.clone());
+
+    // One running budget over the whole answer, spent in ranking order.
+    let mut budget = MAX_FIND_HITS;
+
+    // ---- definitions and references, for a query that could name a symbol.
+    if is_identifier(query) {
+        // The filter runs before the budget, which is the point of doing it here:
+        // filtering a capped answer on the client throws away rows that were already
+        // counted against the cap.
+        let keep = |path: &String| options.filter.keeps(path);
+        let definitions: Vec<SymbolHit> =
+            definitions_matching(db, repo, query, options.ignore_case)
+                .into_iter()
+                .filter(|hit| keep(&hit.path))
+                .collect();
+        let references: Vec<RefHit> =
+            references_matching(db, repo, query, false, options.ignore_case)
+                .into_iter()
+                .filter(|hit| keep(&hit.path))
+                .collect();
+        let reference_count = references.len();
+        let caller_count = callers_matching(db, repo, query, options.ignore_case)
+            .into_iter()
+            .filter(|hit| keep(&hit.path))
+            .count();
+
+        let shown = allot(&mut budget, limit.min(definitions.len()));
+        answer.truncated |= shown < definitions.len();
+        let paths: Vec<String> =
+            definitions.iter().take(shown).map(|hit| hit.path.clone()).collect();
+        let lines =
+            definition_lines(mirror, &commit, query, &paths, options.ignore_case).await;
+        for hit in definitions.into_iter().take(shown) {
+            let key = (hit.path.clone(), hit.start_line);
+            answer.hits.push(FindHit {
+                layer: "definition",
+                // A mirror that cannot be read still leaves the name: an empty
+                // content field would break `path:line:content` for every reader.
+                text: lines.get(&key).cloned().unwrap_or_else(|| hit.name.clone()),
+                path: hit.path,
+                line: hit.start_line,
+                name: Some(hit.name),
+                kind: Some(hit.kind),
+                end_line: Some(hit.end_line),
+                references: Some(reference_count),
+                callers: Some(caller_count),
+                caller: None,
+                score: None,
+            });
+        }
+        answer.counts.definition = shown;
+
+        let shown = allot(&mut budget, limit.min(references.len()));
+        answer.truncated |= shown < references.len();
+        for hit in references.into_iter().take(shown) {
+            answer.hits.push(FindHit {
+                layer: "reference",
+                text: hit.name.clone(),
+                path: hit.path,
+                line: hit.line,
+                name: Some(hit.name),
+                kind: Some(hit.kind),
+                end_line: None,
+                references: None,
+                callers: None,
+                caller: hit.caller,
+                score: None,
+            });
+        }
+        answer.counts.reference = shown;
+    }
+
+    // ---- text, at the indexed commit so one answer describes one tree.
+    //
+    // Two reasons the ask is not simply `limit`. A path filter throws rows away after
+    // git has counted them, so a filtered search has to read deeper to fill the same
+    // page. And the thin-text test below must not depend on how many rows the caller
+    // asked to *see*: `?limit=1` would otherwise make every search look thin and buy
+    // an embeddings pass it did not need.
+    let wanted = if options.filter.is_empty() {
+        limit.max(THIN_TEXT)
+    } else {
+        MAX_TEXT_MATCHES
+    };
+    let found = grep_opts(mirror, &commit, query, wanted, options.ignore_case)
+        .await
+        .unwrap_or_default();
+    answer.truncated |= found.truncated;
+    let text: Vec<TextHit> =
+        found.hits.into_iter().filter(|hit| options.filter.keeps(&hit.path)).collect();
+    let text_found = text.len();
+    let shown = allot(&mut budget, text_found.min(limit));
+    answer.truncated |= shown < text_found;
+    for hit in text.into_iter().take(shown) {
+        answer.hits.push(FindHit {
+            layer: "text",
+            path: hit.path,
+            line: hit.line,
+            text: hit.text,
+            name: None,
+            kind: None,
+            end_line: None,
+            references: None,
+            callers: None,
+            caller: None,
+            score: None,
+        });
+    }
+    answer.counts.text = shown;
+
+    // ---- semantic, only when the exact passes came back thin.
+    // The gate reads what the text pass *found*, not what the budget let through: a
+    // spent budget would otherwise run the encoder and a full cosine scan for rows
+    // that are then thrown away.
+    match embedder {
+        None => {}
+        Some(_) if text_found >= THIN_TEXT || budget == 0 => {}
+        Some(embedder) => {
+            let one = vec![query.to_owned()];
+            let vector = tokio::task::spawn_blocking(move || embedder.embed(&one)).await;
+            if let Ok(Ok(mut vectors)) = vector
+                && !vectors.is_empty()
+            {
+                // A filter drops rows after the ranking, so a filtered search asks
+                // the ranking for more of them.
+                let deep = if options.filter.is_empty() { limit } else { MAX_LIMIT };
+                let scored = similar(db, repo, vectors.remove(0), deep).await;
+                let hits: Vec<SimilarHit> = scored
+                    .hits
+                    .into_iter()
+                    .filter(|hit| options.filter.keeps(&hit.path))
+                    .collect();
+                let shown = allot(&mut budget, hits.len());
+                answer.truncated |= shown < hits.len();
+                for hit in hits.into_iter().take(shown) {
+                    answer.hits.push(FindHit {
+                        layer: "semantic",
+                        // A chunk is many lines; the first is what a `path:line:`
+                        // reader can act on, and the range is on `end_line`.
+                        text: clip(hit.snippet.lines().next().unwrap_or_default(), GREP_MAX_LINE),
+                        path: hit.path,
+                        line: hit.start_line,
+                        name: hit.symbol,
+                        kind: None,
+                        end_line: Some(hit.end_line),
+                        references: None,
+                        callers: None,
+                        caller: None,
+                        score: Some(hit.score),
+                    });
+                }
+                answer.counts.semantic = shown;
+            }
+        }
+    }
+
+    if answer.hits.is_empty() {
+        answer.hint = Some(format!(
+            "indexed at {commit}, but nothing matches; the graph covers Rust, Python, \
+             and TypeScript — a pattern rather than a name is worth trying against \
+             GET /{repo}/code/text?q="
+        ));
+    }
+    answer
 }
 
 #[cfg(test)]

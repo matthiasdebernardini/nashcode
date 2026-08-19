@@ -3,6 +3,7 @@
 pub mod brain;
 pub mod code;
 pub mod doctor;
+pub mod grep;
 pub mod invite;
 pub mod plan;
 pub mod profiles;

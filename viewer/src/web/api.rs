@@ -440,6 +440,26 @@ struct CodeQuery {
     rev: Option<String>,
     /// Comma-separated diagram labels, for `/code/where`.
     names: Option<String>,
+    /// `insensitive` folds case on every layer of `/code/find`. Anything else, or
+    /// nothing at all, is an exact match.
+    case: Option<String>,
+    /// `/code/find` path filters, one entry per line (`%0A`). Newline rather than
+    /// comma because a glob may contain a comma — `{a,b}` is one pattern — and
+    /// `serde_urlencoded` cannot decode a repeated key into a list.
+    types: Option<String>,
+    globs: Option<String>,
+    paths: Option<String>,
+}
+
+/// One filter list: newline-separated, empty entries dropped.
+fn lines_of(raw: Option<&String>) -> Vec<String> {
+    raw.map(String::as_str)
+        .unwrap_or_default()
+        .split('\n')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 impl CodeQuery {
@@ -541,6 +561,62 @@ async fn code_similar(cx: &Cx) -> Result<Response> {
         "scanned": found.scanned,
         "hits": found.hits,
     }))
+}
+
+/// `GET /{repo}/code/find?q=&limit=&case=&types=&globs=&paths=` — the fused query,
+/// one call instead of four.
+///
+/// The caller sends what it has and the server routes. An exact symbol match answers
+/// definitions first, with the reference and caller counts attached, then that symbol's
+/// references; the text pass over the same commit comes next; and a thin text pass buys
+/// an embeddings pass labelled `semantic`. Every row says which layer produced it and
+/// the answer says which commit it describes, because the index lags the working tree.
+///
+/// The path filters are the server's job, not the caller's, because they have to run
+/// before the row budget: a client that filters a capped answer silently loses the
+/// rows the cap already spent on files it did not want.
+///
+/// Never an error. No mirror, no model, no index, nothing matching — all of them are
+/// an empty list with a header saying which nothing it is. This is the endpoint
+/// `nashcode grep` runs on, and an agent's search must never fail the session.
+#[route(GET "/{repo}/code/find")]
+async fn code_find(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    if !app(cx).config.knows_repo(&name) {
+        return Err(topcoat::router::error::not_found().into());
+    }
+    let query = query_params::<CodeQuery>(cx)?;
+    let text = query.required("q", query.q.as_ref())?;
+    let options = crate::code::FindOptions {
+        limit: query.limit(),
+        ignore_case: query.case.as_deref().map(str::trim) == Some("insensitive"),
+        filter: crate::code::PathFilter::new(
+            &lines_of(query.types.as_ref()),
+            &lines_of(query.globs.as_ref()),
+            &lines_of(query.paths.as_ref()),
+        ),
+    };
+
+    // No mirror refresh here, unlike `/code/text`. Every layer of this answer is read
+    // at the *indexed* commit, which is on disk by definition, and a search an agent
+    // runs on reflex must not wait on a network fetch it did not ask for.
+    let mirror = app(cx).mirrors.repo(&name);
+    let mut found = crate::code::find(
+        &app(cx).db,
+        &name,
+        &mirror,
+        app(cx).embeddings.ready(),
+        &text,
+        &options,
+    )
+    .await;
+    if !found.semantic_available {
+        let why = app(cx).embeddings.why_not();
+        if !why.is_empty() {
+            found.semantic_note = Some(why);
+        }
+    }
+    json_ok(serde_json::to_value(found)?)
 }
 
 /// `GET /{repo}/code/def?symbol=` — where a name is defined.

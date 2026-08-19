@@ -504,18 +504,17 @@ fn report(ctx: &Ctx, reason: &str) -> Result<()> {
 ///
 /// A missing profile and a missing viewer URL are configuration, not faults, and
 /// they take the same soft path as a dead viewer: this command has no exit code
-/// its caller can act on.
-fn viewer_url(ctx: &Ctx) -> std::result::Result<(String, String), String> {
+/// its caller can act on. `grep` shares both the resolution and that judgement.
+pub fn viewer_url(ctx: &Ctx) -> std::result::Result<(String, String), String> {
     let (name, profile) = ctx.profile().map_err(|e| format!("{e:#}"))?;
     let viewer = profile
         .viewer_url
         .as_deref()
         .filter(|v| !v.is_empty())
         .ok_or_else(|| {
-            format!(
-                "profile `{name}` has no viewer URL, and the brain lives in the viewer; \
-                 add one with `nashcode setup --viewer`"
-            )
+            // Shared with `grep`, so it names neither command's subject: both the
+            // brain and the code index live in the viewer.
+            format!("profile `{name}` has no viewer URL; add one with `nashcode setup --viewer`")
         })?;
     Ok((viewer.trim_end_matches('/').to_string(), profile.token.clone()))
 }

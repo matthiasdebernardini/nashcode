@@ -298,6 +298,35 @@ It always exits 0. This is meant for a session-start hook, so a viewer that is
 down, unreachable, or not yet configured prints one line saying so and gets out
 of the way.")]
     Brain(BrainArgs),
+
+    /// Search the code: rg's flags, grep's output, the index's answers.
+    #[command(long_about = "\
+Search the code. The surface is ripgrep's, the answers come from the index.
+
+  nashcode grep retry
+  nashcode grep -i -C2 -t rust 'fn connect' src/
+
+Flags mirror rg where they matter: -i, -n (always on), -l, -C/-A/-B, -t <type>,
+-g <glob>, plus --json and --repo. Any other flag you type out of rg habit is
+ignored rather than refused, so a command that works in rg works here.
+
+Output is grep's: one hit per line as path:line:content, context lines as
+path-line-content. Everything the index adds rides in `#` comment lines. A
+header names the indexed commit and its age. A `# definitions:` block comes
+first — each definition with its kind and its reference and caller counts —
+then the text hits, then, only when the text pass found nothing, a
+`# semantic (no exact match):` block from the embeddings.
+
+Freshness is hybrid. Text hits come from a real rg run over your working tree
+whenever you are inside a checkout with rg on PATH, because the tree you are
+editing is always fresher than the index; definitions, counts and semantic hits
+come from GET /<repo>/code/find. Outside a checkout, or with no rg, the text
+pass falls back to the index.
+
+Exit codes are grep's: 0 when something matched, 1 when nothing did. A viewer
+that cannot be reached degrades to plain local rg with one `#` line saying so.
+Only having neither a checkout nor an index is an error, and that exits 2.")]
+    Grep(GrepArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -629,6 +658,22 @@ pub struct BrainArgs {
     /// Repository on the viewer. Defaults to the name `origin` points at, and
     /// outside a repository to every repository the viewer knows.
     pub repo: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GrepArgs {
+    /// PATTERN, then optional paths, then any rg flag you care to type.
+    ///
+    /// Nothing here is parsed by clap: an unknown flag must never be an error,
+    /// and clap has no setting for "accept anything". The command reads this
+    /// list itself (`commands::grep::parse`).
+    #[arg(
+        value_name = "PATTERN [PATH...]",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        num_args = 0..
+    )]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Args)]
