@@ -38,11 +38,7 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<Value> {
 
     // ---- 1. host ---------------------------------------------------------
     out.step("[1/7] host");
-    let host = ask(
-        "--host",
-        args.host.clone(),
-        None,
-    )?;
+    let host = ask("--host", args.host.clone(), None)?;
     let ssh = Ssh::new(&host).dry_run(args.dry_run);
     let facts = preflight(out, &mut scripts, &ssh, args.dry_run)?;
 
@@ -66,11 +62,7 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<Value> {
             ),
         ));
     };
-    let bucket_input = ask(
-        "--bucket",
-        args.bucket.clone(),
-        None,
-    )?;
+    let bucket_input = ask("--bucket", args.bucket.clone(), None)?;
     let bucket = normalise_bucket(&bucket_input);
     let region = ask(
         "--region",
@@ -123,16 +115,8 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<Value> {
         Some(t) => t.clone(),
         None => generate_token(),
     };
-    let site_name = ask(
-        "--site-name",
-        args.site_name.clone(),
-        Some(short_host(&host)),
-    )?;
-    let site_owner = ask(
-        "--site-owner",
-        args.site_owner.clone(),
-        Some(facts.user.clone()),
-    )?;
+    let site_name = ask("--site-name", args.site_name.clone(), Some(short_host(&host)))?;
+    let site_owner = ask("--site-owner", args.site_owner.clone(), Some(facts.user.clone()))?;
     let site_desc = args
         .site_desc
         .clone()
