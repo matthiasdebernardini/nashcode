@@ -11,12 +11,13 @@ S3-compatible bucket. The CLI does everything else.
 ## Commands
 
 ### `nashcode setup`
-Interactive wizard (also fully scriptable via flags for every prompt):
+A wizard with no questions in it: every answer is a flag, and a missing one is a
+usage error naming the flag.
 
-1. **Host** — prompt for an SSH destination (`user@host`); verify reachability, sudo,
+1. **Host** — `--host` names an SSH destination (`user@host`); verify reachability, sudo,
    arch. Everything server-side happens over SSH; the CLI never needs to run on the host.
-2. **Bucket** — prompt for provider (AWS S3 / Cloudflare R2 / Tigris) + bucket + region +
-   endpoint + credentials (or "already in env on the host"). WARN, citing
+2. **Bucket** — `--provider` (AWS S3 / Cloudflare R2 / Tigris) + bucket + region +
+   endpoint + credentials (or `--creds-on-host`). WARN, citing
    https://celld.dev/docs/fencing, that MinIO community, Backblaze B2, Hetzner, and DO
    Spaces do not implement the conditional writes celld requires and are not offered.
 3. **Install** — over SSH: tailscale (installer script + `systemctl enable --now
@@ -24,12 +25,12 @@ Interactive wizard (also fully scriptable via flags for every prompt):
    what's present.
 4. **Deploy dgit** — clone https://github.com/littledivy/dgit on the host, `npm install`,
    generate a random `GIT_TOKEN` (openssl rand -hex 24), patch `wrangler.celld.jsonc`
-   (token, site name/owner from prompts), `celld deploy`, write `/etc/systemd/system/
+   (token, site name/owner from the flags), `celld deploy`, write `/etc/systemd/system/
    celld.service` (loopback listen 127.0.0.1:8080, EnvironmentFile with AWS creds +
    region, Restart=always), start it, smoke-test `curl 127.0.0.1:8080` == 200.
-5. **Tailnet** — `tailscale up`; relay the auth URL to the user and wait for the node to
+5. **Tailnet** — `tailscale up`; relay the auth URL on stderr and wait for the node to
    come up. Then `tailscale serve --bg --https=443 http://127.0.0.1:8080` (and, if the
-   viewer is installed, `--https=8443` → 8090). Print the final HTTPS URLs.
+   viewer is installed, `--https=8443` → 8090). The final HTTPS URLs go in the result.
 6. **Verify** — end-to-end: temp repo, push with token, clone anonymously, delete.
 7. **Profile** — write everything non-secret to the local profile store (below); the
    GIT_TOKEN goes into the profile file chmod 600.
@@ -37,7 +38,7 @@ Interactive wizard (also fully scriptable via flags for every prompt):
 ### `nashcode use <profile>` / `nashcode profiles`
 Profile store at `~/.config/nashcode/config.toml`: named servers (`url`, `ssh`, `token`),
 one marked active. `use` selects the active one; all other commands honor
-`--profile <name>` to override. This is the "select it" surface — multiple deployments
+`--profile <name>` to override (`doctor` excepted — see "Agent envelope"). This is the "select it" surface — multiple deployments
 (personal, team, client) coexist.
 
 ### Repo commands (against the active profile, dgit's HTTP API)
@@ -54,7 +55,8 @@ one marked active. `use` selects the active one; all other commands honor
   helper, not in the remote URL — use `git credential approve`.
 - `nashcode ls` — scrape the index page (dgit has no JSON list endpoint; parse the HTML
   anchor list, tolerate markup drift with a loose regex).
-- `nashcode clone <name> [dir]`, `nashcode rm <name>` (DELETE, with a y/N confirm),
+- `nashcode clone <name> [dir]`, `nashcode rm <name>` (DELETE, and `--yes` is required:
+  nothing prompts),
   `nashcode gc <name>` (POST /gc), `nashcode desc <name> ...` (PUT /config).
 - `nashcode remote [name]` — wire `origin` in the cwd repo (default name = dir name).
 - `nashcode token` — print the push token for the active profile (for CI use).
@@ -79,7 +81,7 @@ vars, `celld deploy`, restart the service.
 - Secrets discipline unchanged: token to the host via stdin, never argv; only
   `invite <name>` prints a token, once.
 - Tests through the fake-ssh shim: invite writes the mapping + regenerates the
-  var, revoke removes it, list never prints token material, and a `--json`
+  var, revoke removes it, list never prints token material, and an envelope
   shape test for each. No network, no real host.
 
 ### jj (Jujutsu) awareness
@@ -97,7 +99,7 @@ vars, `celld deploy`, restart the service.
   `NASHCODE_JJ_AVAILABLE`) so no test needs jj installed.
 
 ### `nashcode doctor`
-Checks, each one line, ✓/✗: profile exists, server reachable, TLS cert valid, token
+Checks, one entry each, pass/fail/skip: profile exists, server reachable, TLS cert valid, token
 accepted (auth probe), tailscale identity headers present, celld service active (via
 SSH if configured), bucket reachable from host, viewer up (if configured).
 
@@ -107,11 +109,10 @@ session. Repo defaults to the name `origin` points at, the way `comments` resolv
 The point is the transform: the raw stanza buries the useful facts under an activity
 log, so the command reshapes it — branches with tip and CI state, the code-index
 stanza (files, symbols, age), plan files, open-comment counts, latest architecture
-submission, and the last five activity entries as one line each. `--json` emits that
-digest as JSON (not the raw stanza); without it, the same facts as compact text. A
-viewer that is down prints one line saying so and exits 0 — this runs from
-session-start hooks, and a dead viewer must not break a session. Raw dump stays
-`curl /brain`; this command is the usable view.
+submission, and the last five activity entries. The result is that digest, never the
+raw stanza. A viewer that is down answers `status: unavailable` with the reason and
+exits 0 — this runs from session-start hooks, and a dead viewer must not break a
+session. Raw dump stays `curl /brain`; this command is the usable view.
 
 ### `nashcode grep [flags] PATTERN [path...]`
 Grep for agents: the surface is ripgrep's, the answers come from the code index. An
@@ -204,21 +205,21 @@ contract per command.
   printed unless explicitly requested (`nashcode token`).
 - Output is the agcli envelope (one JSON value on stdout); progress and
   warnings go to stderr, `--quiet` strips the chatter.
-- `--help` for every command is written for someone who has never seen celld: one
-  paragraph of what/why at the top level explaining the architecture (dgit worker on
-  celld, bucket is the store, tailnet is the perimeter).
+- Every command's description is written for a reader who has never seen celld, and the
+  root tree opens with one paragraph of what/why explaining the architecture (dgit worker
+  on celld, bucket is the store, tailnet is the perimeter).
 - Tests (`cargo nextest run`): profile store round-trip, index-page parse against a
   saved dgit HTML fixture, remote-script idempotency (run the generated install script
   twice against a fake `ssh` shim recording invocations), doctor output shape, jj
   detection via directory-layout fixtures, `comments` against a canned JSON fixture on
   a loopback listener, and `annotate` against a fake plannotator on PATH plus a loopback
   listener: the argv it hands the child, the request line and wire payload it posts, that
-  `--json` launches nothing, and both exit codes (0 when there is nowhere to post, nonzero
-  when a post is refused), and `brain` against a stanza captured from the viewer's own
-  `GET /brain`: that `--json` emits the digest rather than the stanza, that only the last
-  five activity rows survive, and that every failure path — refused, hung, non-200, not
-  JSON, no viewer configured — is one line and exit 0. No test may require network or a
-  real host.
+  `--no-launch` launches nothing, and both exit codes (0 when there is nowhere to post,
+  nonzero when a post is refused), and `brain` against a stanza captured from the viewer's
+  own `GET /brain`: that the result is the digest rather than the stanza, that only the
+  last five activity rows survive, and that every failure path — refused, hung, non-200,
+  not JSON, no viewer configured — is one `status` field and exit 0. No test may require
+  network or a real host.
 
 ## Plans + plannotator
 
@@ -245,7 +246,8 @@ renders them). CLI support:
   The request is `POST /:repo/comments` with `{"branch", "file", "body"}`: whole-file,
   since the record carries no per-annotation anchors, and unauthored, since the viewer
   falls back to the caller's Tailscale identity. Any 2xx is success, and the stored `id`
-  is printed when the answer carries one. `--json` still launches nothing.
+  comes back when the answer carries one. Launching is the default — the agent opens
+  plannotator for the human — and `--no-launch` is the inspect-only form.
 
   A comment is anchored to a branch, so the CLI needs a branch name it believes in. In a
   jj repository that name is the nearest bookmark, asked of jj — git's HEAD is detached
@@ -253,14 +255,17 @@ renders them). CLI support:
   heard of. The viewer rejects a branch its mirror does not know, so annotating a plan on
   a branch nobody pushed yet answers HTTP 400.
 
-  Feedback is never lost. When the POST fails, when the profile names no viewer, when the
-  repository or the branch cannot be named, or when the plan sits outside the repository,
-  the feedback goes to stdout with the reason it was not posted. Failure to post exits
-  nonzero. Having nowhere to post exits 0, because that is a configuration, not a fault.
+  Feedback is never lost. When the profile names no viewer, when the repository or the
+  branch cannot be named, or when the plan sits outside the repository, the feedback
+  comes back in the result with the reason it was not posted, and the command exits 0,
+  because that is a configuration, not a fault. When the POST itself fails the command
+  exits nonzero and the feedback rides in the error message: an envelope has no other
+  place to carry it.
 - `nashcode comments <file> [--branch ...] [--since RFC3339] [--repo ...]` — GET
   the viewer's `/:repo/comments` JSON endpoint (`viewer_url` from the active
   profile; a clear error when it is unset). `--repo` defaults to the name
-  `origin` points at. `--json` passes the viewer's answer through untouched.
+  `origin` points at. The rows are the viewer's own objects, passed through key for
+  key, inside a bounded list.
   Tested against a canned JSON fixture served by a local test listener.
 - Nothing else: annotation feedback still lives in the viewer's comment API. `annotate` is
   only the courier that carries a local review there.
