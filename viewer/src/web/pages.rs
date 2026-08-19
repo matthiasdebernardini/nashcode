@@ -411,7 +411,7 @@ fn shiki_lang(name: &str) -> Option<&'static str> {
         "makefile" | "gnumakefile" => Some("make"),
         "justfile" | ".justfile" => Some("just"),
         "cmakelists.txt" => Some("cmake"),
-        ".gitignore" | ".dockerignore" | ".npmignore" => Some("ignore"),
+        // shiki ships no grammar for ignore files; they stay a plain <pre>.
         ".env" | ".editorconfig" => Some("ini"),
         _ => None,
     };

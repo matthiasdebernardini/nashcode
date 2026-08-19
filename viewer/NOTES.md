@@ -178,3 +178,63 @@ blocker.
   by a wide margin. Upgrade order when quality pinches: add fastembed's `TextRerank`
   over the top ~50 hits first; only then swap the encoder via
   `UserDefinedEmbeddingModel` (nomic-embed-code or CodeSage, local ONNX).
+
+## Code browser parity and the wiki (2026-08-19)
+
+Two SPEC sections landed together: "Code browser parity" and "Docs (wiki)". Where the
+implementation had to choose:
+
+- **The gutter is server-rendered; shiki only swaps line contents.** The blob page ships
+  one block per line — an `<a class="nashcode-lineno">` and a `<span
+  class="nashcode-line-code">` inside a `<span class="nashcode-line" id="L{n}">`. `app.js`
+  writes into the code span and never touches the gutter, so numbering and `#L10` work
+  with JS off, with an unknown extension, and after a failed highlight. The three failure
+  paths all land on the same working page.
+- **The line number is a `::before`, not text.** `content: attr(data-line)` keeps the
+  numbers out of a copied selection while still rendering them without JS. It also gives
+  every blank line a non-empty line box, so an empty line keeps full height without a
+  `min-height` guess.
+- **A dual-theme highlight with `defaultColor: false`.** shiki writes `--shiki-light` and
+  `--shiki-dark` on the `<pre>` and on every token; `app.css` picks one by Primer's color
+  mode (`[data-color-mode="dark"]`, and `auto` under `prefers-color-scheme`). No second
+  render, no flash, and the gutter keeps Primer's color through both.
+- **`shiki` is now a direct dependency.** `js/app.js` imports it by name, so the phantom
+  hoisted copy it was resolving through @pierre/diffs is declared. The range matches
+  @pierre/diffs' own (`^3 || ^4`), so npm still resolves one copy and esbuild still emits
+  one chunk graph. The import is dynamic, which is what keeps the four hundred grammar
+  chunks out of the entry: the entry is 248 KB and one grammar arrives per file read.
+- **The 5000-line cutoff drops the language tag, never the numbering.** Above it the page
+  is still fully linkable; it is only unpainted.
+- **shiki has no `ignore` grammar,** so `.gitignore` and friends stay a plain `<pre>`
+  rather than naming a grammar the bundle cannot load.
+- **`/{repo}/edit` is one endpoint for both new files and edits.** The path travels in the
+  form body, not the URL, so "New file" and the pencil post to the same place; only the GET
+  differs (`/edit` empty, `/edit/{*path}` prefilled). That reserves one word instead of two
+  and keeps the POST out of the branch catch-all, which a literal route already outranks.
+- **A rejected commit re-renders the form, not an error page.** The person's text and
+  message come back with the reason above them, because the alternative is losing an edit
+  to a push race. Only the *push* decides success: `ops::commit_file` is the board's own
+  write path, so the mirror and dgit cannot diverge here either.
+- **`safe_repo_path` refuses rather than repairs.** No empty, `.`, `..`, or `.git`
+  segments, no backslashes, no control characters. A path that had to be repaired is a
+  path the person did not mean.
+- **A textarea posts CRLF whatever the file held.** The write path normalizes to `\n` and
+  restores the trailing newline, so a round-trip through the browser does not rewrite every
+  line ending in the repo.
+- **The wiki reads `DocIndex.all_paths`, which the plans index already builds.** No second
+  scan and no new cache: the markdown list is that set filtered by extension, so the wiki
+  is exactly as fresh as the tip.
+- **Relative-link rewriting extends `render::markdown` rather than forking it.**
+  `markdown_in_docs` is the same function with the document's directory supplied; every
+  other caller keeps the old signature and the old behaviour. Only wiki pages rewrite
+  relative links, because only they have a directory to resolve against.
+- **The sidebar is a recursive `String`, not a component.** A `#[component]` cannot call
+  itself without boxing its own future, and the markup is a nested list. Everything in it
+  goes through `render::escape_text`/`escape_attr` — the labels are filenames, and git will
+  carry any byte a filename can.
+- **`docs` and `edit` join the reserved first segments** (`stacks`, `plans`, `tasks`,
+  `board`, `ci`, `comments`, `raw`, `traces`, `commits`, `assets`, `tree`, `blob`). As
+  before, reserving costs nothing: a literal second segment out-ranks the branch catch-all
+  in the router, so a branch named `docs` keeps every URL except that one.
+- **A wiki URL only reaches markdown that exists.** `/docs/src/lib.rs` is a 404, not a
+  redirect to `/blob/`; the wiki's own links already point at the right one of the two.
