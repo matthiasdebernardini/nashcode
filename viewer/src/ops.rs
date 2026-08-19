@@ -178,6 +178,74 @@ fn email_for(login: &str) -> String {
     if login.contains('@') { login.to_owned() } else { format!("{login}@tailnet") }
 }
 
+/// Where `path` lands inside `root`, refusing anything that could leave it.
+///
+/// Checking the path's *text* is not enough. A repo may hold a committed symlink —
+/// `link -> /etc` is an ordinary blob git will happily check out — and
+/// `root.join("link/passwd")` then names a file outside the scratch clone entirely.
+/// `create_dir_all` and `write` follow it without complaint; git only objects
+/// afterwards, when the damage is done.
+///
+/// So every component is resolved as it is walked: the deepest existing ancestor is
+/// canonicalized and must still sit inside the canonical root, and no component along
+/// the way may be a symlink. A path that does not resolve to a plain place under the
+/// root is refused rather than repaired.
+fn resolve_inside(root: &Path, path: &str) -> OpResult<std::path::PathBuf> {
+    let anchor = root
+        .canonicalize()
+        .map_err(|e| OpError::Git(format!("scratch clone is unreadable: {e}")))?;
+
+    let mut resolved = anchor.clone();
+    let mut segments = path.split('/').peekable();
+    while let Some(segment) = segments.next() {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(OpError::Blocked(format!("{path} is not a plain repo path")));
+        }
+        let next = resolved.join(segment);
+        let last = segments.peek().is_none();
+
+        // symlink_metadata does not follow the link, so this sees the link itself.
+        match std::fs::symlink_metadata(&next) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(OpError::Blocked(format!(
+                    "{path} passes through the symbolic link {segment}"
+                )));
+            }
+            Ok(meta) if last && meta.is_dir() => {
+                return Err(OpError::Blocked(format!("{path} is a directory")));
+            }
+            // A component that does not exist yet is one this write will create, and
+            // create_dir_all/write make plain entries. Nothing left to follow.
+            Err(_) if !last => {
+                resolved = next;
+                for rest in segments {
+                    if rest.is_empty() || rest == "." || rest == ".." {
+                        return Err(OpError::Blocked(format!("{path} is not a plain repo path")));
+                    }
+                    resolved.push(rest);
+                }
+                break;
+            }
+            _ => {}
+        }
+        resolved = next;
+    }
+
+    // Belt and braces: whatever the walk produced must still be under the root once
+    // its existing prefix is canonicalized.
+    let settled = match resolved.parent() {
+        Some(parent) => match parent.canonicalize() {
+            Ok(parent) => parent.join(resolved.file_name().unwrap_or_default()),
+            Err(_) => resolved.clone(),
+        },
+        None => resolved.clone(),
+    };
+    if !settled.starts_with(&anchor) {
+        return Err(OpError::Blocked(format!("{path} resolves outside the repo")));
+    }
+    Ok(settled)
+}
+
 impl Ops {
     fn remote(&self, repo: &str) -> String {
         self.config.remote_url(repo)
@@ -360,9 +428,10 @@ impl Ops {
         }
         let mut flipped = Vec::new();
         for (path, rewritten) in rewrites {
-            let on_disk = scratch.repo.path().join(&path);
+            // A card could itself be a committed symlink pointing out of the clone.
+            let on_disk = resolve_inside(scratch.repo.path(), &path)?;
             std::fs::write(&on_disk, rewritten).map_err(|e| OpError::Git(e.to_string()))?;
-            scratch.git(&["add", &path]).await?;
+            scratch.git(&["add", "--", &path]).await?;
             flipped.push(path);
         }
         let message = format!("Mark done: {} ({} merged)", flipped.join(", "), branch);
@@ -535,12 +604,13 @@ impl Ops {
                 .await?;
         scratch.checkout(&default_branch).await?;
 
-        let on_disk = scratch.repo.path().join(path);
+        let on_disk = resolve_inside(scratch.repo.path(), path)?;
         if let Some(parent) = on_disk.parent() {
             std::fs::create_dir_all(parent).map_err(|e| OpError::Git(e.to_string()))?;
         }
         std::fs::write(&on_disk, content).map_err(|e| OpError::Git(e.to_string()))?;
-        scratch.git(&["add", path]).await?;
+        // `--` or a path named `-i` turns this into `git add -i`.
+        scratch.git(&["add", "--", path]).await?;
         scratch.git(&["commit", "-m", message]).await?;
         let new_tip = scratch.git(&["rev-parse", "HEAD"]).await?.trim().to_owned();
 
