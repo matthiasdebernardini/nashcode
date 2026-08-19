@@ -378,16 +378,41 @@ costs one warning line rather than one per merge.
 
 SPEC says "every merge to the default branch". The implementation hangs off
 `Mirrors::with_observer` — the callback that already queues CI for every newly seen
-tip — with the worker dropping any job whose branch is not the default one. Two
-reasons. `Ops::merge` ends in `refresh_now`, which observes the new tip anyway, so a
-call inside `merge` would be the second of two triggers for one event. And a merge
-pushed straight to dgit, bypassing the viewer, gets indexed by this and would not by
-the other. One rule covers both.
+tip. Two reasons. `Ops::merge` ends in `refresh_now`, which observes the new tip
+anyway, so a call inside `merge` would be the second of two triggers for one event.
+And a merge pushed straight to dgit, bypassing the viewer, gets indexed by this and
+would not by the other. One rule covers both.
 
-`POST /:repo/code/index` is the manual path and enqueues the same job with no branch
-and no commit, meaning "whatever the default branch points at when you get to it".
-`nashcode index [repo]` is a thin client over that endpoint; `--status` reads
-`GET /:repo/code` without queueing anything. Indexing never runs on a request path.
+**An index job carries no branch and no commit.** It says only "this repo moved"; the
+run resolves the default branch tip when it starts. That is what makes coalescing
+safe, and coalescing is what the observer needs — a push of five branches fires it
+five times, and a merge fires it again. `CiQueue` keeps one pending job per repo and
+releases the slot as the run *starts*, not as it finishes, so a push landing mid-run
+can still queue the run that will see it. A job dropped as a duplicate cannot have
+seen anything the survivor will miss, because the survivor reads the tip later.
+
+The first shape of this filtered by branch in the worker and kept the branch on the
+job. That combination is unsafe once you coalesce: a queued job for `feature` (which
+the worker would skip) would swallow a job for `main`, and nothing would index.
+Removing the filter costs one tree read on a feature-branch push and removes the
+failure mode.
+
+`POST /:repo/code/index` is the manual path and queues the same job. `nashcode index
+[repo]` is a thin client over that endpoint; `--status` reads `GET /:repo/code`
+without queueing anything. Indexing never runs on a request path.
+
+### A run over an unmoved tree stops before it starts
+
+An index run whose commit is already the last recorded run's, and where every blob is
+known, returns immediately. The parse it skips is cheap; the SCIP overlay it skips is
+not — that clones the repo into a scratch checkout and runs a language indexer over
+it. Without the early return, a merge that only moved a card paid for a full
+rust-analyzer pass.
+
+`code_seen_blobs` is what makes "every blob is known" true for blobs that stored
+nothing. An empty file, a PNG, a two-line stub, and a minified bundle all produce zero
+chunks, so asking `code_chunks` whether they were indexed answers "no" forever and
+re-reads them on every merge. On a repo that is mostly assets that was most of the run.
 
 ### Everything is keyed by blob SHA, and the path table is separate
 
@@ -429,6 +454,14 @@ designed answer for them. A binary that fails, times out, or emits an unreadable
 is one note on the run record; the tree-sitter graph it would have replaced stays
 exactly as it was. The degradation ladder is SCIP, then tree-sitter, then `git grep`,
 and no rung is an error.
+
+**An indexer is repo-controlled code and is treated as such.** `rust-analyzer scip`
+runs `cargo check`, which executes the indexed repository's `build.rs` and expands its
+proc macros. So indexers run under the same `env_clear()` the CI worker uses — `PATH`,
+`HOME`, `GIT_TERMINAL_PROMPT=0`, nothing else — and rust-analyzer is additionally
+passed `cargo.buildScripts.enable=false` and `procMacro.enable=false`. Before that,
+indexing a repository handed that repository `ANTHROPIC_API_KEY` and `GIT_TOKEN`. What
+the overlay needs is name resolution, not a build.
 
 The research pass flagged that SCIP occurrences do not name their enclosing function.
 The map is built in `read_document`: every occurrence carrying the Definition role
@@ -472,10 +505,31 @@ rather than a hint. Without `ANTHROPIC_API_KEY` the route still answers 404, unc
 - **The graph endpoints answer 200 with an empty list and a hint,** never 404 or 500,
   for a symbol that is not there. A language the graph cannot parse is *expected* to
   fall through to text search, and an error would teach a caller to stop asking.
-- **Brute-force cosine, as specified.** No ANN index. A tie breaks on path then line,
-  so the order is stable across runs rather than whatever the scan visited first, and a
-  vector of a different length scores zero rather than panicking — which is what makes
-  changing `NASHCODE_EMBED_MODEL` safe: old vectors simply stop matching.
+- **Brute-force cosine, as specified,** but in two passes. The scan reads ids, paths,
+  and vectors — never snippets, which run to eight kilobytes each and would move
+  megabytes of text through the connection mutex to rank ten rows; the snippets are
+  fetched afterwards for the rows that placed. The whole thing runs on a blocking
+  thread, because it holds that mutex and does real arithmetic. No ANN index. A tie
+  breaks on path then id, so the order is stable across runs rather than whatever the
+  scan visited first, and a vector of a different length scores zero rather than
+  panicking — which is what makes changing `NASHCODE_EMBED_MODEL` safe: old vectors
+  simply stop matching.
+- **`repo` from a JSON body is validated like a path parameter.** `/brain/ask` takes
+  its repo from the body, and that value reaches `Config::mirror_path` and then
+  `git --git-dir`, which reads whatever it is handed. It is checked against
+  `knows_repo` before the model sees the question, and `mirror_path` itself now refuses
+  a name carrying a separator, traversal, NUL, or leading dash — so the same mistake
+  made in a future handler yields a path inside the mirror directory that cannot exist
+  rather than an escape.
+- **Every unbounded read has a ceiling now.** `git grep`'s `--max-count` is per file,
+  so a common word across thousands of files was unbounded: the captured output is
+  capped at four megabytes (the child is killed at it), the parse stops at a thousand
+  matches, and a matched line is clipped at 500 bytes so one minified bundle line is
+  not the response. `/code/graph` is capped at 100k edges. All of them report
+  `truncated: true` rather than looking complete.
+- **One deadline for `/brain/ask`, not one per hop.** SPEC gives it five minutes. That
+  used to be the same number as the per-request timeout; with a tool loop, seven
+  requests could sit behind it, so the deadline moved around the loop and answers 504.
 - **`git cat-file blob`, not `git show`.** The index has the object id and does not
   care which path it came from. `Repo::read_blob` was added for it. (`git show ":<sha>"`
   is not valid syntax; that bug silently indexed nothing until an integration test
