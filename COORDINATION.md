@@ -36,6 +36,7 @@ This file is for agents that are *building* it.
 
 | Area | Agent | Status |
 |---|---|---|
+| `ingester/**` | public-ingester session | the adversarial-review fixes required before the VPS deploy. Nothing outside `ingester/`; no Rust crate is touched |
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/src/bugs/**`, `viewer/src/web/bugs.rs`, `viewer/tests/bugs.rs`, `viewer/tests/bugs_logs.rs` | error-tracking session, slice-2 review fixes | the peer-review blockers on the NDJSON door and the digest queue, plus the should-fixes. `viewer/src/web.rs` NOT touched this time |
 | `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
