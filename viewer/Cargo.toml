@@ -12,6 +12,13 @@ description = "Stacked-branch review and CI for a dgit server on a tailnet"
 name = "nashcode-viewer"
 path = "src/main.rs"
 
+[features]
+default = ["embeddings"]
+# Semantic code search. On by default: with `ort-load-dynamic` the ONNX Runtime is
+# opened at run time rather than linked in, so this feature costs the release build
+# nothing and a box without the shared library degrades instead of failing to link.
+embeddings = ["dep:fastembed"]
+
 [dependencies]
 topcoat = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs", "signal"] }
@@ -28,6 +35,20 @@ time = { version = "0.3.55", features = ["formatting", "parsing", "macros"] }
 serde_yaml_bw = "2.5.7"
 serde_urlencoded = "0.7"
 tempfile = "3"
+
+# Code intelligence. tree-sitter and its grammars are plain C and cross-compile
+# with the rest of the tree; `scip` reads the accurate overlay the language
+# indexers emit; `fastembed` is optional (see the `embeddings` feature).
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-typescript = "0.23"
+scip = "0.9"
+protobuf = "3.7"
+fastembed = { version = "6", default-features = false, features = [
+    "ort-load-dynamic",
+    "hf-hub-rustls-tls",
+], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

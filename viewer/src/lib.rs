@@ -4,6 +4,7 @@
 pub mod brain;
 pub mod ci;
 pub mod cli;
+pub mod code;
 pub mod config;
 pub mod db;
 pub mod docs;

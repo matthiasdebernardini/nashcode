@@ -1,2 +1,9 @@
 /target
 .DS_Store
+
+# Alternate CARGO_TARGET_DIR names, for building without the shared cache.
+/target-*
+
+# fastembed downloads the ONNX model here on first use. Hundreds of megabytes,
+# reproducible from the network, and never a build input.
+.fastembed_cache/

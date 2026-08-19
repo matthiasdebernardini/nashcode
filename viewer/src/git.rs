@@ -351,6 +351,25 @@ impl Repo {
         }
     }
 
+    /// A blob's bytes by object id, with no path and no revision involved.
+    ///
+    /// `show_file` addresses content as `<rev>:<path>`, which is what a page needs.
+    /// The code index works the other way round — it already has the object id and
+    /// does not care which path it came from — so it asks git for the object itself.
+    /// `None` when the object is absent or is not a blob.
+    pub async fn read_blob(&self, id: &str) -> GitResult<Option<Vec<u8>>> {
+        let mut command = tokio::process::Command::new("git");
+        command.args(self.base_args());
+        command.args(["cat-file", "blob", id]);
+        let output = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await?;
+        Ok(output.status.success().then_some(output.stdout))
+    }
+
     /// One directory level at a revision, in git's own tree order. `None` when `dir`
     /// names nothing, or names something that is not a directory.
     ///

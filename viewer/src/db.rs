@@ -531,6 +531,352 @@ impl Db {
         })
     }
 
+    // ---- code intelligence -------------------------------------------------------
+
+    /// Which blobs of `candidates` this repo already holds chunks for.
+    ///
+    /// This is the incrementality check: whatever comes back needs no parsing and no
+    /// embedding, whichever path it now sits at.
+    pub fn code_known_blobs(&self, repo: &str, candidates: &[String]) -> DbResult<Vec<String>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with(|conn| {
+            let mut known = Vec::new();
+            let mut statement = conn.prepare(
+                "SELECT 1 FROM code_chunks WHERE repo = ?1 AND blob = ?2 LIMIT 1",
+            )?;
+            for blob in candidates {
+                if statement.exists(params![repo, blob])? {
+                    known.push(blob.clone());
+                }
+            }
+            Ok(known)
+        })
+    }
+
+    /// Store one blob's chunks and graph entries, replacing anything held for it.
+    ///
+    /// One transaction per blob: an index run that dies halfway leaves every blob it
+    /// finished intact, and the next run picks up exactly where it stopped.
+    pub fn code_put_blob(&self, entry: &CodeBlob) -> DbResult<()> {
+        self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM code_chunks WHERE repo = ?1 AND blob = ?2",
+                params![entry.repo, entry.blob],
+            )?;
+            tx.execute(
+                "DELETE FROM code_symbols WHERE repo = ?1 AND blob = ?2",
+                params![entry.repo, entry.blob],
+            )?;
+            tx.execute(
+                "DELETE FROM code_refs WHERE repo = ?1 AND blob = ?2",
+                params![entry.repo, entry.blob],
+            )?;
+            for (ordinal, chunk) in entry.chunks.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO code_chunks
+                        (repo, blob, ordinal, symbol, start_line, end_line, snippet, vector, dims, model)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        entry.repo,
+                        entry.blob,
+                        ordinal as i64,
+                        chunk.symbol,
+                        chunk.start_line,
+                        chunk.end_line,
+                        chunk.snippet,
+                        chunk.vector.as_ref().map(|v| encode_vector(v)),
+                        chunk.vector.as_ref().map_or(0, Vec::len) as i64,
+                        chunk.model,
+                    ],
+                )?;
+            }
+            for (ordinal, symbol) in entry.symbols.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO code_symbols
+                        (repo, blob, ordinal, name, kind, start_line, end_line, source)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        entry.repo,
+                        entry.blob,
+                        ordinal as i64,
+                        symbol.name,
+                        symbol.kind,
+                        symbol.start_line,
+                        symbol.end_line,
+                        symbol.source,
+                    ],
+                )?;
+            }
+            for (ordinal, reference) in entry.refs.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO code_refs (repo, blob, ordinal, name, caller, line, kind, source)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        entry.repo,
+                        entry.blob,
+                        ordinal as i64,
+                        reference.name,
+                        reference.caller,
+                        reference.line,
+                        reference.kind,
+                        reference.source,
+                    ],
+                )?;
+            }
+            tx.commit()
+        })
+    }
+
+    /// Replace a blob's graph entries alone, leaving its chunks and vectors alone.
+    /// The SCIP overlay lands through here: it is more accurate about symbols and
+    /// says nothing at all about embeddings.
+    pub fn code_put_graph(
+        &self,
+        repo: &str,
+        blob: &str,
+        symbols: &[CodeSymbol],
+        refs: &[CodeRef],
+    ) -> DbResult<()> {
+        self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM code_symbols WHERE repo = ?1 AND blob = ?2",
+                params![repo, blob],
+            )?;
+            tx.execute("DELETE FROM code_refs WHERE repo = ?1 AND blob = ?2", params![repo, blob])?;
+            for (ordinal, symbol) in symbols.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO code_symbols
+                        (repo, blob, ordinal, name, kind, start_line, end_line, source)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        repo,
+                        blob,
+                        ordinal as i64,
+                        symbol.name,
+                        symbol.kind,
+                        symbol.start_line,
+                        symbol.end_line,
+                        symbol.source,
+                    ],
+                )?;
+            }
+            for (ordinal, reference) in refs.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO code_refs (repo, blob, ordinal, name, caller, line, kind, source)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        repo,
+                        blob,
+                        ordinal as i64,
+                        reference.name,
+                        reference.caller,
+                        reference.line,
+                        reference.kind,
+                        reference.source,
+                    ],
+                )?;
+            }
+            tx.commit()
+        })
+    }
+
+    /// Point the repo's path table at exactly this set of files, dropping any path
+    /// that is no longer in the tree. Content that no path references any more is
+    /// swept here too, so a deleted file stops answering queries.
+    pub fn code_set_files(&self, repo: &str, files: &[(String, String, String)]) -> DbResult<()> {
+        self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("DELETE FROM code_files WHERE repo = ?1", params![repo])?;
+            for (path, blob, lang) in files {
+                tx.execute(
+                    "INSERT OR REPLACE INTO code_files (repo, path, blob, lang)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![repo, path, blob, lang],
+                )?;
+            }
+            for table in ["code_chunks", "code_symbols", "code_refs"] {
+                tx.execute(
+                    &format!(
+                        "DELETE FROM {table} WHERE repo = ?1 AND blob NOT IN
+                         (SELECT blob FROM code_files WHERE repo = ?1)"
+                    ),
+                    params![repo],
+                )?;
+            }
+            tx.commit()
+        })
+    }
+
+    /// Every stored chunk of a repo, with the path it currently lives at.
+    /// This is what the brute-force cosine scan walks.
+    pub fn code_chunks(&self, repo: &str) -> DbResult<Vec<StoredChunk>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT f.path, c.symbol, c.start_line, c.end_line, c.snippet, c.vector, c.model
+                 FROM code_chunks c JOIN code_files f ON f.repo = c.repo AND f.blob = c.blob
+                 WHERE c.repo = ?1
+                 ORDER BY f.path, c.ordinal",
+            )?;
+            let rows = statement
+                .query_map(params![repo], |row| {
+                    let raw: Option<Vec<u8>> = row.get(5)?;
+                    Ok(StoredChunk {
+                        path: row.get(0)?,
+                        symbol: row.get(1)?,
+                        start_line: row.get(2)?,
+                        end_line: row.get(3)?,
+                        snippet: row.get(4)?,
+                        vector: raw.as_deref().map(decode_vector),
+                        model: row.get(6)?,
+                    })
+                })?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Where a symbol is defined. Exact name match; a repo that never indexed
+    /// returns an empty list, which is an answer, not an error.
+    pub fn code_definitions(&self, repo: &str, name: &str) -> DbResult<Vec<SymbolHit>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT f.path, s.name, s.kind, s.start_line, s.end_line, s.source
+                 FROM code_symbols s JOIN code_files f ON f.repo = s.repo AND f.blob = s.blob
+                 WHERE s.repo = ?1 AND s.name = ?2
+                 ORDER BY f.path, s.start_line",
+            )?;
+            let rows = statement
+                .query_map(params![repo, name], |row| {
+                    Ok(SymbolHit {
+                        path: row.get(0)?,
+                        name: row.get(1)?,
+                        kind: row.get(2)?,
+                        start_line: row.get(3)?,
+                        end_line: row.get(4)?,
+                        source: row.get(5)?,
+                    })
+                })?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Every reference to a symbol. `calls_only` narrows it to call edges, which is
+    /// what `/code/callers` is built from.
+    pub fn code_references(
+        &self,
+        repo: &str,
+        name: &str,
+        calls_only: bool,
+    ) -> DbResult<Vec<RefHit>> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT f.path, r.name, r.caller, r.line, r.kind, r.source
+                 FROM code_refs r JOIN code_files f ON f.repo = r.repo AND f.blob = r.blob
+                 WHERE r.repo = ?1 AND r.name = ?2 AND (?3 = 0 OR r.kind = 'call')
+                 ORDER BY f.path, r.line",
+            )?;
+            let rows = statement
+                .query_map(params![repo, name, i64::from(calls_only)], |row| {
+                    Ok(RefHit {
+                        path: row.get(0)?,
+                        name: row.get(1)?,
+                        caller: row.get(2)?,
+                        line: row.get(3)?,
+                        kind: row.get(4)?,
+                        source: row.get(5)?,
+                    })
+                })?
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Record what an index run did. `/brain` reads the latest of these.
+    pub fn code_record_run(&self, run: &CodeRun) -> DbResult<()> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO code_runs
+                    (repo, commit_id, files_seen, files_indexed, chunks, symbols, embedded, note, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    run.repo,
+                    run.commit,
+                    run.files_seen,
+                    run.files_indexed,
+                    run.chunks,
+                    run.symbols,
+                    run.embedded,
+                    run.note,
+                    now()
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The most recent index run for a repo.
+    pub fn code_last_run(&self, repo: &str) -> DbResult<Option<CodeRunRow>> {
+        self.with(|conn| {
+            conn.query_row(
+                "SELECT repo, commit_id, files_seen, files_indexed, chunks, symbols, embedded,
+                        note, created_at
+                 FROM code_runs WHERE repo = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![repo],
+                |row| {
+                    Ok(CodeRunRow {
+                        run: CodeRun {
+                            repo: row.get(0)?,
+                            commit: row.get(1)?,
+                            files_seen: row.get(2)?,
+                            files_indexed: row.get(3)?,
+                            chunks: row.get(4)?,
+                            symbols: row.get(5)?,
+                            embedded: row.get(6)?,
+                            note: row.get(7)?,
+                        },
+                        created_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// Chunk, symbol, embedded-chunk, and file counts for a repo, in one pass.
+    pub fn code_counts(&self, repo: &str) -> DbResult<CodeCounts> {
+        self.with(|conn| {
+            let scoped = |table: &str| {
+                format!(
+                    "SELECT COUNT(*) FROM {table} t
+                     WHERE t.repo = ?1
+                       AND EXISTS (SELECT 1 FROM code_files f
+                                   WHERE f.repo = t.repo AND f.blob = t.blob)"
+                )
+            };
+            Ok(CodeCounts {
+                files: conn.query_row(
+                    "SELECT COUNT(*) FROM code_files WHERE repo = ?1",
+                    params![repo],
+                    |row| row.get(0),
+                )?,
+                chunks: conn.query_row(&scoped("code_chunks"), params![repo], |row| row.get(0))?,
+                symbols: conn.query_row(&scoped("code_symbols"), params![repo], |row| row.get(0))?,
+                embedded: conn.query_row(
+                    "SELECT COUNT(*) FROM code_chunks c WHERE c.repo = ?1 AND c.vector IS NOT NULL
+                       AND EXISTS (SELECT 1 FROM code_files f
+                                   WHERE f.repo = c.repo AND f.blob = c.blob)",
+                    params![repo],
+                    |row| row.get(0),
+                )?,
+            })
+        })
+    }
+
     /// The audit trail for a repo, newest first.
     pub fn audit(&self, repo: &str, limit: usize) -> DbResult<Vec<AuditEntry>> {
         self.with(|conn| {
@@ -643,6 +989,136 @@ pub struct TraceSession {
     pub commits: i64,
 }
 
+// ---- code intelligence rows --------------------------------------------------------
+
+/// One embeddable piece of a file, on its way in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeChunk {
+    /// The function or class the chunk is, when tree-sitter found one.
+    pub symbol: Option<String>,
+    /// One-based, inclusive.
+    pub start_line: i64,
+    pub end_line: i64,
+    pub snippet: String,
+    /// `None` when the chunk was stored without an embedder available.
+    pub vector: Option<Vec<f32>>,
+    pub model: String,
+}
+
+/// One definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeSymbol {
+    pub name: String,
+    pub kind: String,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub source: String,
+}
+
+/// One use of a name, with the function it happened inside when that is known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeRef {
+    pub name: String,
+    pub caller: Option<String>,
+    pub line: i64,
+    /// `call` or `ref`.
+    pub kind: String,
+    pub source: String,
+}
+
+/// Everything one blob contributes, written as a unit.
+#[derive(Debug, Clone, Default)]
+pub struct CodeBlob {
+    pub repo: String,
+    pub blob: String,
+    pub chunks: Vec<CodeChunk>,
+    pub symbols: Vec<CodeSymbol>,
+    pub refs: Vec<CodeRef>,
+}
+
+/// A chunk read back, resolved to the path it now lives at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredChunk {
+    pub path: String,
+    pub symbol: Option<String>,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub snippet: String,
+    pub vector: Option<Vec<f32>>,
+    pub model: String,
+}
+
+/// A definition read back.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SymbolHit {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub source: String,
+}
+
+/// A reference read back.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RefHit {
+    pub path: String,
+    pub name: String,
+    pub caller: Option<String>,
+    pub line: i64,
+    pub kind: String,
+    pub source: String,
+}
+
+/// What one index run did.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct CodeRun {
+    pub repo: String,
+    pub commit: String,
+    pub files_seen: i64,
+    /// Files whose blob was new to this repo, so actually parsed and embedded.
+    pub files_indexed: i64,
+    pub chunks: i64,
+    pub symbols: i64,
+    pub embedded: i64,
+    /// Anything that degraded, in words. Empty when everything ran.
+    pub note: String,
+}
+
+/// An index run with the time it finished.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CodeRunRow {
+    #[serde(flatten)]
+    pub run: CodeRun,
+    pub created_at: String,
+}
+
+/// What a repo currently holds.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct CodeCounts {
+    pub files: i64,
+    pub chunks: i64,
+    pub symbols: i64,
+    pub embedded: i64,
+}
+
+/// Vectors are stored as raw little-endian f32, which is both the smallest and the
+/// cheapest form to scan: decoding is a copy, not a parse.
+fn encode_vector(vector: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn decode_vector(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .collect()
+}
+
 /// An audit line on its way in.
 #[derive(Debug, Clone)]
 pub struct NewAudit {
@@ -725,6 +1201,78 @@ CREATE TABLE IF NOT EXISTS audit (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS audit_repo ON audit (repo, created_at);
+
+-- ---- code intelligence -----------------------------------------------------
+--
+-- Everything derived from a file's *content* is keyed by its blob SHA, and only
+-- the path table knows where that content currently lives. An index run that
+-- meets a blob it has already seen does no work at all, and a renamed file keeps
+-- its chunks, its vectors, and its symbols.
+
+CREATE TABLE IF NOT EXISTS code_files (
+    repo TEXT NOT NULL,
+    path TEXT NOT NULL,
+    blob TEXT NOT NULL,
+    lang TEXT NOT NULL,
+    PRIMARY KEY (repo, path)
+);
+CREATE INDEX IF NOT EXISTS code_files_blob ON code_files (repo, blob);
+
+CREATE TABLE IF NOT EXISTS code_chunks (
+    repo       TEXT NOT NULL,
+    blob       TEXT NOT NULL,
+    ordinal    INTEGER NOT NULL,
+    symbol     TEXT,
+    start_line INTEGER NOT NULL,
+    end_line   INTEGER NOT NULL,
+    snippet    TEXT NOT NULL,
+    -- Little-endian f32s. NULL when the chunk is stored but not yet embedded.
+    vector     BLOB,
+    dims       INTEGER NOT NULL DEFAULT 0,
+    model      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (repo, blob, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS code_symbols (
+    repo       TEXT NOT NULL,
+    blob       TEXT NOT NULL,
+    ordinal    INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line   INTEGER NOT NULL,
+    -- `treesitter` for the in-process pass, `scip` for the accurate overlay.
+    source     TEXT NOT NULL,
+    PRIMARY KEY (repo, blob, ordinal)
+);
+CREATE INDEX IF NOT EXISTS code_symbols_name ON code_symbols (repo, name);
+
+CREATE TABLE IF NOT EXISTS code_refs (
+    repo    TEXT NOT NULL,
+    blob    TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    name    TEXT NOT NULL,
+    caller  TEXT,
+    line    INTEGER NOT NULL,
+    kind    TEXT NOT NULL,
+    source  TEXT NOT NULL,
+    PRIMARY KEY (repo, blob, ordinal)
+);
+CREATE INDEX IF NOT EXISTS code_refs_name ON code_refs (repo, name);
+
+CREATE TABLE IF NOT EXISTS code_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo          TEXT NOT NULL,
+    commit_id     TEXT NOT NULL,
+    files_seen    INTEGER NOT NULL,
+    files_indexed INTEGER NOT NULL,
+    chunks        INTEGER NOT NULL,
+    symbols       INTEGER NOT NULL,
+    embedded      INTEGER NOT NULL,
+    note          TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS code_runs_repo ON code_runs (repo, created_at);
 
 "#;
 
