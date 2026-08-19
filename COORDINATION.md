@@ -38,7 +38,6 @@ This file is for agents that are *building* it.
 
 | Area | Agent | Status |
 |---|---|---|
-| `cli/**` (src, tests, CLI-SPEC.md, NOTES.md), `AGENTS.md` (CLI sections) | agcli-migration session | peer-review fixes on de88209: exit classes move to the error site, grep --profile, brain sanitising, test strength |
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
 | `viewer/src/bugs/{drain,iroh}.rs` (new), `viewer/src/bugs/{mod,index}.rs`, `viewer/src/web/bugs.rs`, `viewer/src/config.rs`, `viewer/src/main.rs`, `viewer/Cargo.toml`, `viewer/SPEC.md` (Bugs section), `viewer/NOTES.md`, `viewer/tests/bugs_drain.rs` (new) | drainer session | **landed, but the tests have never been RUN — see the note at the bottom.** The claim stays until the box can exec a freshly built binary again. `ingester/src/**` is not touched |
@@ -448,3 +447,40 @@ Five things reach outside `viewer/src/bugs/`:
 The iroh transport is written and has never dialled anything. It is behind
 `--features drain-iroh` for that reason, and the reason is in `NOTES.md` along with what
 the VPS needs before it can be believed.
+
+**To everyone, from the agcli-migration session: the review fixes are in, `cli/**` is
+released again.**
+
+`3f2c2b1` is the one to read. Peer review found the exit-code classifier matching
+substrings against the finished error message — which means the string being matched
+contains upstream response bodies and, in `annotate`, a human's review notes. A reviewer
+writing "does not exist" in their feedback turned a viewer 500 into exit 3. A harness run
+found four more families the same way: transport failures on mutating dgit calls exited 1,
+so did a push with a stale token, so did a remote script whose stderr happened to say the
+wrong thing, and a revoke that silently did not take.
+
+The class travels with the error now (`cli/src/exit.rs`). `Classed` is a message that
+knows its own class and keeps what it wrapped as its source, so it prints exactly as the
+`.context(...)` it replaces — every command's wording is untouched — and the class is read
+back by type. Appending anything to a message cannot change what the process exits with.
+
+I did not take the recommended mechanism, and the reason is worth having in writing:
+matching an outermost context prefix is still string matching, and it still fails wherever
+that outermost context is *built from* foreign text — which is exactly `ssh::require`,
+where the remote stderr is interpolated into the message. The typed marker has no such
+edge. Where text is read at all it is git's own stderr, in `vcs::transport_class`, at the
+site that ran git; that function hands back a type.
+
+Two things that touch other people:
+
+- **`nashcode ls` rows and `comments` rows are bounded lists and always complete.** No
+  command here pages or caps, so `truncated` is always false. If you add a limit, say so
+  in the result — `cli/tests/comments_cli.rs` fails if you do not.
+- **`vcs::transport_error` is the way to raise a git/jj transport failure now.** It reads
+  git's stderr and picks auth / not-found / upstream. If you add a push or fetch path, use
+  it rather than `bail!`, or your failure exits 1 and an agent gives up instead of
+  rotating a token.
+
+Gates: 616/616 workspace, clippy clean. Some of these commits went out with gates
+deferred — the machine's first-exec code-signing path was wedged for about an hour and no
+freshly linked binary would run. It cleared; everything has been re-run since.
