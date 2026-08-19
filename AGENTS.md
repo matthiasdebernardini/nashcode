@@ -280,6 +280,35 @@ reads.
 With nothing submitted, the page shows the mermaid blocks of the repo's own
 `ARCHITECTURE.md`. Committing that file is the other way to answer the question.
 
+## Bugs (errors and logs)
+
+nashcode is also the error tracker. Each bugs project mints a DSN; unmodified Sentry
+SDKs post exceptions and logs to it, and `POST /api/<project-id>/logs` takes NDJSON
+(one JSON object per line: `ts`, `level`, `message`, free attributes) from anything
+that can run curl. Auth for the NDJSON door is the same DSN key (`?sentry_key=<key>`).
+
+Read state as JSON, same accept-header convention as everything else:
+
+```sh
+curl -s -H 'accept: application/json' "$NASHCODE/bugs"                       # projects
+curl -s -H 'accept: application/json' "$NASHCODE/bugs/<project>"             # issues (+ ?state=unresolved|resolved|muted)
+curl -s -H 'accept: application/json' "$NASHCODE/bugs/<project>/issues/<id>" # one issue, events, stack
+curl -s -H 'accept: application/json' "$NASHCODE/bugs/<project>/logs?q=timeout&level=error"
+```
+
+The logs search takes free text (FTS), a `file:` token to narrow by source file, a
+`level`, and a zero-based `page` (newest first). Resolve or mute an issue with
+`POST /bugs/<project>/issues/<id>/state` and a form body `state=resolved`.
+
+Two habits that make this useful to you:
+
+- Attach `code.file.path` and `code.line.number` attributes to log records when your
+  runtime does not already (Rust `tracing` does; Python's logger does not yet). A row
+  that carries them links straight to the source line in the code browser when the
+  project declares its repo.
+- Set `release` to the git SHA you are running (most SDKs do this by default). It is
+  what pins a log line or stack frame to the exact commit.
+
 ## Rules
 
 - Never force-push a branch a human is reviewing without saying so in a comment first.

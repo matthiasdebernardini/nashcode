@@ -23,7 +23,10 @@ stacked-branch work on infrastructure you own end to end.
    dgit lacks: Pierre-quality diffs, stacked-branch review with merge/restack buttons, a
    built-in CI runner, comments with a public JSON API, plans and a kanban board that
    live *in* the repo, agent traces linking every commit to the conversation that wrote
-   it, and `/brain` — the whole tailnet's work state as one JSON document.
+   it, `/brain` — the whole tailnet's work state as one JSON document, and `/bugs` —
+   a Sentry-compatible error and log tracker: every project gets a DSN, unmodified
+   Sentry SDKs post to it, raw payloads live in your bucket, and log lines link back
+   to the source line in the code browser.
 
 ## Build
 
