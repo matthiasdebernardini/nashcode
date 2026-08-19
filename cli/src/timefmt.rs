@@ -89,6 +89,28 @@ pub fn now_rfc3339() -> String {
     )
 }
 
+/// A sortable key for an RFC 3339 timestamp: whole seconds, then the fraction
+/// normalised to nanoseconds.
+///
+/// Comparing the strings instead is wrong for anything but one fixed spelling —
+/// `...:11Z` sorts after `...:11.5Z` as text and happens before it in time — and
+/// the rows a poller reads are passed through from whatever answered. An
+/// unparseable timestamp keys as `None`, which sorts below every real one, so it
+/// can never win a maximum and freeze a cursor on a row nobody can date.
+pub fn instant_key(rfc3339: &str) -> (Option<i64>, u32) {
+    let seconds = parse_rfc3339(rfc3339);
+    let nanos = rfc3339
+        .split_once('.')
+        .map(|(_, tail)| {
+            let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+            // "5" is half a second, "500000" is too: pad, do not read as an int.
+            let padded = format!("{digits:0<9}");
+            padded[..9].parse::<u32>().unwrap_or(0)
+        })
+        .unwrap_or(0);
+    (seconds, nanos)
+}
+
 /// Seconds since a timestamp, or `None` when it is unparseable.
 pub fn seconds_since(rfc3339: &str) -> Option<i64> {
     let then = parse_rfc3339(rfc3339)?;
@@ -166,5 +188,16 @@ mod tests {
     #[test]
     fn an_unparseable_stamp_survives_as_itself() {
         assert_eq!(age_of("soon"), "soon");
+    }
+
+    #[test]
+    fn instant_keys_order_by_time_not_by_text() {
+        let key = instant_key;
+        // The pair that breaks a string comparison.
+        assert!(key("2026-08-19T09:30:11.500000Z") > key("2026-08-19T09:30:11Z"));
+        // Precision alone changes nothing about the instant.
+        assert_eq!(key("2026-08-19T09:30:11.5Z"), key("2026-08-19T09:30:11.500000Z"));
+        // Anything undateable sinks below everything real.
+        assert!(key("not-a-date") < key("1970-01-01T00:00:00Z"));
     }
 }

@@ -39,7 +39,6 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<Value> {
     // ---- 1. host ---------------------------------------------------------
     out.step("[1/7] host");
     let host = ask(
-        "SSH destination of the host (user@host)",
         "--host",
         args.host.clone(),
         None,
@@ -68,14 +67,12 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<Value> {
         ));
     };
     let bucket_input = ask(
-        "bucket name (or a full s3://bucket/prefix URL)",
         "--bucket",
         args.bucket.clone(),
         None,
     )?;
     let bucket = normalise_bucket(&bucket_input);
     let region = ask(
-        "storage region",
         "--region",
         args.region.clone(),
         Some(provider.default_region().to_string()),
@@ -127,13 +124,11 @@ pub fn run(ctx: &Ctx, args: &SetupArgs) -> Result<Value> {
         None => generate_token(),
     };
     let site_name = ask(
-        "site name shown in the web interface",
         "--site-name",
         args.site_name.clone(),
         Some(short_host(&host)),
     )?;
     let site_owner = ask(
-        "default owner shown against repositories",
         "--site-owner",
         args.site_owner.clone(),
         Some(facts.user.clone()),
@@ -411,13 +406,7 @@ fn record(scripts: &mut Vec<Value>, what: &str, script: &str) {
 /// Nothing is ever asked. Nobody is at a terminal: an agent runs this, and an
 /// agent cannot answer a prompt, so a missing answer is a usage error naming the
 /// flag that would have supplied it.
-fn ask(
-    label: &str,
-    flag: &str,
-    value: Option<String>,
-    default: Option<String>,
-) -> Result<String> {
-    let _ = label;
+fn ask(flag: &str, value: Option<String>, default: Option<String>) -> Result<String> {
     if let Some(v) = value.filter(|v| !v.is_empty()) {
         return Ok(v);
     }

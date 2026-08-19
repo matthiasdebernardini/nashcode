@@ -117,8 +117,13 @@ pub struct Flags {
     pub types: Vec<String>,
     pub globs: Vec<String>,
     pub repo: Option<String>,
+    /// `--profile`: nashcode's, not rg's. Extracted here rather than forwarded,
+    /// because rg would reject it and the profile decides which viewer to ask.
+    pub profile: Option<String>,
     pub json: bool,
     pub help: bool,
+    /// `--quiet`: agcli's reserved flag. Silences the `#` notes on stderr.
+    pub quiet: bool,
     /// Flags this command does not model, in the order they were typed and with their
     /// values. Forwarded verbatim to the local rg, which does model them.
     pub ignored: Vec<String>,
@@ -170,7 +175,11 @@ pub fn parse(args: &[String]) -> Flags {
             match name {
                 "json" => flags.json = true,
                 "help" => flags.help = true,
+                "quiet" => flags.quiet = true,
                 "repo" => flags.repo = value(inline, args, &mut i),
+                // nashcode's own, wherever it lands. rg has no --profile, so
+                // forwarding it would fail the local pass and lose the flag.
+                "profile" => flags.profile = value(inline, args, &mut i),
                 "ignore-case" => flags.ignore_case = true,
                 "case-sensitive" => flags.ignore_case = false,
                 "files-with-matches" => flags.files_only = true,
@@ -252,38 +261,48 @@ pub fn parse(args: &[String]) -> Flags {
     flags
 }
 
-/// The global flags typed *before* the subcommand.
+/// nashcode's own flags, typed *before* the subcommand.
 ///
 /// `grep` is a raw passthrough command: agcli hands it every token after
 /// `grep`, verbatim, and nothing before it. That is exactly right for the
 /// pattern — `nashcode grep -- -Zthreads` arrives with its `--` intact — but the
-/// two flags that belong to nashcode rather than to rg (`--profile`, and the
-/// `--json` an agent types out of habit) sit on the other side of the command
-/// name. So they are read back off the process's own argument list, scanning
-/// only as far as the first non-flag token, which is the subcommand.
-pub fn preceding_flags() -> (bool, Option<String>) {
-    let mut args = std::env::args().skip(1);
-    let mut json = false;
-    let mut profile = None;
-    while let Some(arg) = args.next() {
+/// flags that belong to nashcode rather than to rg can be typed on either side
+/// of the command name, and only one side reaches [`parse`]. So the other side
+/// is read back off the process's own argument list, scanning as far as the
+/// first non-flag token, which is the subcommand.
+///
+/// [`parse`] handles the same three flags after the command name. Either
+/// spelling works, and `nashcode grep --profile work retry` no longer searches
+/// for the word `work`.
+#[derive(Debug, Default)]
+pub struct Preceding {
+    pub json: bool,
+    pub quiet: bool,
+    pub profile: Option<String>,
+}
+
+pub fn preceding_flags() -> Preceding {
+    read_preceding(std::env::args().skip(1))
+}
+
+fn read_preceding(argv: impl Iterator<Item = String>) -> Preceding {
+    let mut argv = argv;
+    let mut found = Preceding::default();
+    while let Some(arg) = argv.next() {
         if let Some(value) = arg.strip_prefix("--profile=") {
-            profile = Some(value.to_owned());
+            found.profile = Some(value.to_owned());
             continue;
         }
-        if arg == "--profile" {
-            profile = args.next();
-            continue;
+        match arg.as_str() {
+            "--profile" => found.profile = argv.next(),
+            "--json" => found.json = true,
+            "--quiet" => found.quiet = true,
+            _ if arg.starts_with('-') => {}
+            // The subcommand: everything after it is grep's own.
+            _ => break,
         }
-        if arg == "--json" {
-            json = true;
-            continue;
-        }
-        if arg.starts_with('-') {
-            continue;
-        }
-        break; // the subcommand: everything after it is grep's own.
     }
-    (json, profile)
+    found
 }
 
 // ---- path filters ------------------------------------------------------------------
@@ -1077,13 +1096,16 @@ pub fn as_json(report: &Report) -> Value {
 /// Exits the way grep does — 0 with hits, 1 without — and 2 only for a usage mistake or
 /// for having neither a working tree to search nor an index to ask.
 pub fn run(args: &[String]) -> i32 {
-    let (json_before, profile) = preceding_flags();
+    let before = preceding_flags();
     let flags = parse(args);
+    // Either side of the command name works for all three. A flag typed after
+    // it is the more specific spelling, so it wins.
+    let wants_json = flags.json || before.json;
+    let quiet = flags.quiet || before.quiet;
     let ctx = Ctx {
-        out: Out::new(false),
-        profile_name: profile,
+        out: Out::new(quiet),
+        profile_name: flags.profile.clone().or(before.profile),
     };
-    let wants_json = flags.json || json_before;
 
     if flags.help {
         print_help(&mut std::io::stdout());
@@ -1188,8 +1210,10 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let rendered = render(&report);
-    for note in &rendered.notes {
-        eprintln!("{note}");
+    if !quiet {
+        for note in &rendered.notes {
+            eprintln!("{note}");
+        }
     }
     if wants_json {
         print_value(&as_json(&report));
@@ -1372,9 +1396,39 @@ mod tests {
     }
 
     #[test]
-    fn json_is_read_here_because_clap_never_sees_it() {
-        assert!(parsed(&["--json", "retry"]).json);
-        assert_eq!(parsed(&["--json", "retry"]).pattern.as_deref(), Some("retry"));
+    fn nashcodes_own_flags_are_read_here_not_forwarded_to_rg() {
+        // The framework hands this command its argv unparsed, so the three
+        // flags that are nashcode's rather than rg's are read right here.
+        let flags = parsed(&["--json", "retry"]);
+        assert!(flags.json);
+        assert_eq!(flags.pattern.as_deref(), Some("retry"));
+
+        // --profile takes a value: without this arm `work` became the pattern
+        // and `--profile` was forwarded to an rg that has no such flag.
+        for spelling in [
+            vec!["--profile", "work", "retry"],
+            vec!["--profile=work", "retry"],
+        ] {
+            let flags = parsed(&spelling);
+            assert_eq!(flags.profile.as_deref(), Some("work"), "{spelling:?}");
+            assert_eq!(flags.pattern.as_deref(), Some("retry"), "{spelling:?}");
+            assert!(flags.ignored.is_empty(), "{:?}", flags.ignored);
+        }
+
+        assert!(parsed(&["--quiet", "retry"]).quiet);
+    }
+
+    #[test]
+    fn the_same_flags_are_read_when_typed_before_the_subcommand() {
+        let argv = ["--profile", "work", "--json", "--quiet", "grep", "--profile", "x"];
+        let before = read_preceding(argv.iter().map(|a| (*a).to_string()));
+        assert_eq!(before.profile.as_deref(), Some("work"));
+        assert!(before.json && before.quiet);
+
+        // The scan stops at the subcommand, so grep's own tokens are not eaten.
+        let argv = ["grep", "--profile", "after"];
+        let before = read_preceding(argv.iter().map(|a| (*a).to_string()));
+        assert_eq!(before.profile, None);
     }
 
     #[test]

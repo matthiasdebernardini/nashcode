@@ -295,9 +295,17 @@ fn a_dead_viewer_is_a_status_and_exit_zero() {
         // The command succeeded; the viewer is what is down.
         assert_eq!(v["ok"], true, "{v}");
         assert_eq!(v["result"]["status"], "unavailable");
+        let why = v["result"]["error"].as_str().unwrap();
+        assert!(why.contains("viewer unreachable"), "{v}");
+
+        // Bounded, because this lands at the top of every session: one line's
+        // worth of reason, not a stack of them.
+        assert_eq!(why.lines().count(), 1, "the reason grew lines: {why:?}");
+        assert!(why.len() < 400, "the reason grew to {} bytes: {why:?}", why.len());
         assert!(
-            v["result"]["error"].as_str().unwrap().contains("viewer unreachable"),
-            "{v}"
+            out.stdout.len() < 2048,
+            "a dead viewer cost {} bytes of context",
+            out.stdout.len()
         );
     }
 }
@@ -351,6 +359,7 @@ fn a_viewer_that_answers_html_is_reported_rather_than_half_read() {
     let out = nashcode(&config, dir.path(), &["--json", "brain", "demo"]);
     assert_eq!(out.status.code(), Some(0));
     let v = envelope(&out);
+    assert_eq!(v["ok"], true, "the command succeeded; the answer was junk: {v}");
     assert_eq!(v["result"]["status"], "unavailable");
     assert!(v["result"]["error"].as_str().unwrap().contains("not JSON"), "{v}");
     server.served();
@@ -377,6 +386,7 @@ fn a_viewer_that_accepts_and_never_answers_times_out_rather_than_hanging() {
         "waited {elapsed:?}; a session-start hook cannot block that long"
     );
     let v = envelope(&out);
+    assert_eq!(v["ok"], true, "a hung viewer is not a failed command: {v}");
     assert_eq!(v["result"]["status"], "unavailable");
     assert!(v["result"]["error"].as_str().unwrap().contains("unreachable"), "{v}");
 }

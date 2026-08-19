@@ -16,8 +16,6 @@ use crate::exit::{Class, class_of};
 use crate::output::Out;
 use agcli::{AgentCli, Command, CommandError, CommandOutput, CommandRequest, ExitCode, NextAction};
 
-pub const ABOUT: &str = "Run your own git host on your own box, behind your own tailnet.";
-
 pub const LONG_ABOUT: &str = "\
 Run your own git host on your own box, behind your own tailnet.
 
@@ -79,16 +77,54 @@ Nothing is ever asked interactively: every answer is a flag, and a missing one
 is a usage error naming the flag. Bucket credentials are read from the
 environment when the flags are absent, so they need never appear in a shell
 history: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. A Tailscale auth key can
-come from TS_AUTHKEY the same way. `--dry-run` returns every remote script it
-would have run and touches nothing.";
+come from TS_AUTHKEY the same way.
+
+`--dry-run` returns every remote script it would have run and touches nothing —
+no host, no profile file. Those scripts are the real ones, so they carry the
+generated push token and any bucket credentials in them. Read the preview; do
+not paste it anywhere.
+
+The flags, where the name does not say it:
+  --host             SSH destination, e.g. me@build-box.
+  --name             what to save the deployment as. Defaults to the host's
+                     short name (me@build-box.ts.net -> build-box).
+  --provider         aws-s3, r2, or tigris. Nothing else is offered; see
+                     https://celld.dev/docs/fencing for why.
+  --bucket           a name, or a full celld bucket URL: s3://my-cells/prefix.
+  --region           `auto` for R2 and Tigris; a real region for Amazon S3.
+  --endpoint         the S3 API URL. Unset for Amazon S3, https://t3.storage.dev
+                     for Tigris, https://<account-id>.r2.cloudflarestorage.com
+                     for R2.
+  --access-key-id    falls back to $AWS_ACCESS_KEY_ID.
+  --secret-access-key falls back to $AWS_SECRET_ACCESS_KEY. Prefer the
+                     environment: a flag lands in your shell history.
+  --creds-on-host    the host already has credentials (instance role, ~/.aws,
+                     ADC). Conflicts with the two above.
+  --site-name        shown in the web interface. Defaults to the tailnet
+                     hostname.
+  --site-desc        shown under the title.
+  --site-owner       shown against repositories by default.
+  --token            use this push token instead of generating one. Careful: a
+                     flag lands in your shell history; a generated one does not.
+  --tailscale-authkey so `tailscale up` needs no browser. Prefer $TS_AUTHKEY.
+  --viewer           also publish the nashcode viewer on HTTPS :8443.
+  --viewer-port      loopback port the viewer listens on. Default 8090.
+  --listen-port      loopback port celld listens on. Default 8080.
+  --skip-verify      skip the end-to-end push/clone check (step 6).";
 
 const TOKEN_DOC: &str = "\
 Print the push token for a profile.
 
-This is the one command that writes a secret into the envelope. The token is
-dgit's GIT_TOKEN: HTTP Basic with any username and this as the password
-authorises a push, and it also authorises the admin calls behind `nashcode rm`,
-`gc`, and `desc`. Treat it like a deploy key.";
+This is the command whose whole purpose is to write a secret into the envelope.
+The token is dgit's GIT_TOKEN: HTTP Basic with any username and this as the
+password authorises a push, and it also authorises the admin calls behind
+`nashcode rm`, `gc`, and `desc`. Treat it like a deploy key.
+
+One other command can emit secrets, and it is worth knowing which: `setup
+--dry-run` returns the remote scripts it would have run, and those scripts carry
+the generated GIT_TOKEN and any bucket credentials you passed, because that is
+what they would have written on the host. A dry run is for reading, not for
+pasting into an issue.";
 
 const INIT_DOC: &str = "\
 Version the current directory on the active profile's server.
@@ -101,9 +137,18 @@ Point it at a folder of text files and the folder becomes a repository:
   3. wire `origin` and store the push token in git's credential helper;
   4. commit anything uncommitted and push.
 
-The default name is the directory's name. Re-running is safe: an existing
-repository is described, not replaced, and an existing working copy is left
-as it is.";
+The default name is the directory's name; letters, digits, dot, dash and
+underscore, starting with a letter or digit, is what dgit allows.
+
+  --private   hide it from the index and require the token to read it.
+  --desc      a one-line description.
+  --section   the heading to file it under on the index page.
+  --git       create the working copy with git even when jj is on PATH.
+  --jj        create it with jj, colocated. The default when jj is on PATH.
+  --no-push   create and wire the repository, but do not commit or push.
+
+Re-running is safe: an existing repository is described, not replaced, and an
+existing working copy is left as it is.";
 
 const NEW_DOC: &str = "\
 Create an empty repository on the server.
@@ -112,7 +157,18 @@ dgit creates a repository on first push, but that leaves it with no
 description and no section, so this instead calls PUT /<name>/config, which
 both creates and describes it. When run inside a working copy, it also wires
 `origin` and hands the token to git's credential helper, so the token stays
-out of the remote URL and out of your shell history.";
+out of the remote URL and out of your shell history.
+
+  <name>        letters, digits, dot, dash, underscore; starting with a letter
+                or digit. Anything else is refused before it becomes a URL path.
+  --private     hide it from the index and require the token to read it.
+  --desc        a one-line description.
+  --section     the heading to file it under on the index page.
+  --owner       shown against the repository. Defaults to the profile's owner.
+  --no-remote   do not touch the current directory's working copy.
+  --jj          after wiring the remote, make the working copy a colocated jj
+                repo. On by default when $NASHCODE_JJ=1; an explicit --jj with
+                no jj on PATH is an error, the env-var default only warns.";
 
 const LS_DOC: &str = "\
 List the repositories on the server.
@@ -151,8 +207,12 @@ auth probe: an invite proves the new token is accepted, a revoke proves the
 old one no longer is.
 
 `nashcode invite <name>` returns the token once, with the remote URL and the
-one-liner that stores it via `git credential approve`. Re-inviting a name
+one-liner that stores it via `git credential approve`. A name is letters,
+digits, dash and underscore, starting with a letter or digit — the alphabet is
+small because the name reaches a shell pattern on the host. Re-inviting a name
 rotates that person's token. `--list` returns names only, never tokens.
+`--revoke <name>` removes that person's token, redeploys, and verifies the old
+one now fails.
 
 A token is push access, not network access. Reaching the server at all is
 Tailscale's job: add the person to your tailnet or share the node with them.
@@ -194,7 +254,9 @@ how indexing works.
 
 It queues and returns. Indexing runs on the viewer's own job queue, never on a
 request, so the answer is `queued` rather than `done`. Run it again with --status
-to see whether it finished, or read GET /<repo>/code yourself.
+to report what the index holds without queueing another run, or read
+GET /<repo>/code yourself. The repository defaults to the name `origin` points
+at.
 
 The first index run on a fresh box downloads the embedding model, which is a few
 hundred megabytes. Until that lands, semantic search reports itself unavailable
@@ -226,8 +288,9 @@ files and how many comments wait on them, the latest architecture submission,
 and the last five things that happened. The result is that digest, not the raw
 stanza; `curl /brain` is still there when you want the whole thing.
 
-The repository defaults to the name `origin` points at. Run it outside a
-repository and it digests every repository the viewer knows.
+The repository defaults to the name `origin` points at, the way `comments`
+resolves it. Run it outside a repository and it digests every repository the
+viewer knows, up to twenty, saying how many it left out.
 
 It always exits 0. This is meant for a session-start hook, so a viewer that is
 down, unreachable, or not yet configured comes back as `status: unavailable`
@@ -671,7 +734,7 @@ fn use_command() -> Command {
         Box::pin(async move {
             if name.is_empty() {
                 return Err(misuse(
-                    "no profile named",
+                    "no profile named: `nashcode use` needs the name of a saved profile",
                     "nashcode profiles   # then: nashcode use <name>",
                 ));
             }
@@ -803,7 +866,10 @@ fn clone_command() -> Command {
         "clone",
         "Clone a repository from the server into a new directory.\n\n\
          The push token is handed to git's credential helper first, so a private \
-         repository clones without asking for a password.",
+         repository clones without asking for a password.\n\n\
+         <dir> defaults to the repository name, and must not already exist.\n\
+         --jj makes the clone a colocated jj repo; on by default when \
+         $NASHCODE_JJ=1.",
     )
     .usage("nashcode clone <name> [<dir>] [--jj] [--profile <name>]")
     .handler(|req, _ctx| {
@@ -875,7 +941,10 @@ fn desc_command() -> Command {
         "desc",
         "Set a repository's description, owner, section, or private flag.\n\n\
          One PUT /<name>/config carrying only the fields you named; anything you \
-         leave out is left alone.",
+         leave out is left alone, so this is safe to run for one field.\n\n\
+         --private hides it from the index and gates reads behind the token; \
+         --public shows it on the index and allows anonymous reads. Naming \
+         neither leaves the flag as it is; naming both is refused.",
     )
     .usage(
         "nashcode desc <name> [--desc <text>] [--section <name>] [--owner <name>] \
@@ -1080,7 +1149,8 @@ fn comments_command() -> Command {
                 Ok(CommandOutput::list(rows).next_action(NextAction::new(
                     poll,
                     match newest {
-                        Some(_) => "Poll for anything newer than the newest comment above",
+                        Some(_) => "Poll again: --since is exclusive, so this returns only \
+                                    comments written after the newest one above",
                         None => "Poll again for the first comment",
                     },
                 )))

@@ -69,19 +69,42 @@ pub fn digest(stanza: &Value) -> Value {
     if let Some(at) = stanza.get("generated_at").and_then(Value::as_str) {
         out["generated_at"] = json!(at);
     }
+    scrub(&mut out);
     out
+}
+
+/// Strip terminal control bytes from every string in a built digest.
+///
+/// One sweep at the end rather than a `clean` at each of a dozen sinks. The
+/// sinks are the problem: they are a list that grows, and the one somebody
+/// forgets is the one carrying a repository name from a stranger's push. A
+/// sweep covers the field nobody has added yet.
+///
+/// JSON encoding would escape these anyway. This is for the consumer that does
+/// not decode — a shell pipeline, a log line, a person with `cat`.
+fn scrub(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            if text.chars().any(|c| c.is_control() || c == '\u{7f}') {
+                *text = clean(text);
+            }
+        }
+        Value::Array(rows) => rows.iter_mut().for_each(scrub),
+        Value::Object(map) => map.values_mut().for_each(scrub),
+        _ => {}
+    }
 }
 
 /// The unavailable shape. Same `status` key as the success shape, so a caller
 /// reads one field to know which of the two it got.
 pub fn failure(reason: &str) -> Value {
-    json!({ "status": "unavailable", "error": reason })
+    let mut out = json!({ "status": "unavailable", "error": reason });
+    scrub(&mut out);
+    out
 }
 
 fn repo_digest(repo: &Value) -> Value {
-    // Cleaned here, not at a render site: the digest IS the output now, and a
-    // repository name is a string somebody else chose.
-    let name = clean(repo.get("name").and_then(Value::as_str).unwrap_or("?"));
+    let name = repo.get("name").and_then(Value::as_str).unwrap_or("?");
 
     // A mirror that could not be refreshed answers with the reason and nothing
     // else. Say that, rather than rendering five empty sections.
@@ -143,7 +166,7 @@ fn branches_digest(repo: &Value) -> Vec<Value> {
                 .map(|branch| {
                     let tip = branch.get("tip").and_then(Value::as_str).unwrap_or_default();
                     json!({
-                        "branch": clean(branch.get("branch").and_then(Value::as_str).unwrap_or("?")),
+                        "branch": branch.get("branch").and_then(Value::as_str).unwrap_or("?"),
                         "tip": short(tip),
                         "ahead": branch.get("ahead").and_then(Value::as_i64).unwrap_or(0),
                         "ci": branch.get("ci").and_then(Value::as_str).unwrap_or("none"),
@@ -349,7 +372,7 @@ pub fn run(ctx: &Ctx, args: &BrainArgs) -> Value {
 /// git error or a TOML parse failure arrives with newlines in it, and the one-line
 /// promise is what makes this command safe in a session-start hook.
 fn unavailable(reason: &str) -> Value {
-    failure(&clean(&one_line(reason)))
+    failure(&one_line(reason))
 }
 
 /// The viewer this profile names, or the reason there is none.
@@ -604,25 +627,62 @@ mod tests {
 
     #[test]
     fn control_characters_from_the_wire_never_reach_the_digest() {
+        // Every string sink the digest has, all carrying an escape at once:
+        // the sweep covers the ones nobody thought to list.
+        let esc = "\u{1b}[2J\u{7f}";
         let s = json!({
+            "generated_at": "2026-08-19T12:00:00Z",
             "repos": [{
-                "name": "evil\u{1b}[2J\u{7f}repo",
+                "name": format!("evil{esc}repo"),
                 "available": true,
-                "default_branch": "main",
-                "branches": [{ "branch": "ma\u{1b}[31min", "tip": "abc1234", "ahead": 0, "ci": "ok" }]
+                "error": format!("mirror{esc}broke"),
+                "default_branch": format!("ma{esc}in"),
+                "branches": [{ "branch": format!("ma{esc}in"), "tip": "abc1234", "ahead": 0,
+                               "ci": format!("o{esc}k") }],
+                "plans": [{ "path": format!("plans/a{esc}.md"), "title": "A",
+                            "refs": { "branch": "main", "plan": null, "tasks": [] } }],
+                "open_comment_counts": {},
+                "code": { "indexed": true, "files": 1, "chunks": 1, "symbols": 1,
+                          "last_indexed_at": "2026-08-16T12:00:00Z" },
+                "architecture": { "submissions": 1, "latest_author": format!("ro{esc}b"),
+                                  "latest_at": "2026-08-19T10:00:00Z" },
+                "activity": [{ "type": format!("merg{esc}e"), "branch": format!("b{esc}1"),
+                               "at": "2026-08-19T11:00:00Z" }]
             }]
         });
-        let repo = only_repo(&digest(&s));
-        for name in [repo["name"].as_str().unwrap(), repo["branches"][0]["branch"].as_str().unwrap()] {
+
+        let digested = digest(&s);
+        let mut strings = Vec::new();
+        collect_strings(&digested, &mut strings);
+        assert!(strings.len() > 8, "the fixture stopped exercising the sinks");
+        for text in &strings {
             assert!(
-                !name.chars().any(|c| c.is_control() || c == '\u{7f}'),
-                "escape survived into {name:?}"
+                !text.chars().any(|c| c.is_control() || c == '\u{7f}'),
+                "escape survived into {text:?}"
             );
         }
+
         // Only the control bytes go. What is left is inert text, still readable,
         // rather than a name silently replaced by nothing.
+        let repo = only_repo(&digested);
         assert_eq!(repo["name"], "evil[2Jrepo");
-        assert_eq!(repo["branches"][0]["branch"], "ma[31min");
+        assert_eq!(repo["branches"][0]["branch"], "ma[2Jin");
+        assert_eq!(repo["plans"][0]["path"], "plans/a[2J.md");
+        assert_eq!(repo["architecture"]["latest_author"], "ro[2Jb");
+        assert_eq!(repo["recent"][0]["type"], "merg[2Je");
+
+        // And the soft answer is swept too.
+        assert_eq!(failure("viewer\u{1b}[2J down")["error"], "viewer[2J down");
+    }
+
+    /// Every string anywhere in a value.
+    fn collect_strings(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(rows) => rows.iter().for_each(|r| collect_strings(r, out)),
+            Value::Object(map) => map.values().for_each(|v| collect_strings(v, out)),
+            _ => {}
+        }
     }
 
     #[test]

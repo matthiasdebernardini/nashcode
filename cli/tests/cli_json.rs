@@ -241,10 +241,65 @@ fn setup_dry_run_returns_the_scripts_and_writes_nothing() {
     assert!(steps.contains(&"deploy"), "{steps:?}");
     assert!(steps.contains(&"tailscale up"), "{steps:?}");
     assert!(
-        scripts.iter().all(|s| s["script"].as_str().unwrap().contains("set -e")),
-        "every remote script is set -e"
+        scripts
+            .iter()
+            .all(|s| s["script"].as_str().unwrap().contains("set -eu")),
+        "every remote script is `set -eu`: unset is as fatal as failed"
     );
     assert!(!config.exists(), "dry run must not write a profile");
+}
+
+#[test]
+fn every_missing_or_unusable_setup_answer_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+
+    // SETUP_DOC promises that a missing answer is a usage error naming the
+    // flag. These four are the ones that used to fall through to a generic 1.
+    let cases: [(&[&str], &str); 4] = [
+        // Credentials, with neither the flags nor the environment.
+        (
+            &["setup", "--dry-run", "--host", "me@h", "--provider", "tigris", "--bucket", "b"],
+            "no bucket credentials",
+        ),
+        // An answer given as empty is an answer not given.
+        (
+            &["setup", "--dry-run", "--host", "me@h", "--provider", "tigris",
+              "--bucket=", "--creds-on-host"],
+            "--bucket is required",
+        ),
+        // A value systemd's unit file cannot carry.
+        (
+            &["setup", "--dry-run", "--host", "me@h", "--provider", "tigris",
+              "--bucket", "has space", "--creds-on-host"],
+            "cannot carry safely",
+        ),
+        // An endpoint R2 cannot default.
+        (
+            &["setup", "--dry-run", "--host", "me@h", "--provider", "r2",
+              "--bucket", "b", "--creds-on-host"],
+            "--endpoint is required",
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let out = Command::new(env!("CARGO_BIN_EXE_nashcode"))
+            .args(args)
+            .env("NASHCODE_CONFIG", &config)
+            .env_remove("AWS_ACCESS_KEY_ID")
+            .env_remove("AWS_SECRET_ACCESS_KEY")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let v = envelope(&out);
+        assert_eq!(v["error"]["code"], "USAGE", "{args:?}: {v}");
+        assert!(
+            v["error"]["message"].as_str().unwrap().contains(expected),
+            "{args:?}: {v}"
+        );
+        assert!(v["fix"].as_str().unwrap().starts_with("nashcode "), "{args:?}: {v}");
+        assert!(!config.exists(), "{args:?} wrote a profile");
+    }
 }
 
 #[test]

@@ -308,7 +308,8 @@ fn a_pattern_that_begins_with_a_dash_survives_the_double_dash() {
     let (port, server) = one_shot_server("200 OK", EMPTY_INDEX);
     let config = write_config(dir.path(), Some(port));
 
-    // clap eats the first `--`, so this only works if grep reads its own argv.
+    // Exactly one `--` escapes a pattern that starts with a dash; the framework
+    // hands grep its argv untouched, so the `--` is still there to be read.
     let out = nashcode(&config, &repo, &["grep", "--", "-Zthreads"]);
     assert_eq!(out.status.code(), Some(0), "{:?}", errors(&out));
     assert!(

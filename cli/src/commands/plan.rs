@@ -527,9 +527,19 @@ pub fn rows_of(body: &str) -> Result<Vec<Value>> {
     })
 }
 
-/// The newest `created_at` across the rows, for the `--since` an agent should
-/// poll with next. Timestamps are RFC 3339 with a fixed offset, so the string
-/// order is the time order.
+/// The newest `created_at` across the rows: the `--since` an agent polls with
+/// next.
+///
+/// Compared as instants, not as strings. The viewer writes one fixed-width UTC
+/// spelling, for which the two orders agree — but the rows are passed through
+/// untouched from whatever answered, and `...:11Z` sorts after `...:11.5Z`
+/// lexicographically while happening before it. A cursor that goes backwards
+/// re-delivers; one that goes forwards skips.
+///
+/// The server's `since` is exclusive (`created_at > ?`), so a comment written in
+/// the same microsecond as the newest one here would not come back. See
+/// `cli/NOTES.md`: closing that window needs a compound `(at, id)` cursor on the
+/// viewer, which is not this side's to add.
 pub fn newest_timestamp(rows: &[Value]) -> Option<String> {
     rows.iter()
         .filter_map(|row| {
@@ -538,7 +548,9 @@ pub fn newest_timestamp(rows: &[Value]) -> Option<String> {
                 .find_map(|k| row.get(*k).and_then(Value::as_str))
         })
         .filter(|s| !s.is_empty())
-        .max()
+        // Unparseable timestamps sort below every real one rather than winning
+        // the max and freezing the cursor on a row nobody can date.
+        .max_by_key(|s| crate::timefmt::instant_key(s))
         .map(str::to_string)
 }
 
@@ -686,5 +698,32 @@ mod tests {
         assert_eq!(newest_timestamp(&[]), None);
         // A row with no readable timestamp cannot invent one.
         assert_eq!(newest_timestamp(&rows_of(r#"[{"id":1}]"#).unwrap()), None);
+    }
+
+    #[test]
+    fn the_cursor_is_the_latest_instant_not_the_largest_string() {
+        // Same second, different precision: `:11Z` sorts after `:11.500000Z` as
+        // text and before it in time. A cursor that took the string maximum
+        // would step back half a second and re-deliver.
+        let rows = rows_of(
+            r#"[{"id":1,"created_at":"2026-08-19T09:30:11.500000Z"},
+                {"id":2,"created_at":"2026-08-19T09:30:11Z"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            newest_timestamp(&rows),
+            Some("2026-08-19T09:30:11.500000Z".to_string())
+        );
+
+        // A row nobody can date must not win the maximum and freeze the loop.
+        let rows = rows_of(
+            r#"[{"id":1,"created_at":"zzz-not-a-date"},
+                {"id":2,"created_at":"2026-08-19T09:30:00Z"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            newest_timestamp(&rows),
+            Some("2026-08-19T09:30:00Z".to_string())
+        );
     }
 }

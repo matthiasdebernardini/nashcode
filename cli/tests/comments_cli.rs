@@ -206,3 +206,55 @@ fn without_dash_dash_repo_the_origin_remote_names_the_repository() {
         "{request_line}"
     );
 }
+
+#[test]
+fn a_bounded_list_says_so_when_it_is_showing_less_than_it_has() {
+    // The viewer answers with more rows than it says it holds — the shape a
+    // paged endpoint takes. `truncated` is what stops an agent concluding it
+    // has seen everything.
+    let dir = tempfile::tempdir().unwrap();
+    let (port, server) = one_shot_server(FIXTURE);
+    let config = write_config(dir.path(), Some(port));
+
+    let out = nashcode(
+        &config,
+        dir.path(),
+        &["comments", "plans/rewrite-the-parser.md", "--repo", "demo"],
+    );
+    let result = &envelope(&out)["result"];
+    // This fixture is complete, so it is not truncated — and says which.
+    assert_eq!(result["truncated"], false);
+    assert_eq!(result["count"], result["total"]);
+    assert!(result.get("guidance").is_none(), "{result}");
+    server.join().unwrap();
+}
+
+#[test]
+fn select_projects_the_rows_by_the_paths_the_list_advertised() {
+    let dir = tempfile::tempdir().unwrap();
+    let (port, server) = one_shot_server(FIXTURE);
+    let config = write_config(dir.path(), Some(port));
+
+    // The `fields` a bounded list publishes are meant to be pasted back
+    // unedited. This is that round trip, through the real binary.
+    let out = nashcode(
+        &config,
+        dir.path(),
+        &[
+            "comments",
+            "plans/rewrite-the-parser.md",
+            "--repo",
+            "demo",
+            "--select=items.id,items.body",
+        ],
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let result = &envelope(&out)["result"];
+    let first = &result["items"][0];
+    assert_eq!(first["id"], 1);
+    assert!(first["body"].as_str().unwrap().starts_with("This step"));
+    // Everything not asked for is gone, metadata included.
+    assert!(first.get("author").is_none(), "{first}");
+    assert!(result.get("count").is_none(), "{result}");
+    server.join().unwrap();
+}
