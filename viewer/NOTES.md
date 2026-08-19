@@ -1038,3 +1038,100 @@ missing; `NASHCODE_REQUIRE_CELLD=1` turns the skip into a failure for a machine 
 supposed to have them. Two facts are unit tests in `drain.rs` instead, because a real
 edge cannot be asked to hold still in either state: a digest queue that is exactly full,
 and an ack the edge refuses.
+## The upstream column, phase 1: declare and mirror (2026-08-19)
+
+`plans/whole-stack.md` phase 1 and SPEC's "Stack (upstream dependencies)" are the
+contract. `viewer/src/upstream.rs` holds all of it; `web/stack.rs` is the one route.
+
+### Mirrors are keyed by the whole URL, and the manifest `name` is decoration
+
+The plan left the namespace open: `up/<name>` per stack, or the full host path with
+global dedup. Full host path wins — `<mirrors>/up/<host>/<path>.git`. Sourcegraph
+built one-host-per-instance and spent years undoing it, and the same shape here would
+mean two repos that both depend on celld each keeping a copy, and no way to ask "who
+in the tailnet depends on this". The URL is the identity; the short `name` is display
+only, which is why it is validated as a plain name and then never used for a path.
+
+Normalization is small and written down: the parser lowers scheme and host, a
+trailing `/` and a trailing `.git` come off, and the port is part of the key because
+two servers on one host are two upstreams.
+
+Every path component is *checked*, not cleaned: a segment outside
+`[A-Za-z0-9._~-]`, or one that is `.`, `..` or leading-dash, refuses the whole URL
+with an error in the stanza. Cleaning would be the more forgiving choice and the
+wrong one — two different URLs could clean down to one directory, and a shared mirror
+is a shared answer.
+
+### The stack stanza sits outside brain's tip cache
+
+`Brain` caches the git-derived half of each repo against its branch tips. The stack
+stanza cannot live there: a `track` dep moves when a branch in somebody else's repo
+moves, and a mirror whose fetch failed has to be able to say so today, with none of
+our own tips having moved. Folding upstream state into the cache key would mean
+computing that state to decide whether to use the cache, which is the whole cost
+anyway. So the stanza is built fresh on every `/brain`, beside `code` and `activity`.
+
+The cost is two local git calls per repo per request (default branch, then `git show`
+of the manifest) plus one `rev-parse` per dep. A repo with no `.nashcode/stack.toml`
+pays the first two and grows no `stack` key at all — absent, not null, the way
+`architecture` is absent for a repo nobody has drawn.
+
+### Upstream fetches are anonymous
+
+`GIT_TOKEN` is the dgit push token. An upstream is somebody else's server, so
+`upstream_repo` builds its handles with `Auth::default()` and the token is never
+offered to github.com. Our own mirrors keep the token; these do not.
+
+### What a `pin` can and cannot reach
+
+A pin is fetched until `git cat-file -e <pin>^{commit}` says the commit is on disk,
+and then never again — upstream cannot change what a commit says. The fetch itself
+asks for `refs/heads/*` and `refs/tags/*`, which is every commit a normal upstream
+publishes; a pin that upstream has since orphaned is simply never found, and says so
+in `error` rather than retrying forever. Retries are on the same 30-minute interval a
+`track` dep uses, for the same reason: hammering a server that does not have the
+commit will not conjure it.
+
+A `pin` must look like a commit id (4 to 40 hex digits) and a `track` must look like
+a branch name. That is stricter than git — a tag is a legal pin to a person — and it
+is what lets both go straight into a git argument without an escape hatch.
+
+### `Repo::rev_parse` echoes its own flag
+
+`git rev-parse --end-of-options <rev>` prints `--end-of-options` on its own line
+before the id, so `Repo::rev_parse` returns two lines and the second one is the
+answer. Nothing in this work stream owns `git.rs`, so `upstream.rs` calls
+`rev-parse --verify --end-of-options` itself, which prints one line and exits nonzero
+for a revision that is not there. The shared helper is left as found; it is worth a
+look from whoever owns it.
+
+### The clock, and why the stanza also pokes it
+
+A `track` dep goes stale with no push, no webhook and no page load of ours to notice
+— so `Upstreams::watch` ticks every 30 minutes over every configured repo. The first
+tick is immediate, which warms the pins on a cold box; a repo whose own mirror has
+not finished cloning yet has no manifest to read, and the second trigger covers it:
+building the brain stanza starts anything overdue in the background, exactly the way
+`mirror.rs` refreshes behind a page load. `POST /{repo}/stack/sync` is the third
+door, and the only one that waits for the wire.
+
+### Smaller choices
+
+- **One bad `[[dep]]` is one error, not a dead manifest.** Every field deserializes
+  as optional, so a dep missing `name` or declaring both `pin` and `track` shows up
+  in the stanza with its own error while its neighbours are fetched normally. Only
+  TOML that will not parse at all becomes the manifest-level `error`, and then `deps`
+  is empty.
+- **A refused dep is stripped of its mode and its path**, not merely flagged, so
+  there is nothing for a later code path to act on by accident.
+- **The first `[[dep]]` of a repeated name is the one that works.** The duplicate is
+  the one refused, which reads the way a person writing the file would expect.
+- **`POST /{repo}/stack/sync` takes the ordinary origin check.** No exemption: it is
+  a state-changing route like every other, and the CLI and curl send no fetch
+  metadata, so they are unaffected. A repo with no manifest answers
+  `{"repo": ..., "stack": null}` rather than an empty stack, because "declares
+  nothing" and "declares nothing that works" are different answers.
+- **The tests serve real bare repos over git's dumb HTTP protocol** — a bare repo
+  plus `git update-server-info` plus a 40-line static file server on a loopback port.
+  The fetches are real fetches with no network, and the server's request counter is
+  what proves a satisfied pin stops asking.
