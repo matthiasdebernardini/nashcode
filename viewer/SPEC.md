@@ -463,6 +463,47 @@ that language to the in-process graph, never breaks the pipeline.
   The JSON endpoints stay public individually — an agent that knows what it wants
   should not pay for a model round-trip.
 
+## Architecture
+
+A repo tab that answers "what is the shape of this system" — both the shape somebody
+*intends* and the shape the analysis actually *sees*. The loop is agent-driven: an agent
+downloads the full static analysis in one call, draws a mermaid diagram from it, and
+submits the diagram back; the tab renders the latest submission. Humans can submit too;
+the endpoint does not care who is drawing.
+
+- **`GET /:repo/code/graph` — the whole analysis, one call.** Everything the code
+  intelligence indexes know, dumped as one JSON document: the file inventory (path,
+  language, blob SHA), every symbol (name, kind, file, line), and every edge
+  (defines/references/calls). This is the bulk companion to the per-symbol query
+  endpoints — an agent drawing a diagram must not page through `?symbol=` calls to see
+  the graph. When the graph index is absent or a language is unindexed, the dump
+  degrades to what exists (worst case: files only, `symbols: []`), never to an error.
+  The response says what it is: `{"generated_at", "commit", "files", "symbols",
+  "edges"}`.
+- **`POST /:repo/architecture` — submit a diagram.** Body:
+  `{"mermaid": "...", "title": "...", "note": "..."}`; `title` and `note` optional.
+  Author resolution is the comments rule: `Tailscale-User-Login` header, else `local`.
+  The server validates size (64 KiB cap) and stores the text verbatim in SQLite with
+  author and timestamp — it does not parse mermaid; a diagram that will not render is
+  the author's problem, shown as mermaid's own error box. Responds `201` with the
+  stored row. Submissions are append-only history, never edits: `GET
+  /:repo/architecture` with `Accept: application/json` returns the latest, `?history`
+  lists all of them (id, author, created_at, title), `?id=` fetches one.
+- **The tab: `/:repo/architecture`.** Renders the latest submitted diagram, its title,
+  note, author, and age, with a history list to view any earlier submission. When
+  nothing has been submitted, the page falls back to the mermaid blocks of the repo's
+  `ARCHITECTURE.md` if it has one, else shows the `POST` recipe so the empty state
+  teaches the loop.
+- **Mermaid renders client-side, lazy, strict.** The mermaid library loads only on this
+  page (it is an order of magnitude bigger than the whole current bundle — it must not
+  ride along on every page). Diagram text is untrusted user content: mermaid runs with
+  `securityLevel: "strict"`, and the source is delivered to the page as text for the
+  client to render, never spliced into server HTML. Same reasoning as the markdown
+  stored-XSS fix.
+- **Brain sees it.** The per-repo stanza in `GET /brain` grows
+  `architecture: {submissions, latest_at, latest_author}` so "which repos have a drawn
+  design and how stale is it" is one question.
+
 ## Advisor
 
 `lat.md` states the project's rules; the advisor reads a merged diff against them and
