@@ -122,6 +122,10 @@ impl Brain {
             object.insert("stale".to_owned(), serde_json::json!(status.stale));
             object.insert("activity".to_owned(), activity_json(db, name, since));
             object.insert("open_comment_counts".to_owned(), comment_counts(db, name));
+            // Whether this repo has a drawn design, and how stale it is, in one look.
+            if let Some(architecture) = architecture_json(db, name) {
+                object.insert("architecture".to_owned(), architecture);
+            }
             // How much the repo is queryable as code, and how old that answer is.
             object.insert("code".to_owned(), crate::code::brain_stanza(db, name));
         }
@@ -235,6 +239,22 @@ fn activity_json(db: &Db, repo: &str, since: Option<&str>) -> serde_json::Value 
     }
     events.sort_by(|a, b| a["at"].as_str().cmp(&b["at"].as_str()));
     serde_json::Value::Array(events)
+}
+
+/// How many architecture diagrams a repo has, and who drew the newest one.
+///
+/// `None` for a repo nobody has submitted a diagram for, so the key is absent
+/// rather than a stanza of nulls: "has a drawn design" is answered by whether the
+/// key is there at all. `architecture_history` is already ordered newest-first, so
+/// the count and the latest come out of one query.
+fn architecture_json(db: &Db, repo: &str) -> Option<serde_json::Value> {
+    let history = db.architecture_history(repo).unwrap_or_default();
+    let latest = history.first()?;
+    Some(serde_json::json!({
+        "submissions": history.len(),
+        "latest_at": latest.created_at,
+        "latest_author": latest.author,
+    }))
 }
 
 fn comment_counts(db: &Db, repo: &str) -> serde_json::Value {

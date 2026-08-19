@@ -168,10 +168,13 @@ impl Client {
 
     fn finish(r: ureq::http::Response<ureq::Body>) -> Result<Reply> {
         let status = r.status().as_u16();
+        // A truncated stream is a transport failure, not a body. Swallowing it
+        // into placeholder text makes every caller downstream misdiagnose it as
+        // a malformed answer from a server that in fact answered correctly.
         let body = r
             .into_body()
             .read_to_string()
-            .unwrap_or_else(|e| format!("<unreadable body: {e}>"));
+            .context("read the response body")?;
         Ok(Reply { status, body })
     }
 
@@ -310,6 +313,22 @@ impl Client {
         Self::finish(
             self.agent
                 .get(url)
+                .call()
+                .with_context(|| format!("GET {url}"))?,
+        )
+    }
+
+    /// A plain GET that asks for JSON.
+    ///
+    /// `/brain` answers JSON to everyone today, so the header changes nothing
+    /// right now. It is sent anyway because several viewer routes next door do
+    /// content-negotiate, and a client that states what it wants keeps working
+    /// if `/brain` ever grows an HTML face.
+    pub fn get_json(&self, url: &str) -> Result<Reply> {
+        Self::finish(
+            self.agent
+                .get(url)
+                .header("accept", "application/json")
                 .call()
                 .with_context(|| format!("GET {url}"))?,
         )

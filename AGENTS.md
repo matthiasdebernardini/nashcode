@@ -172,6 +172,22 @@ curl -s "$NASHCODE/brain?since=2026-08-18T00:00:00Z"
 
 Read this to answer "what is going on" without a dozen calls.
 
+`nashcode brain [repo]` is the same document, digested — the form to read at the start of
+a session. It keeps the facts and drops the aggregate: branches with tip, ahead count and
+CI state; what the code index holds and how old it is; the plan files and how many comments
+wait on each; the latest architecture submission; and the last five activity entries, one
+line apiece.
+
+```sh
+nashcode brain            # the repo `origin` points at; every repo outside one
+nashcode brain alpha
+nashcode brain --json     # the digest as JSON, not the raw stanza
+```
+
+It always exits 0, so it is safe in a session-start hook: a viewer that is down or not
+configured prints one line saying so and gets out of the way, and `--json` says
+`{"ok": false, "error": "…"}`. Use `curl /brain` when you want the whole document.
+
 `POST /brain/ask` puts Claude in front of the same document for judgment calls.
 
 ```sh

@@ -159,7 +159,11 @@ LLM must be able to use it on reflex, so the syntax is the contract:
   a loopback listener, and `annotate` against a fake plannotator on PATH plus a loopback
   listener: the argv it hands the child, the request line and wire payload it posts, that
   `--json` launches nothing, and both exit codes (0 when there is nowhere to post, nonzero
-  when a post is refused). No test may require network or a real host.
+  when a post is refused), and `brain` against a stanza captured from the viewer's own
+  `GET /brain`: that `--json` emits the digest rather than the stanza, that only the last
+  five activity rows survive, and that every failure path — refused, hung, non-200, not
+  JSON, no viewer configured — is one line and exit 0. No test may require network or a
+  real host.
 
 ## Plans + plannotator
 

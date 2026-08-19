@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common::{
-    Work, get, post_json, spawn_stub, stacked_fixture, testbed_from_config, testbed_with,
+    Work, get, get_json, post_json, spawn_stub, stacked_fixture, testbed_from_config,
+    testbed_with,
 };
 use nashcode::config::Config;
 
@@ -63,6 +64,43 @@ async fn brain_aggregates_two_repos_into_the_documented_shape() {
     assert_eq!(brain["repos"].as_array().expect("repos").len(), 1);
 }
 
+#[tokio::test]
+async fn the_architecture_stanza_counts_submissions_and_names_the_latest() {
+    let root = two_repo_root();
+    let bed = testbed_with(root, &["demo", "other"], BTreeMap::new());
+
+    // A repo nobody has drawn carries no architecture key at all: "has a drawn
+    // design" is answered by the key's presence, not by a stanza of nulls.
+    let (_, body) = get(&bed.router, "/brain?repo=demo").await;
+    let brain: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(brain["repos"][0].get("architecture").is_none(), "{body}");
+
+    for title in ["First", "Second"] {
+        let (status, body) = post_json(
+            &bed.router,
+            "/demo/architecture",
+            serde_json::json!({ "mermaid": "graph TD;\n  a-->b;", "title": title }),
+        )
+        .await;
+        assert_eq!(status, 201, "{body}");
+    }
+    let (_, latest) = get_json(&bed.router, "/demo/architecture").await;
+    let latest: serde_json::Value = serde_json::from_str(&latest).expect("json");
+
+    let (status, body) = get(&bed.router, "/brain?repo=demo").await;
+    assert_eq!(status, 200, "{body}");
+    let brain: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let architecture = &brain["repos"][0]["architecture"];
+    assert_eq!(architecture["submissions"], 2, "{body}");
+    assert_eq!(architecture["latest_author"], latest["author"], "{body}");
+    assert_eq!(architecture["latest_at"], latest["created_at"], "{body}");
+
+    // One repo's diagrams never leak into another's stanza.
+    let (_, body) = get(&bed.router, "/brain?repo=other").await;
+    let brain: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(brain["repos"][0].get("architecture").is_none(), "{body}");
+}
+
 fn asking_bed(root: tempfile::TempDir, stub_url: &str, key: Option<&str>) -> common::TestBed {
     let remotes = root.path().join("remotes");
     let config = Arc::new(Config {
@@ -78,6 +116,9 @@ fn asking_bed(root: tempfile::TempDir, stub_url: &str, key: Option<&str>) -> com
         anthropic_key: key.map(str::to_owned),
         anthropic_url: stub_url.to_owned(),
         brain_model: "claude-opus-5".to_owned(),
+        bugs_bucket: None,
+        bugs_s3_endpoint: None,
+        bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
     });
     testbed_from_config(root, config)
 }

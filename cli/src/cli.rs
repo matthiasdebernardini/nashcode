@@ -279,6 +279,25 @@ It reads GET /<repo>/comments from the viewer, which is a different service
 from dgit and has its own URL. The profile must therefore have a viewer URL;
 `nashcode setup --viewer` records one.")]
     Comments(CommentsArgs),
+
+    /// What the viewer knows about the work in flight, digested.
+    #[command(long_about = "\
+Read the viewer's work state and print the short version.
+
+GET /brain is an aggregate: every branch, every plan, every card and a hundred
+activity rows per repository. This command is the digest of it — branches with
+their tip and CI state, what the code index holds and how old it is, the plan
+files and how many comments wait on them, the latest architecture submission,
+and the last five things that happened. --json emits that digest, not the raw
+stanza; `curl /brain` is still there when you want the whole thing.
+
+The repository defaults to the name `origin` points at. Run it outside a
+repository and it digests every repository the viewer knows.
+
+It always exits 0. This is meant for a session-start hook, so a viewer that is
+down, unreachable, or not yet configured prints one line saying so and gets out
+of the way.")]
+    Brain(BrainArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -603,6 +622,13 @@ pub struct IndexArgs {
     /// Report what the index holds without queueing a new run.
     #[arg(long)]
     pub status: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct BrainArgs {
+    /// Repository on the viewer. Defaults to the name `origin` points at, and
+    /// outside a repository to every repository the viewer knows.
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Args)]

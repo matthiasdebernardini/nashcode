@@ -1,0 +1,170 @@
+{
+  "generated_at": "2026-08-19T12:00:00Z",
+  "repos": [
+    {
+      "activity": [
+        {
+          "at": "2026-08-11T00:00:00Z",
+          "author": "local",
+          "branch": "main",
+          "file": "plans/api.md",
+          "line": null,
+          "type": "comment"
+        },
+        {
+          "at": "2026-08-12T00:00:00Z",
+          "author": "local",
+          "branch": "main",
+          "file": "plans/api.md",
+          "line": null,
+          "type": "comment"
+        },
+        {
+          "at": "2026-08-13T00:00:00Z",
+          "author": "local",
+          "branch": "main",
+          "file": "plans/api.md",
+          "line": null,
+          "type": "comment"
+        },
+        {
+          "at": "2026-08-14T00:00:00Z",
+          "author": "local",
+          "branch": "main",
+          "file": "plans/api.md",
+          "line": null,
+          "type": "comment"
+        },
+        {
+          "at": "2026-08-15T00:00:00Z",
+          "author": "local",
+          "branch": "main",
+          "file": "plans/api.md",
+          "line": null,
+          "type": "comment"
+        },
+        {
+          "at": "2026-08-16T00:00:00Z",
+          "author": "local",
+          "branch": "main",
+          "file": "plans/api.md",
+          "line": null,
+          "type": "comment"
+        },
+        {
+          "at": "2026-08-17T00:00:00Z",
+          "author": "local",
+          "branch": "main",
+          "file": "plans/api.md",
+          "line": null,
+          "type": "comment"
+        },
+        {
+          "at": "2026-08-18T00:00:00Z",
+          "author": "ci",
+          "branch": "main",
+          "commit": "f26f8edd2299f8b642d5e955a3a1087f1b138f7c",
+          "status": "passed",
+          "type": "ci_run"
+        },
+        {
+          "at": "2026-08-19T00:00:00Z",
+          "author": "ci",
+          "branch": "part-1",
+          "commit": "0214c77cb99a59d17dd4e23877d0492535225eca",
+          "status": "failed",
+          "type": "ci_run"
+        }
+      ],
+      "architecture": {
+        "latest_at": "2026-08-19T10:00:00Z",
+        "latest_author": "local",
+        "submissions": 3
+      },
+      "available": true,
+      "branches": [
+        {
+          "ahead": 1,
+          "branch": "feature-x",
+          "ci": "none",
+          "parent": "main",
+          "tip": "3122a65aeea2d4faa5c3e05bd0f7dc45c3d03416"
+        },
+        {
+          "ahead": 0,
+          "branch": "main",
+          "ci": "passed",
+          "parent": null,
+          "tip": "f26f8edd2299f8b642d5e955a3a1087f1b138f7c"
+        },
+        {
+          "ahead": 1,
+          "branch": "part-1",
+          "ci": "failed",
+          "parent": "main",
+          "tip": "0214c77cb99a59d17dd4e23877d0492535225eca"
+        },
+        {
+          "ahead": 1,
+          "branch": "part-2",
+          "ci": "none",
+          "parent": "part-1",
+          "tip": "d4c7a161000512dbc3915466b66f6976ce73fcc9"
+        }
+      ],
+      "cards": {
+        "doing": [
+          {
+            "assignee": null,
+            "path": "tasks/one.md",
+            "refs": {
+              "branch": "part-1",
+              "plan": null,
+              "tasks": []
+            },
+            "title": "One"
+          }
+        ]
+      },
+      "code": {
+        "age_seconds": 259200,
+        "chunks": 5,
+        "commit": "f26f8edd2299f8b642d5e955a3a1087f1b138f7c",
+        "embedded_chunks": 5,
+        "files": 5,
+        "indexed": true,
+        "last_indexed_at": "2026-08-16T12:00:00Z",
+        "note": "",
+        "symbols": 0
+      },
+      "default_branch": "main",
+      "name": "demo",
+      "open_comment_counts": {
+        "plans/api.md": 7
+      },
+      "plans": [
+        {
+          "path": "plans/api.md",
+          "refs": {
+            "branch": "part-1",
+            "plan": null,
+            "tasks": []
+          },
+          "summary": "Ship it.",
+          "title": "API plan"
+        },
+        {
+          "path": "plans/board.md",
+          "refs": {
+            "branch": null,
+            "plan": null,
+            "tasks": []
+          },
+          "summary": "Nothing yet.",
+          "title": "Board"
+        }
+      ],
+      "stale": false
+    }
+  ]
+}
