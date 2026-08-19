@@ -80,13 +80,22 @@ function mountDiffs() {
  * failed or skipped highlight leaves a working, linkable file behind.
  */
 
-/** `#L10` / `#L10-L20` -> [10, 20]; anything else -> null. */
-function parseLineRange(hash) {
+/**
+ * `#L10` / `#L10-L20` -> [10, 20]; anything else -> null.
+ *
+ * `count` clamps the range to the lines that exist. A hand-typed `#L0` or `#L99999`
+ * used to index past the ends of the array and throw, and one throw here would take
+ * the whole blob enhancement down with it — highlighting included.
+ */
+function parseLineRange(hash, count) {
   const match = /^#L(\d+)(?:-L?(\d+))?$/.exec(hash || "");
   if (!match) return null;
-  const start = Number(match[1]);
-  const end = match[2] ? Number(match[2]) : start;
-  return start <= end ? [start, end] : [end, start];
+  let start = Number(match[1]);
+  let end = match[2] ? Number(match[2]) : start;
+  if (start > end) [start, end] = [end, start];
+  start = Math.max(1, start);
+  end = Math.min(count, end);
+  return start <= end ? [start, end] : null;
 }
 
 function mountBlob() {
@@ -100,14 +109,14 @@ function mountBlob() {
   let anchor = null;
 
   function paint(scroll) {
-    const range = parseLineRange(window.location.hash);
+    const range = parseLineRange(window.location.hash, lines.length);
     for (const line of lines) line.classList.remove("is-highlighted");
     if (!range) return null;
     const [start, end] = range;
-    for (let n = start; n <= end && n <= lines.length; n += 1) {
+    for (let n = start; n <= end; n += 1) {
       lines[n - 1].classList.add("is-highlighted");
     }
-    if (scroll && lines[start - 1]) {
+    if (scroll) {
       lines[start - 1].scrollIntoView({ block: "center" });
     }
     return range;
@@ -123,6 +132,7 @@ function mountBlob() {
     if (!gutter) return;
     event.preventDefault();
     const line = Number(gutter.dataset.line);
+    if (!Number.isInteger(line) || line < 1 || line > lines.length) return;
     if (event.shiftKey && anchor && anchor !== line) {
       history.replaceState(null, "", `#L${Math.min(anchor, line)}-L${Math.max(anchor, line)}`);
     } else {
@@ -246,10 +256,16 @@ function mountBoard() {
 // The composer's optional "line" input is plain HTML; nothing to wire yet beyond
 // keeping the form usable without JS. Deliberately no framework.
 
+// Each enhancement stands alone: one that throws must not take the others with it.
+// The server-rendered page underneath every one of them is already correct.
 function mountAll() {
-  mountDiffs();
-  mountBlob();
-  mountBoard();
+  for (const mount of [mountDiffs, mountBlob, mountBoard]) {
+    try {
+      mount();
+    } catch (error) {
+      console.warn(`nashcode: ${mount.name} failed`, error);
+    }
+  }
 }
 
 // A bundle this large can finish evaluating after DOMContentLoaded has already
