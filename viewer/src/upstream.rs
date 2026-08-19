@@ -4,22 +4,27 @@
 //! copy of each dependency beside its own mirrors. Three rules shape the module.
 //!
 //! **Nothing is fetched unless the repo said something we understand.** A URL that is
-//! not `http` or `https`, a `[[dep]]` that pins and tracks at once, a name that could be
-//! a path — each becomes an error recorded against that dep, and no request is ever made
-//! for it. A manifest that will not parse at all leaves every other feature of the repo
-//! alone: the error travels in the brain stanza and nothing else changes. A repo with no
-//! manifest has no stack, and pays one lookup for the privilege.
+//! not `https` — or plain `http` to anywhere but this box — a `[[dep]]` that pins and
+//! tracks at once, a name that could be a path: each becomes an error recorded against
+//! that dep, and no request is ever made for it. A manifest that will not parse at all
+//! leaves every other feature of the repo alone: the error travels in the brain stanza
+//! and nothing else changes. A repo with no manifest has no stack, and pays one lookup
+//! for the privilege.
 //!
 //! **One mirror per clone URL, for the whole box.** The mirror directory is derived from
 //! the URL — `<mirrors>/up/<host>/<path>.git` — so two repos declaring the same
 //! dependency share one copy. Every path component is checked against a conservative
 //! ASCII set rather than rewritten: a URL that cannot be spelled as a directory is
-//! refused, because rewriting it would let two different URLs collapse onto one mirror.
+//! refused, because rewriting it would let two different URLs collapse onto one mirror,
+//! and a shared mirror is a shared answer. See [`locate`] for the collisions that rule
+//! exists to prevent.
 //!
 //! **Never block, never fail.** [`Upstreams::stack`] reports what is on disk and starts
 //! whatever is due behind the caller's back, the way [`crate::mirror`] does; a fetch that
 //! cannot reach the server leaves the mirror in place and records why. Only
-//! [`Upstreams::sync`] waits, because its caller asked for the wire.
+//! [`Upstreams::sync`] waits, because its caller asked for the wire — and even it keeps
+//! a budget, since one route anyone can call in a loop is otherwise an amplifier aimed
+//! at somebody else's server.
 //!
 //! Upstream mirrors are read-only everywhere. Nothing here pushes, and they are not in
 //! `config.repos`, so no repo route, listing, or write path can name one. They are also
@@ -29,6 +34,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -45,6 +51,15 @@ pub const MANIFEST_PATH: &str = ".nashcode/stack.toml";
 /// still missing waits before trying again. Upstreams are somebody else's repo: half an
 /// hour is fresh enough to notice drift and slow enough to be a good neighbour.
 pub const TRACK_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// How long `POST /{repo}/stack/sync` waits before it will go to the wire again for the
+/// same mirror.
+///
+/// Sync exists because half an hour is sometimes too long. Without a budget it is also
+/// an amplifier: one endpoint anyone on the tailnet can call in a loop, pointed at a
+/// third party's server. A minute keeps "I need it now" honest and keeps us a good
+/// neighbour.
+pub const SYNC_DEBOUNCE: Duration = Duration::from_secs(60);
 
 // ---- the manifest ----------------------------------------------------------------
 
@@ -86,9 +101,20 @@ pub struct Dep {
     pub layer: Option<String>,
     /// `None` when the declaration is unusable; `error` says why.
     pub mode: Option<Mode>,
-    /// Where this URL's mirror lives. `None` when the URL was refused.
-    pub path: Option<PathBuf>,
+    /// Where this URL's mirror lives and how git reaches it. `None` when the URL was
+    /// refused.
+    pub location: Option<Location>,
     pub error: Option<String>,
+}
+
+/// A resolved upstream: the mirror directory, and the URL git is handed to fill it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Location {
+    /// `<mirrors>/up/<host>/<path>.git` — also the per-URL dedup key.
+    pub path: PathBuf,
+    /// The clone URL as the parser normalized it. The manifest's own string never
+    /// reaches git's argv.
+    pub remote: String,
 }
 
 /// A parsed `.nashcode/stack.toml`.
@@ -132,12 +158,12 @@ pub fn parse(mirrors: &Path, raw: &str) -> Manifest {
         let layer = raw.layer.map(|layer| layer.trim().to_owned()).filter(|l| !l.is_empty());
         let duplicate = deps.iter().any(|other| other.name == name);
 
-        let mut dep = Dep { name, url, layer, mode: None, path: None, error: None };
+        let mut dep = Dep { name, url, layer, mode: None, location: None, error: None };
         dep.error = validate(&mut dep, mirrors, raw.pin, raw.track, duplicate);
         if dep.error.is_some() {
             // Belt and braces: nothing downstream may act on a dep we refused.
             dep.mode = None;
-            dep.path = None;
+            dep.location = None;
         }
         deps.push(dep);
     }
@@ -180,33 +206,67 @@ fn validate(
         _ => return Some("declares neither pin nor track; pick one".to_owned()),
     };
 
-    match mirror_path(mirrors, &dep.url) {
-        Ok(path) => dep.path = Some(path),
+    match locate(mirrors, &dep.url) {
+        Ok(location) => dep.location = Some(location),
         Err(why) => return Some(why),
     }
     None
 }
 
-/// Where a clone URL's mirror lives, under `<mirrors>/up/`.
+/// Resolve a clone URL into its mirror directory under `<mirrors>/up/`.
 ///
 /// The URL is the key: the host and its path become the directory, so two repos naming
 /// the same dependency share one mirror and the box never holds two copies of celld.
 /// Normalization is the small, documented set — the scheme and host are lowered by the
-/// URL parser, a trailing `/` and a trailing `.git` come off — so
+/// URL parser, one trailing `/` and then a trailing `.git` come off — so
 /// `https://GitHub.com/a/b.git/` and `https://github.com/a/b` are one mirror.
 ///
-/// Every component is then checked, not cleaned. A URL carrying `..`, a leading dash, a
+/// Everything else is checked, not cleaned. A URL carrying `..`, a leading dash, a
 /// percent escape or anything else outside a conservative ASCII set is refused: the dep
 /// records the error and is never fetched. Cleaning would be worse than refusing, since
-/// two different URLs could clean down to the same directory.
-pub fn mirror_path(mirrors: &Path, url: &str) -> Result<PathBuf, String> {
-    let parsed = Url::parse(url).map_err(|error| format!("url {url:?} does not parse: {error}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
+/// two different URLs could clean down to the same directory, and a shared mirror is a
+/// shared answer.
+///
+/// Three refusals are worth naming, because each one is a collision the earlier, looser
+/// rule allowed:
+///
+/// - A path whose last segment is empty after the suffixes come off — `.../a/.git` —
+///   would land on `.../a`, which belongs to a different URL.
+/// - A path segment that itself ends in `.git` — `.../a/b.git/c` — would put a plain
+///   directory exactly where `.../a/b`'s mirror goes, and nothing could ever clone there
+///   again.
+/// - Credentials in the URL. Mirrors are shared between repos and fetched anonymously,
+///   so a password in one repo's manifest has no business keying a mirror everyone uses.
+///
+/// Plain `http` is accepted only for loopback, which is what the tests and a local dgit
+/// use. Everything off this box must be `https`: without that rule an `http` spelling of
+/// a URL somebody else declared over `https` would silently downgrade the transport of
+/// the mirror they share.
+pub fn locate(mirrors: &Path, url: &str) -> Result<Location, String> {
+    let mut parsed =
+        Url::parse(url).map_err(|error| format!("url {url:?} does not parse: {error}"))?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if is_loopback(&parsed) => {}
+        "http" => {
+            return Err(format!(
+                "url {url:?} is plain http to a host that is not this one; an upstream \
+                 off this box must be https"
+            ));
+        }
+        other => {
+            return Err(format!(
+                "url {url:?} is {other}, and only http and https are ever fetched"
+            ));
+        }
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(format!(
-            "url {url:?} is {}, and only http and https are ever fetched",
-            parsed.scheme()
+            "url {url:?} carries credentials, and an upstream mirror is shared and \
+             fetched anonymously"
         ));
     }
+
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
     if !is_safe_segment(&host) {
         return Err(format!("url {url:?} has no host a directory can be named after"));
@@ -218,8 +278,14 @@ pub fn mirror_path(mirrors: &Path, url: &str) -> Result<PathBuf, String> {
         None => host,
     };
 
-    let path = parsed.path().trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
+    // One trailing slash, then the `.git` suffix, in that order: `.../b.git/` is both.
+    // Exactly one slash at each end, never a run of them — `.../a/.git` has to keep the
+    // empty last segment that gets it refused below, and `//a` has to keep the empty
+    // first one, rather than either quietly becoming `.../a`.
+    let path = parsed.path();
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let path = path.strip_prefix('/').unwrap_or(path);
     if path.is_empty() {
         return Err(format!("url {url:?} names a host but no repository"));
     }
@@ -227,12 +293,35 @@ pub fn mirror_path(mirrors: &Path, url: &str) -> Result<PathBuf, String> {
     let mut full = mirrors.join("up").join(authority);
     for segment in path.split('/') {
         if !is_safe_segment(segment) {
-            return Err(format!("url {url:?} has a path segment {segment:?} that cannot be a directory"));
+            return Err(format!(
+                "url {url:?} has a path segment {segment:?} that cannot be a directory"
+            ));
+        }
+        if segment.ends_with(".git") {
+            return Err(format!(
+                "url {url:?} has a path segment {segment:?} that would sit where \
+                 another mirror goes"
+            ));
         }
         full.push(segment);
     }
     full.as_mut_os_string().push(".git");
-    Ok(full)
+
+    // A clone URL is a path, not a query. Dropping both keeps two spellings of one repo
+    // from reaching git as two different remotes.
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Ok(Location { path: full, remote: parsed.into() })
+}
+
+/// Is this host on the box we are running on? The only place plain `http` is allowed.
+fn is_loopback(parsed: &Url) -> bool {
+    match parsed.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
 }
 
 /// A directory component that cannot be anything but itself: no separator, no traversal,
@@ -263,8 +352,11 @@ fn is_plain_name(name: &str) -> bool {
 
 /// An abbreviated or full commit id. Anything else — a tag, a branch, a flag — is
 /// refused, so a pin can be handed to `git cat-file` without an escape hatch.
+///
+/// Seven digits is the floor because four is ambiguous in any repo worth pinning, and a
+/// pin that resolves to the wrong commit is worse than one that will not parse.
 fn is_commit_ish(pin: &str) -> bool {
-    (4..=40).contains(&pin.len()) && pin.bytes().all(|byte| byte.is_ascii_hexdigit())
+    (7..=40).contains(&pin.len()) && pin.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// A branch name git would accept, minus the parts of the grammar that would let a
@@ -337,6 +429,9 @@ pub struct Upstreams {
     state: Arc<Mutex<HashMap<PathBuf, MirrorState>>>,
     /// One lock per mirror, so two repos declaring the same dep never fetch it twice.
     locks: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
+    /// [`SYNC_DEBOUNCE`] in milliseconds, shared by every clone of the handle. A knob
+    /// rather than a constant only so a test can stand on both sides of it.
+    sync_debounce: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for Upstreams {
@@ -351,16 +446,44 @@ impl Upstreams {
             config,
             state: Arc::new(Mutex::new(HashMap::new())),
             locks: Arc::new(Mutex::new(HashMap::new())),
+            sync_debounce: Arc::new(AtomicU64::new(SYNC_DEBOUNCE.as_millis() as u64)),
         }
     }
 
-    /// The manifest a repo declares at its default-branch tip. `None` when there is no
-    /// `.nashcode/stack.toml`: the repo has no stack and pays one `git show` to say so.
+    /// How long `sync` waits before going back to the wire for one mirror.
+    pub fn sync_debounce(&self) -> Duration {
+        Duration::from_millis(self.sync_debounce.load(Ordering::Relaxed))
+    }
+
+    /// Move the sync rate limit, on every clone of this handle at once.
+    pub fn set_sync_debounce(&self, window: Duration) {
+        self.sync_debounce.store(window.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// The manifest a repo declares at its default-branch tip.
+    ///
+    /// `None` means the repo has no `.nashcode/stack.toml` — no stack, no cost beyond
+    /// the lookup that said so. A git error is *not* that: it comes back as a manifest
+    /// whose `error` says what git said, because a mirror having a bad minute must not
+    /// look like a repo that never declared anything.
     pub async fn manifest(&self, repo: &Repo) -> Option<Manifest> {
-        let branch = repo.default_branch().await.ok()?;
-        let raw = repo.show_file(&branch, MANIFEST_PATH).await.ok()??;
-        let raw = String::from_utf8_lossy(&raw).into_owned();
-        Some(parse(&self.config.mirrors, &raw))
+        let failed = |error: crate::git::GitError| {
+            Some(Manifest {
+                deps: Vec::new(),
+                error: Some(format!("cannot read {MANIFEST_PATH}: {error}")),
+            })
+        };
+        let branch = match repo.default_branch().await {
+            Ok(branch) => branch,
+            Err(error) => return failed(error),
+        };
+        match repo.show_file(&branch, MANIFEST_PATH).await {
+            Ok(None) => None,
+            Ok(Some(raw)) => {
+                Some(parse(&self.config.mirrors, &String::from_utf8_lossy(&raw)))
+            }
+            Err(error) => failed(error),
+        }
     }
 
     /// The repo's stack as it stands on disk, with anything due started in the
@@ -375,7 +498,9 @@ impl Upstreams {
     }
 
     /// The same, on the wire and on the caller's own time. `POST /{repo}/stack/sync`
-    /// and the background clock use this; a page load must not.
+    /// and the background clock use this; a page load must not. It skips the half-hour
+    /// interval but keeps [`SYNC_DEBOUNCE`]: inside that window the answer is what is
+    /// already on disk.
     pub async fn sync(&self, repo: &Repo) -> Option<Stack> {
         let manifest = self.manifest(repo).await?;
         for dep in &manifest.deps {
@@ -428,13 +553,29 @@ impl Upstreams {
             last_fetched: None,
             error: dep.error.clone(),
         };
-        let (Some(path), Some(mode)) = (&dep.path, &dep.mode) else { return state };
+        let (Some(location), Some(mode)) = (&dep.location, &dep.mode) else { return state };
 
-        state.have = resolve(path, mode).await;
-        let mirror = self.state.lock().await.get(path).cloned().unwrap_or_default();
-        state.last_fetched = mirror.last_success;
+        state.have = resolve(&location.path, mode).await;
+        let mirror = self.state.lock().await.get(&location.path).cloned().unwrap_or_default();
+        state.last_fetched = mirror.last_success.clone();
+
+        let pinned = matches!(mode, Mode::Pin(_));
         if state.error.is_none() {
-            state.error = mirror.last_error;
+            match (pinned, &state.have) {
+                // A pin that is on disk is finished. Another dep tracking a branch in
+                // the same mirror can fail all it likes; this one already has its
+                // commit, and "then never again" would mean nothing otherwise.
+                (true, Some(_)) => {}
+                // A pin the mirror has fetched and still cannot answer is not stale, it
+                // is wrong: upstream does not publish that commit on any branch or tag.
+                (true, None) if mirror.last_success.is_some() && mirror.last_error.is_none() => {
+                    state.error = Some(format!(
+                        "pin {} is not in the upstream's branches or tags",
+                        mode.want()
+                    ));
+                }
+                _ => state.error = mirror.last_error,
+            }
         }
         state.fresh = state.have.is_some() && state.error.is_none();
         state
@@ -444,11 +585,11 @@ impl Upstreams {
     /// guard is the mirror's own lock, taken without waiting and held for the length of
     /// the fetch, exactly as [`crate::mirror::Mirrors`] does it.
     async fn spawn_refresh(&self, dep: &Dep) {
-        let Some(path) = dep.path.clone() else { return };
+        let Some(location) = dep.location.clone() else { return };
         if !self.due(dep).await {
             return;
         }
-        let Ok(guard) = self.lock_for(&path).await.try_lock_owned() else {
+        let Ok(guard) = self.lock_for(&location.path).await.try_lock_owned() else {
             return;
         };
         let upstreams = self.clone();
@@ -459,24 +600,29 @@ impl Upstreams {
         });
     }
 
-    /// Refresh one dep and wait. `force` skips the interval, which is what "sync now"
-    /// means; it never skips the pin rule, because a pin already on disk is as fresh as
-    /// a pin can ever be.
+    /// Refresh one dep and wait. `force` is "sync now": it skips the half-hour interval,
+    /// but not the pin rule and not the sync budget.
     async fn refresh(&self, dep: &Dep, force: bool) {
-        let Some(path) = dep.path.clone() else { return };
+        let Some(location) = dep.location.clone() else { return };
         if !force && !self.due(dep).await {
             return;
         }
-        let lock = self.lock_for(&path).await;
+        let lock = self.lock_for(&location.path).await;
         let _guard = lock.lock().await;
+
         // Checked again under the lock: a fetch we queued behind may have satisfied the
         // pin, and then this one has nothing to ask for.
-        if !force && !self.due(dep).await {
+        if let Some(Mode::Pin(pin)) = &dep.mode
+            && has_commit(&location.path, pin).await
+        {
             return;
         }
-        if let Some(Mode::Pin(pin)) = &dep.mode
-            && has_commit(&path, pin).await
-        {
+        if force {
+            let state = self.state.lock().await.get(&location.path).cloned().unwrap_or_default();
+            if state.last_attempt.is_some_and(|at| at.elapsed() < self.sync_debounce()) {
+                return; // Inside the budget. The answer is what is already on disk.
+            }
+        } else if !self.due(dep).await {
             return;
         }
         self.fetch_dep(dep).await;
@@ -492,13 +638,13 @@ impl Upstreams {
         if dep.error.is_some() {
             return false;
         }
-        let (Some(path), Some(mode)) = (&dep.path, &dep.mode) else { return false };
+        let (Some(location), Some(mode)) = (&dep.location, &dep.mode) else { return false };
         if let Mode::Pin(pin) = mode
-            && has_commit(path, pin).await
+            && has_commit(&location.path, pin).await
         {
             return false;
         }
-        let state = self.state.lock().await.get(path).cloned().unwrap_or_default();
+        let state = self.state.lock().await.get(&location.path).cloned().unwrap_or_default();
         state.last_attempt.is_none_or(|at| at.elapsed() >= TRACK_INTERVAL)
     }
 
@@ -512,15 +658,17 @@ impl Upstreams {
     /// Every failure becomes state, not an error: the mirror on disk keeps answering and
     /// the stanza says why it may be behind.
     async fn fetch_dep(&self, dep: &Dep) {
-        let Some(path) = &dep.path else { return };
+        let Some(location) = &dep.location else { return };
         if dep.error.is_some() {
             return;
         }
-        let outcome = fetch(&dep.url, path).await;
+        // The normalized remote, never `dep.url`: the manifest's own string is raw input
+        // and this is a git argument.
+        let outcome = fetch(&location.remote, &location.path).await;
 
         let now = crate::db::now();
         let mut states = self.state.lock().await;
-        let state = states.entry(path.clone()).or_default();
+        let state = states.entry(location.path.clone()).or_default();
         state.last_attempt = Some(Instant::now());
         match outcome {
             Ok(()) => {
@@ -543,9 +691,20 @@ fn upstream_repo(path: &Path) -> Repo {
     Repo::mirror(path, Auth::default())
 }
 
+/// Is there a real repository here?
+///
+/// A bare mirror always has a `HEAD` file, and a plain directory does not. Deciding
+/// clone-versus-fetch on the directory alone would mean anything that ever left a
+/// directory at a mirror's address — a URL rule looser than today's, an interrupted
+/// clone — is fetched into forever, fails forever, and never heals. This way it fails a
+/// clone, says so in the stanza, and can be removed by hand.
+fn is_repo(path: &Path) -> bool {
+    path.join("HEAD").is_file()
+}
+
 /// Is this commit already in the mirror? A pin that answers yes is finished forever.
 async fn has_commit(path: &Path, pin: &str) -> bool {
-    if !path.exists() {
+    if !is_repo(path) {
         return false;
     }
     upstream_repo(path)
@@ -557,7 +716,7 @@ async fn has_commit(path: &Path, pin: &str) -> bool {
 /// The full commit id the mirror answers the declared revision with, or `None` when it
 /// does not have it yet.
 async fn resolve(path: &Path, mode: &Mode) -> Option<String> {
-    if !path.exists() {
+    if !is_repo(path) {
         return None;
     }
     let rev = match mode {
@@ -568,15 +727,7 @@ async fn resolve(path: &Path, mode: &Mode) -> Option<String> {
         // its heads.
         Mode::Track(branch) => format!("refs/heads/{branch}^{{commit}}"),
     };
-    // `--verify` rather than [`Repo::rev_parse`]: plain `git rev-parse` echoes
-    // `--end-of-options` back on its own line before the id, and this answer is a
-    // commit somebody reads. `--verify` also turns "no such revision" into a nonzero
-    // exit instead of a string that looks like an answer.
-    let resolved = upstream_repo(path)
-        .run(&["rev-parse", "--verify", "--end-of-options", &rev])
-        .await
-        .ok()?;
-    let resolved = resolved.trim().to_owned();
+    let resolved = upstream_repo(path).rev_parse(&rev).await.ok()?;
     (!resolved.is_empty()).then_some(resolved)
 }
 
@@ -585,7 +736,7 @@ async fn resolve(path: &Path, mode: &Mode) -> Option<String> {
 /// stalled transfer gives up instead of hanging, and one ref transaction so a reader
 /// never sees half a fetch.
 async fn fetch(url: &str, path: &Path) -> Result<(), String> {
-    if !path.exists() {
+    if !is_repo(path) {
         return clone_mirror(url, path, &Auth::default()).await.map_err(|error| error.to_string());
     }
     upstream_repo(path)
@@ -619,6 +770,11 @@ mod tests {
 
     const MIRRORS: &str = "/srv/mirrors";
 
+    /// The mirror directory a URL resolves to, or `None` if it is refused.
+    fn path_of(url: &str) -> Option<PathBuf> {
+        locate(Path::new(MIRRORS), url).ok().map(|location| location.path)
+    }
+
     #[test]
     fn a_hostile_url_never_becomes_a_path_outside_the_up_directory() {
         // `git clone` would happily take any of these.
@@ -639,33 +795,73 @@ mod tests {
             "",
         ];
         for url in hostile {
-            match mirror_path(Path::new(MIRRORS), url) {
-                Err(_) => {}
-                Ok(path) => {
-                    let shown = path.to_string_lossy().into_owned();
-                    assert!(
-                        path.starts_with("/srv/mirrors/up") && !shown.contains(".."),
-                        "{url} escaped to {shown}"
-                    );
-                }
-            }
+            let Some(path) = path_of(url) else { continue };
+            let shown = path.to_string_lossy().into_owned();
+            assert!(
+                path.starts_with("/srv/mirrors/up") && !shown.contains(".."),
+                "{url} escaped to {shown}"
+            );
         }
     }
 
     #[test]
     fn one_url_is_one_mirror_however_it_is_spelled() {
-        let of = |url: &str| mirror_path(Path::new(MIRRORS), url).expect(url);
+        let of = |url: &str| path_of(url).expect(url);
         let want = PathBuf::from("/srv/mirrors/up/github.com/littledivy/dgit.git");
         assert_eq!(of("https://github.com/littledivy/dgit"), want);
         assert_eq!(of("https://GitHub.com/littledivy/dgit.git"), want);
         assert_eq!(of("https://github.com/littledivy/dgit.git/"), want);
-        assert_eq!(of("http://github.com/littledivy/dgit"), want);
+        assert_eq!(of("https://github.com/littledivy/dgit/"), want);
+        assert_eq!(of("https://github.com/littledivy/dgit?ref=x#frag"), want);
 
         // A port is part of the identity: two servers on one host are two upstreams.
         assert_eq!(
             of("http://127.0.0.1:8199/srv.git"),
             PathBuf::from("/srv/mirrors/up/127.0.0.1:8199/srv.git")
         );
+    }
+
+    #[test]
+    fn git_is_handed_the_normalized_url_not_the_manifests_own_string() {
+        let location = locate(Path::new(MIRRORS), "https://GitHub.com/a/b.git?ref=x#frag")
+            .expect("locates");
+        assert_eq!(location.remote, "https://github.com/a/b.git");
+    }
+
+    #[test]
+    fn no_spelling_of_one_repo_can_land_on_another_repos_mirror() {
+        // Each of these used to collapse onto a directory that belongs to the URL
+        // beside it. The last one is the worst: a plain directory where a mirror goes
+        // fails every clone after it, forever.
+        assert_ne!(path_of("https://github.com/a/.git"), path_of("https://github.com/a"));
+        assert_eq!(path_of("https://github.com/a/.git"), None);
+
+        assert_ne!(path_of("https://github.com/a/b/.."), path_of("https://github.com/a/b"));
+
+        assert_eq!(path_of("https://github.com/a/b.git/c"), None);
+        assert_eq!(path_of("https://github.com//a"), None);
+        assert_eq!(path_of("https://github.com/a//b"), None);
+        assert_eq!(
+            path_of("https://github.com/a/b"),
+            Some(PathBuf::from("/srv/mirrors/up/github.com/a/b.git"))
+        );
+    }
+
+    #[test]
+    fn plain_http_is_for_this_box_only_and_credentials_are_never_a_key() {
+        for local in ["http://127.0.0.1:9/a/b", "http://localhost/a/b", "http://127.9.9.9/a/b"] {
+            assert!(path_of(local).is_some(), "{local} was refused");
+        }
+        // Off the box, `http` would silently downgrade the transport of a mirror that
+        // another repo declared over `https`. They share one directory.
+        for remote in ["http://github.com/a/b", "http://10.1.2.3/a/b", "http://[2001:db8::1]/a/b"]
+        {
+            let why = locate(Path::new(MIRRORS), remote).expect_err(remote);
+            assert!(why.contains("must be https"), "{remote} gave {why:?}");
+        }
+        let why = locate(Path::new(MIRRORS), "https://user:pass@github.com/a/b")
+            .expect_err("credentials");
+        assert!(why.contains("credentials"), "{why:?}");
     }
 
     #[test]
@@ -693,7 +889,10 @@ layer = "runtime"
         assert_eq!(dgit.error, None);
         assert_eq!(dgit.mode, Some(Mode::Pin("1a2b3c4".to_owned())));
         assert_eq!(dgit.layer.as_deref(), Some("server"));
-        assert_eq!(dgit.path, Some(PathBuf::from("/srv/mirrors/up/github.com/littledivy/dgit.git")));
+        assert_eq!(
+            dgit.location.as_ref().map(|location| location.path.clone()),
+            Some(PathBuf::from("/srv/mirrors/up/github.com/littledivy/dgit.git"))
+        );
 
         let celld = &manifest.deps[1];
         assert_eq!(celld.mode, Some(Mode::Track("main".to_owned())));
@@ -721,13 +920,22 @@ pin = "main""#, "commit id"),
             (r#"name = "a"
 url = "https://h/a"
 track = "--upload-pack=touch""#, "branch name"),
+            (r#"name = "a"
+url = "https://h/a"
+pin = "1a2b3c""#, "commit id"),
+            (r#"name = "a"
+url = "http://github.com/a/b"
+track = "main""#, "must be https"),
+            (r#"name = "a"
+url = "https://user:pass@h/a"
+track = "main""#, "credentials"),
         ];
         for (body, expected) in cases {
             let manifest = parse(Path::new(MIRRORS), &format!("[[dep]]\n{body}\n"));
             let dep = &manifest.deps[0];
             let error = dep.error.as_deref().unwrap_or_default();
             assert!(error.contains(expected), "{body}\ngave {error:?}, wanted {expected:?}");
-            assert_eq!(dep.path, None, "{body} kept a mirror path");
+            assert_eq!(dep.location, None, "{body} kept a mirror path");
         }
     }
 

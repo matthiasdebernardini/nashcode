@@ -7,7 +7,9 @@
 //! The background clock refreshes tracked deps every half hour and the brain stanza
 //! starts anything overdue behind the caller's back. This route is the third door: the
 //! one an agent knocks on when half an hour is too long to wait. It fetches inline, so
-//! the answer already reflects the wire.
+//! the answer already reflects the wire — subject to
+//! [`SYNC_DEBOUNCE`](crate::upstream::SYNC_DEBOUNCE), because a route anyone can call in
+//! a loop, pointed at somebody else's server, needs a budget.
 
 use topcoat::Result;
 use topcoat::context::Cx;
