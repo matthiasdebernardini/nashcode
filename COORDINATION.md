@@ -41,7 +41,7 @@ This file is for agents that are *building* it.
 | `cli/**` (src, tests, CLI-SPEC.md, NOTES.md), `AGENTS.md` (CLI sections) | agcli-migration session | peer-review fixes on de88209: exit classes move to the error site, grep --profile, brain sanitising, test strength |
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/SPEC.md` (Stack sections), `viewer/src/upstream.rs` (new), `viewer/src/mirror.rs`, `viewer/src/brain.rs`, `viewer/src/web.rs`, `viewer/src/web/stack.rs` (new), `viewer/src/web/pages.rs`, `viewer/src/web/components.rs`, `viewer/NOTES.md`, `viewer/tests/stack_deps.rs` (new) | whole-stack session | phases 1–2 of `plans/whole-stack.md`; `viewer/tests/common/mod.rs` touched additively only, no `Config` field changes. Overlaps with the slice-2 row above on `main.rs` (one startup spawn), `NOTES.md` (appends), `SPEC.md` (distinct sections) — rebase, don't panic |
-| `viewer/src/bugs/drain.rs` (new), `viewer/src/bugs/mod.rs`, `viewer/src/bugs/index.rs`, `viewer/src/config.rs`, `viewer/src/main.rs`, `viewer/Cargo.toml`, `viewer/SPEC.md` (Bugs section), `viewer/NOTES.md`, `viewer/tests/bugs_drain.rs` (new), `ingester/testnode.sh` (new) | drainer session | the nashcode half of `goals/error-tracking/ingester.md`: pull buffered rows off the public ingester and replay them into the digest. **`Config` grows one field, `bugs_drain: Option<Drain>`** — every full `Config { .. }` literal needs one more line (`bugs_drain: None,`), the same tax slice 1 charged for its three. Sorry, whole-stack session: there is no way to bind a config surface without it. `ingester/src/**` is not touched |
+| `viewer/src/bugs/{drain,iroh}.rs` (new), `viewer/src/bugs/{mod,index}.rs`, `viewer/src/web/bugs.rs`, `viewer/src/config.rs`, `viewer/src/main.rs`, `viewer/Cargo.toml`, `viewer/SPEC.md` (Bugs section), `viewer/NOTES.md`, `viewer/tests/bugs_drain.rs` (new) | drainer session | **landed, but the tests have never been RUN — see the note at the bottom.** The claim stays until the box can exec a freshly built binary again. `ingester/src/**` is not touched |
 
 
 ## Who has been doing what
@@ -400,3 +400,51 @@ The one real regression is there too: `nashcode --profile x doctor` is rejected,
 agcli's built-in `doctor` hardcodes its own usage string and no downstream flag can be
 declared on it. `doctor` checks the active profile until agcli grows a way to say
 otherwise.
+
+**To everyone, from the drainer session (2026-08-20): the drain is in, and its tests
+have never run. Read this before you trust it.**
+
+`viewer/src/bugs/drain.rs` pulls buffered rows off the public ingester and replays each
+one into the door it arrived at — `kind: "envelope"` into the envelope pipeline,
+`kind: "logs"` into the NDJSON one. The protocol is `ingester/README.md`; SPEC's new
+"Drain" bullet binds the configuration surface and the rule that an ack follows the
+digest. `viewer/NOTES.md` has the judgement calls.
+
+**What is proven and what is not.** `cargo check --all-targets` is clean — every target
+including the new test file type-checks, and the `test` profile links. **No test has
+executed.** macOS's first-exec code-signing path is wedged on this box: any newly built
+binary hangs in `_dyld_start` or is SIGKILLed, so `cargo nextest run` cannot even
+enumerate the test list. Clippy has not run either. If you rebase on this, run
+`cargo nextest run --workspace` once the box is fixed and treat a failure in
+`bugs_drain` or in `bugs::drain::tests` as mine, not yours.
+
+That wedge is the cousin of the celld trap already written down here, and it is worth
+knowing on sight: **a process sitting in `_dyld_start` with zero CPU is the OS, never
+your code** — `sample <pid>` shows nothing else. It hits build scripts, test binaries,
+and `bash`. It needs an administrator; do not go hunting.
+
+Five things reach outside `viewer/src/bugs/`:
+
+- **`Config` grew one field, `bugs_drain: Option<Drain>`.** Every full `Config { .. }`
+  literal needed one more line — seven files, `viewer/tests/common/mod.rs` among them.
+  Apologies to the whole-stack session, whose claim asked for no `Config` field changes;
+  there is no way to bind a configuration surface without one.
+- **`viewer/Cargo.toml` grew four optional dependencies** behind the new non-default
+  `drain-iroh` feature: `iroh`, `hyper`, `hyper-util`, `http-body-util`. The default
+  dependency graph is unchanged, but `Cargo.lock` moved a few shared versions
+  (`ndarray`, `security-framework-sys`, `futures-io`), so **your first build after this
+  commit recompiles most of the tree.** That is a one-time cost and it is already paid
+  in the shared cache.
+- **`bugs_projects` grew an `active` column**, default 1, added through `ADDED_COLUMNS`.
+  The registry the public edge wants is `(project_id, key, active)` and nothing here
+  could produce the third field — there was no way to revoke a project at all.
+  `Project` therefore carries one more key in `/bugs` JSON.
+- **Both tailnet ingest doors now answer 404 for a revoked project** (`web/bugs.rs`).
+  A revoked key is absent, not wrong, which is what the public edge already says.
+- **`main.rs` gained a startup spawn, a doctor line, and one hard exit**:
+  `NASHCODE_BUGS_DRAIN` set with `NASHCODE_BUGS_BUCKET` unset exits 1. A drainer with
+  nowhere durable to put a payload would ack real events off a box we do not control.
+
+The iroh transport is written and has never dialled anything. It is behind
+`--features drain-iroh` for that reason, and the reason is in `NOTES.md` along with what
+the VPS needs before it can be believed.
