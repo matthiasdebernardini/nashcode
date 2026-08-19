@@ -83,8 +83,9 @@ impl Reader {
         Self { stream: Box::pin(body.into_data_stream()), buffer: Vec::new(), ended: false }
     }
 
-    /// Pull one more chunk. `false` once the body is finished.
-    async fn pull(&mut self) -> Result<bool, IngestError> {
+    /// Pull one more chunk, refusing it if it would take the buffer past `max`.
+    /// `false` once the body is finished.
+    async fn pull(&mut self, max: usize) -> Result<bool, IngestError> {
         if self.ended {
             return Ok(false);
         }
@@ -95,6 +96,12 @@ impl Reader {
             }
             Some(Err(error)) => Err(IngestError::Body(error.to_string())),
             Some(Ok(chunk)) => {
+                // Tested before the chunk is appended. Appending first and testing
+                // after makes the real budget `max` plus one transport chunk, which
+                // on the unauthenticated path is most of the budget again.
+                if self.buffer.len().saturating_add(chunk.len()) > max {
+                    return Err(IngestError::TooLarge("the request body"));
+                }
                 self.buffer.extend_from_slice(&chunk);
                 Ok(true)
             }
@@ -113,7 +120,10 @@ impl Reader {
             if self.buffer.len() > MAX_HEADER_LINE {
                 return Err(IngestError::NoHeaderLine);
             }
-            if !self.pull().await? {
+            // Uncapped on purpose: a chunk is already in memory when the stream
+            // yields it, and a legal envelope's first chunk is routinely larger than
+            // one header line. The stop condition above is what bounds this loop.
+            if !self.pull(usize::MAX).await? {
                 // A header-only envelope with no trailing newline is legal.
                 return Ok(&self.buffer[..]);
             }
@@ -124,14 +134,12 @@ impl Reader {
     /// passes `max` rather than at the end. The rest of an oversized body is never
     /// pulled.
     pub async fn read_to_end(mut self, max: usize) -> Result<Vec<u8>, IngestError> {
-        loop {
-            if self.buffer.len() > max {
-                return Err(IngestError::TooLarge("the request body"));
-            }
-            if !self.pull().await? {
-                return Ok(self.buffer);
-            }
+        // `header_line` may already have buffered more than this caller allows.
+        if self.buffer.len() > max {
+            return Err(IngestError::TooLarge("the request body"));
         }
+        while self.pull(max).await? {}
+        Ok(self.buffer)
     }
 }
 

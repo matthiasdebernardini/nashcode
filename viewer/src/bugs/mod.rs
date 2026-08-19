@@ -21,7 +21,7 @@ pub mod store;
 use std::sync::{Arc, Mutex};
 
 use object_store::{ObjectStore, ObjectStoreExt};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
 use crate::config::Config;
 use crate::db::{Db, DbResult};
@@ -46,6 +46,14 @@ pub struct Bugs {
 /// the one answer every SDK already knows how to obey.
 pub const QUEUE_DEPTH: usize = 1024;
 
+/// How many bytes of undigested envelope may be in memory at once.
+///
+/// The slot count alone bounds nothing that matters: 1024 slots times a 100 MiB
+/// decompressed body is 100 GiB. Bodies are what cost memory, so bodies are what the
+/// budget is denominated in. It has to exceed [`ingest::MAX_DECOMPRESSED`] or a single
+/// legal envelope could never be admitted at all.
+pub const QUEUE_BYTES: usize = 256 * 1024 * 1024;
+
 /// How many unfinished envelopes one sweep picks up. A backlog larger than this is
 /// not a crash, it is a broken bucket, and re-reading a million objects at startup
 /// would keep the viewer from answering anything at all.
@@ -61,6 +69,9 @@ struct Inner {
     /// first envelope rather than at construction, because construction happens
     /// outside the async runtime in both `main` and the tests.
     pending: Mutex<Option<mpsc::Receiver<digest::Job>>>,
+    /// One permit per byte of queued body. Held by the job and released when it is
+    /// dropped, which is after the digest is done with it.
+    bytes: Arc<Semaphore>,
     digested: Arc<watch::Sender<u64>>,
 }
 
@@ -113,6 +124,7 @@ impl Bugs {
                 ingest_url: config.bugs_ingest_url.clone(),
                 jobs,
                 pending: Mutex::new(Some(pending)),
+                bytes: Arc::new(Semaphore::new(QUEUE_BYTES)),
                 digested: Arc::new(watch::channel(0).0),
             }),
         })
@@ -213,12 +225,21 @@ impl Bugs {
     /// asked for; the SDK retries, which is what it does with a 429 anyway.
     pub async fn accept(&self, project_id: i64, body: Vec<u8>) -> Result<(), AcceptError> {
         self.start_digest();
-        let Ok(permit) = self.inner.jobs.try_reserve() else {
+        let Ok(slot) = self.inner.jobs.try_reserve() else {
             return Err(AcceptError::Busy);
         };
-        let (envelope_id, body) = self.store(project_id, body).await?;
-        permit.send(digest::Job { project_id, envelope_id, body });
+        let Some(bytes) = self.reserve_bytes(body.len()) else {
+            return Err(AcceptError::Busy);
+        };
+        let (envelope_id, envelope_key, body) = self.store(project_id, body).await?;
+        slot.send(digest::Job { project_id, envelope_id, envelope_key, body, _bytes: Some(bytes) });
         Ok(())
+    }
+
+    /// Take `len` bytes of the queue's memory budget, or refuse.
+    fn reserve_bytes(&self, len: usize) -> Option<OwnedSemaphorePermit> {
+        let wanted = u32::try_from(len).ok()?;
+        self.inner.bytes.clone().try_acquire_many_owned(wanted).ok()
     }
 
     /// The durable half of [`Self::accept`] on its own: the object goes to the bucket
@@ -231,7 +252,7 @@ impl Bugs {
         &self,
         project_id: i64,
         body: Vec<u8>,
-    ) -> Result<(Option<i64>, Vec<u8>), AcceptError> {
+    ) -> Result<(Option<i64>, String, Vec<u8>), AcceptError> {
         let store = self
             .inner
             .store
@@ -243,11 +264,11 @@ impl Bugs {
             .await
             .map_err(|error| AcceptError::Store(format!("cannot write {key}: {error}")))?;
         match index::record_envelope(self.db(), project_id, key.as_ref()) {
-            Ok(id) => Ok((Some(id), body)),
+            Ok(id) => Ok((Some(id), key.to_string(), body)),
             Err(error) => {
                 // The object is safe; only the sweep's handle on it is lost.
                 tracing::warn!(%error, "bugs: cannot record the envelope object");
-                Ok((None, body))
+                Ok((None, key.to_string(), body))
             }
         }
     }
@@ -290,10 +311,22 @@ impl Bugs {
             };
             // `send`, not `try_send`: the worker is draining alongside this loop, so
             // waiting for a slot is the point rather than a failure.
+            // `acquire`, not `try_acquire`: the worker drains alongside this loop, so
+            // waiting for the memory is the point rather than a failure.
+            let bytes = match u32::try_from(body.len()) {
+                Ok(wanted) => self.inner.bytes.clone().acquire_many_owned(wanted).await.ok(),
+                Err(_) => None,
+            };
             if self
                 .inner
                 .jobs
-                .send(digest::Job { project_id: row.project_id, envelope_id: Some(row.id), body })
+                .send(digest::Job {
+                    project_id: row.project_id,
+                    envelope_id: Some(row.id),
+                    envelope_key: row.object_key.clone(),
+                    body,
+                    _bytes: bytes,
+                })
                 .await
                 .is_err()
             {
@@ -316,7 +349,7 @@ impl Bugs {
         from: &str,
     ) -> Result<usize, String> {
         let store = self.inner.store.as_ref().ok_or("error tracking is off")?;
-        logs::store_batch(self.db(), store, project_id, records, from).await
+        logs::store_batch(self.db(), store, project_id, records, from, None).await
     }
 
     pub fn logs(&self, project_id: i64, query: &logs::Query) -> DbResult<Vec<logs::LogRow>> {
@@ -447,6 +480,43 @@ mod tests {
         drop(held);
         assert_eq!(bugs.accept(project.id, body).await, Ok(()));
     }
+
+    #[tokio::test]
+    async fn a_queue_full_by_bytes_refuses_even_with_every_slot_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = dir.path().join("bucket");
+        let url = format!("file://{}", bucket.display());
+        let bugs = Bugs::new(&config(Some(&url)), Db::in_memory().unwrap()).unwrap();
+        let project = bugs.create_project("demo", None).unwrap();
+
+        // Slots are a poor proxy for memory: 1024 of them times a 100 MiB body is
+        // 100 GiB. Hold the byte budget and leave every slot free.
+        let held = bugs
+            .inner
+            .bytes
+            .clone()
+            .try_acquire_many_owned(u32::try_from(QUEUE_BYTES).unwrap() - 8)
+            .expect("the budget starts empty");
+        assert_eq!(bugs.inner.jobs.capacity(), QUEUE_DEPTH, "every slot is free");
+
+        let body = b"{}\n{\"type\":\"event\"}\n{\"event_id\":\"a\"}\n".to_vec();
+        assert!(body.len() > 8, "the body is bigger than what is left");
+        assert_eq!(bugs.accept(project.id, body.clone()).await, Err(AcceptError::Busy));
+        assert!(!bucket.join("projects").exists(), "and nothing was written");
+
+        // Give the memory back and the same envelope is taken.
+        drop(held);
+        assert_eq!(bugs.accept(project.id, body).await, Ok(()));
+    }
+
+    /// A body larger than the whole budget could never be admitted, so the queue would
+    /// answer 429 to a legal envelope forever. Checked at compile time: this is a
+    /// relationship between two constants, and it should fail the build rather than a
+    /// test run.
+    const _: () = {
+        assert!(QUEUE_BYTES > ingest::MAX_DECOMPRESSED);
+        assert!(QUEUE_BYTES <= u32::MAX as usize, "a semaphore counts permits in u32");
+    };
 
     #[test]
     fn a_project_name_that_could_leave_its_path_is_refused() {

@@ -89,8 +89,14 @@ pub struct LogRow {
 
 /// Apply the log schema. Idempotent, run on every open.
 pub fn migrate(db: &Db) -> DbResult<()> {
-    db.with(|conn| conn.execute_batch(SCHEMA))
+    db.with(|conn| {
+        conn.execute_batch(SCHEMA)?;
+        crate::bugs::index::add_columns(conn, ADDED_COLUMNS)
+    })
 }
+
+/// Columns added to `bugs_logs` after its first release; see [`crate::bugs::index`].
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[("bugs_logs", "dedupe_key", "TEXT")];
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS bugs_logs (
@@ -107,8 +113,12 @@ CREATE TABLE IF NOT EXISTS bugs_logs (
     trace_id        TEXT,
     source          TEXT NOT NULL,
     archive_key     TEXT,
+    dedupe_key      TEXT,
     received_at     TEXT NOT NULL
 );
+-- What makes a re-digest safe. NULL never collides in SQLite, so rows written
+-- before this column existed simply do not dedupe.
+CREATE UNIQUE INDEX IF NOT EXISTS bugs_logs_dedupe ON bugs_logs (project_id, dedupe_key);
 CREATE INDEX IF NOT EXISTS bugs_logs_by_time ON bugs_logs (project_id, ts DESC, id DESC);
 CREATE INDEX IF NOT EXISTS bugs_logs_by_file ON bugs_logs (project_id, code_file);
 CREATE INDEX IF NOT EXISTS bugs_logs_by_level ON bugs_logs (project_id, severity_text, ts DESC);
@@ -135,12 +145,17 @@ END;
 ///
 /// The object is written first on purpose: a crash between the two steps costs the
 /// index rows, which a reindex rebuilds, and never the lines themselves.
+/// `origin` names where the batch came from, stably: the same envelope re-digested
+/// must produce the same string, or a sweep would file every line twice. `None` means
+/// there is nothing stable to name it by — the NDJSON door, where each POST is its own
+/// event — and the fresh archive key stands in.
 pub async fn store_batch(
     db: &Db,
     store: &Arc<dyn ObjectStore>,
     project_id: i64,
     records: &[Record],
     from: &str,
+    origin: Option<&str>,
 ) -> Result<usize, String> {
     if records.is_empty() {
         return Ok(0);
@@ -157,31 +172,39 @@ pub async fn store_batch(
         .await
         .map_err(|error| format!("cannot write {key}: {error}"))?;
 
-    insert(db, project_id, records, from, key.as_ref(), &received_at)
+    let origin = origin.unwrap_or(key.as_ref());
+    insert(db, project_id, records, from, key.as_ref(), origin, &received_at)
         .map_err(|error| error.to_string())
 }
 
 /// Index one batch. One transaction: a half-written batch would search wrong.
+///
+/// `INSERT OR IGNORE` on `(project_id, dedupe_key)` is what makes the digest safe to
+/// run twice. Events already dedupe on `(project_id, event_id)`; without this, the
+/// startup sweep — and `sweep(true)`, which is the reindex primitive — filed every log
+/// line again on every pass.
 fn insert(
     db: &Db,
     project_id: i64,
     records: &[Record],
     from: &str,
     archive_key: &str,
+    origin: &str,
     received_at: &str,
 ) -> DbResult<usize> {
     db.with(|conn| {
+        let mut landed = 0;
         let tx = conn.unchecked_transaction()?;
         {
             let mut statement = tx.prepare(
-                "INSERT INTO bugs_logs
+                "INSERT OR IGNORE INTO bugs_logs
                    (project_id, ts, severity_text, severity_number, message, attributes,
                     code_file, code_line, code_function, trace_id, source, archive_key,
-                    received_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    dedupe_key, received_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             )?;
-            for record in records {
-                statement.execute(params![
+            for (index, record) in records.iter().enumerate() {
+                landed += statement.execute(params![
                     project_id,
                     record.ts,
                     record.severity_text,
@@ -194,12 +217,13 @@ fn insert(
                     record.trace_id,
                     from,
                     archive_key,
+                    format!("{origin}#{index}"),
                     received_at,
                 ])?;
             }
         }
         tx.commit()?;
-        Ok(records.len())
+        Ok(landed)
     })
 }
 
@@ -235,6 +259,9 @@ pub fn parse_search(raw: &str) -> (Option<String>, Option<String>) {
     (text, file)
 }
 
+/// The most words one search box is worth.
+pub const MAX_SEARCH_TERMS: usize = 32;
+
 /// Turn free text into an FTS5 MATCH expression that cannot be a syntax error.
 ///
 /// Every term is quoted, so `AND`, `*`, `"` and a stray `(` are all searched for
@@ -242,10 +269,14 @@ pub fn parse_search(raw: &str) -> (Option<String>, Option<String>) {
 /// straight to it means a person who types an apostrophe gets a 500 instead of an
 /// answer.
 pub fn fts_match(text: &str) -> Option<String> {
+    // Capped: FTS5 parses the AND chain into an expression tree, and SQLite refuses
+    // one deeper than SQLITE_MAX_EXPR_DEPTH. A search box with 500 words in it is
+    // not a search, but it should not be a 500 either.
     let terms: Vec<String> = text
         .split_whitespace()
         .map(|term| term.replace('"', ""))
         .filter(|term| !term.is_empty())
+        .take(MAX_SEARCH_TERMS)
         .map(|term| format!("\"{term}\""))
         .collect();
     (!terms.is_empty()).then(|| terms.join(" AND "))
@@ -377,6 +408,21 @@ pub fn severity(level: &str) -> (String, i64) {
     (normalized.to_owned(), number)
 }
 
+/// Settle a level name and a declared severity number into one agreed pair.
+///
+/// The number wins the band when the two disagree. `{"level":"info",
+/// "severity_number":21}` used to store `("info", 21)`, which puts a fatal line under
+/// the info badge and behind the info filter — the one place a log store must not be
+/// quietly wrong. Numbers and names agree in every real payload, so this only fires on
+/// a sender that is already confused, and it fails towards being seen.
+pub fn resolve_severity(level: Option<String>, declared: Option<i64>) -> (String, i64) {
+    match (level, declared) {
+        (_, Some(number)) => (band(number).to_owned(), number),
+        (Some(level), None) => severity(&level),
+        (None, None) => (DEFAULT_SEVERITY.0.to_owned(), DEFAULT_SEVERITY.1),
+    }
+}
+
 /// The band an OTel severity number falls in. Numbers inside a band (`info2` is 10)
 /// round down to the band, which is what a filter and a badge want.
 pub fn band(number: i64) -> &'static str {
@@ -487,7 +533,14 @@ pub fn parse_envelope_item(payload: &[u8]) -> Vec<Record> {
             _ => return Vec::new(),
         },
     };
-    items.iter().filter_map(record_from_sentry).collect()
+    // Capped like the NDJSON door. The splitter already holds an item to 1 MiB, but a
+    // megabyte of `{"body":""}` is still tens of thousands of records and one very
+    // long transaction. Truncated rather than refused: an envelope must never fail
+    // over an item, so the excess is dropped and said out loud.
+    if items.len() > MAX_BATCH {
+        tracing::warn!(dropped = items.len() - MAX_BATCH, "bugs: log item over the batch cap");
+    }
+    items.iter().take(MAX_BATCH).filter_map(record_from_sentry).collect()
 }
 
 fn record_from_sentry(item: &Value) -> Option<Record> {
@@ -513,16 +566,7 @@ fn record_from_sentry(item: &Value) -> Option<Record> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| attributes.get("sentry.severity_text").and_then(scalar_text));
-    let (severity_text, severity_number) = match level {
-        Some(level) => {
-            let (text, number) = severity(&level);
-            (text, declared.unwrap_or(number))
-        }
-        None => match declared {
-            Some(number) => (band(number).to_owned(), number),
-            None => (DEFAULT_SEVERITY.0.to_owned(), DEFAULT_SEVERITY.1),
-        },
-    };
+    let (severity_text, severity_number) = resolve_severity(level, declared);
 
     let (code_file, code_line, code_function) = code_origin(&attributes);
     Some(Record {
@@ -538,13 +582,37 @@ fn record_from_sentry(item: &Value) -> Option<Record> {
     })
 }
 
+/// The most log lines one batch may carry.
+///
+/// A per-line length cap alone bounds nothing: 100 MiB of `0\n` is 50 million lines,
+/// each one cheap, and the batch built out of them is not. Ten thousand is more than
+/// any real flush and small enough that the transaction behind it is uninteresting.
+pub const MAX_BATCH: usize = 10_000;
+
+/// How many rejected line numbers are named in the answer. The count is always
+/// exact; the list is a debugging aid, and echoing a caller-controlled number of them
+/// is how a small request buys a large response.
+pub const MAX_REPORTED_REJECTS: usize = 20;
+
 /// What one NDJSON body turned into.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Parsed {
     pub records: Vec<Record>,
-    /// Lines that were not JSON objects, with their line numbers. Counted and
-    /// reported, never fatal: one bad line in a thousand must not lose the other 999.
-    pub rejected: Vec<usize>,
+    /// How many lines were not readable as a JSON object. Exact.
+    pub rejected: usize,
+    /// The first few of their line numbers, for a person reading the answer.
+    pub rejected_lines: Vec<usize>,
+    /// The body carried more than [`MAX_BATCH`] lines. Nothing in it is stored: the
+    /// caller answers 413 and the sender splits the batch.
+    pub too_many: bool,
+}
+
+impl Parsed {
+    /// The `rejected` half of the answer: a count that is always right, and a few
+    /// line numbers to look at.
+    pub fn report(&self) -> serde_json::Value {
+        serde_json::json!({ "count": self.rejected, "lines": self.rejected_lines })
+    }
 }
 
 /// Parse the NDJSON door's body: one JSON object per line.
@@ -552,23 +620,41 @@ pub struct Parsed {
 /// `ts`, `level` and `message` are read under the spellings a shell script or a
 /// journald shipper actually writes; every other key becomes an attribute, which is
 /// how the `code.*` keys arrive through this door.
-pub fn parse_ndjson(body: &[u8], max_line: usize) -> Parsed {
+///
+/// Stops the moment the line count passes `max_records`, without building the rest:
+/// the point of the cap is the memory it does not spend.
+pub fn parse_ndjson(body: &[u8], max_line: usize, max_records: usize) -> Parsed {
     let mut parsed = Parsed::default();
     for (number, line) in body.split(|byte| *byte == b'\n').enumerate() {
         let line = trim(line);
         if line.is_empty() {
             continue;
         }
+        if parsed.records.len() + parsed.rejected >= max_records {
+            parsed.too_many = true;
+            parsed.records.clear();
+            parsed.rejected_lines.clear();
+            return parsed;
+        }
         if line.len() > max_line {
-            parsed.rejected.push(number + 1);
+            parsed.reject(number + 1);
             continue;
         }
         match serde_json::from_slice::<Value>(line) {
             Ok(Value::Object(object)) => parsed.records.push(record_from_ndjson(&object)),
-            _ => parsed.rejected.push(number + 1),
+            _ => parsed.reject(number + 1),
         }
     }
     parsed
+}
+
+impl Parsed {
+    fn reject(&mut self, line: usize) {
+        self.rejected += 1;
+        if self.rejected_lines.len() < MAX_REPORTED_REJECTS {
+            self.rejected_lines.push(line);
+        }
+    }
 }
 
 fn trim(line: &[u8]) -> &[u8] {
@@ -599,18 +685,11 @@ fn record_from_ndjson(object: &Map<String, Value>) -> Record {
         attributes.insert(key.clone(), value.clone());
     }
 
-    let declared =
-        object.get("severity_number").and_then(Value::as_i64).filter(|n| (1..=24).contains(n));
-    let (severity_text, severity_number) = match first(&LEVEL_KEYS).and_then(scalar_text) {
-        Some(level) => {
-            let (text, number) = severity(&level);
-            (text, declared.unwrap_or(number))
-        }
-        None => match declared {
-            Some(number) => (band(number).to_owned(), number),
-            None => (DEFAULT_SEVERITY.0.to_owned(), DEFAULT_SEVERITY.1),
-        },
-    };
+    let declared = object
+        .get("severity_number")
+        .and_then(scalar_number)
+        .filter(|number| (1..=24).contains(number));
+    let (severity_text, severity_number) = resolve_severity(first(&LEVEL_KEYS).and_then(scalar_text), declared);
 
     let (code_file, code_line, code_function) = code_origin(&attributes);
     Record {
@@ -761,9 +840,10 @@ mod tests {
             "\n",
             "this is not json\n",
         );
-        let parsed = parse_ndjson(body.as_bytes(), 1024 * 1024);
+        let parsed = parse_ndjson(body.as_bytes(), 1024 * 1024, MAX_BATCH);
         assert_eq!(parsed.records.len(), 2, "blank lines are skipped, bad ones counted");
-        assert_eq!(parsed.rejected, vec![4]);
+        assert_eq!(parsed.rejected, 1);
+        assert_eq!(parsed.rejected_lines, vec![4]);
 
         assert_eq!(parsed.records[0].severity_text, "error");
         assert_eq!(parsed.records[0].code_file.as_deref(), Some("bin/backup.sh"));
@@ -778,9 +858,95 @@ mod tests {
     fn an_over_long_ndjson_line_is_rejected_and_the_rest_survive() {
         let long = format!("{{\"message\":\"{}\"}}", "x".repeat(2048));
         let body = format!("{{\"message\":\"fine\"}}\n{long}\n{{\"message\":\"also fine\"}}\n");
-        let parsed = parse_ndjson(body.as_bytes(), 1024);
+        let parsed = parse_ndjson(body.as_bytes(), 1024, MAX_BATCH);
         assert_eq!(parsed.records.len(), 2);
-        assert_eq!(parsed.rejected, vec![2]);
+        assert_eq!(parsed.rejected, 1);
+        assert_eq!(parsed.rejected_lines, vec![2]);
+    }
+
+    #[test]
+    fn a_batch_over_the_line_cap_is_refused_whole_and_costs_nothing_to_refuse() {
+        // The shape the review found: a per-line length cap passes every one of
+        // these, and 100 MiB of them is fifty million lines.
+        let flood = "0\n".repeat(MAX_BATCH + 500);
+        let parsed = parse_ndjson(flood.as_bytes(), 1024 * 1024, MAX_BATCH);
+        assert!(parsed.too_many, "the batch is over the cap");
+        assert!(parsed.records.is_empty(), "nothing is built");
+        assert!(parsed.rejected_lines.is_empty(), "and nothing is echoed back");
+
+        // The same with valid lines, which is the more expensive half: one giant
+        // transaction on the shared connection.
+        let valid = "{\"message\":\"x\"}\n".repeat(MAX_BATCH + 1);
+        let parsed = parse_ndjson(valid.as_bytes(), 1024 * 1024, MAX_BATCH);
+        assert!(parsed.too_many);
+        assert!(parsed.records.is_empty());
+
+        // Exactly at the cap is fine.
+        let full = "{\"message\":\"x\"}\n".repeat(MAX_BATCH);
+        let parsed = parse_ndjson(full.as_bytes(), 1024 * 1024, MAX_BATCH);
+        assert!(!parsed.too_many);
+        assert_eq!(parsed.records.len(), MAX_BATCH);
+    }
+
+    #[test]
+    fn the_rejected_line_numbers_are_a_sample_and_the_count_is_exact() {
+        let body = "nope\n".repeat(100);
+        let parsed = parse_ndjson(body.as_bytes(), 1024 * 1024, MAX_BATCH);
+        assert_eq!(parsed.rejected, 100, "the count is exact");
+        assert_eq!(
+            parsed.rejected_lines.len(),
+            MAX_REPORTED_REJECTS,
+            "the list is capped, so a small request cannot buy a large answer"
+        );
+        assert_eq!(parsed.report()["count"], 100);
+    }
+
+    #[test]
+    fn a_declared_severity_number_decides_the_band_when_the_level_contradicts_it() {
+        // The one a log store must not get wrong: a fatal hiding under the info
+        // badge, and behind the info filter.
+        assert_eq!(
+            resolve_severity(Some("info".to_owned()), Some(21)),
+            ("fatal".to_owned(), 21)
+        );
+        // Agreement is the normal case and is unchanged.
+        assert_eq!(resolve_severity(Some("warn".to_owned()), Some(13)), ("warn".to_owned(), 13));
+        // A number inside a band still reads as its band.
+        assert_eq!(resolve_severity(Some("info".to_owned()), Some(10)), ("info".to_owned(), 10));
+        assert_eq!(resolve_severity(Some("error".to_owned()), None), ("error".to_owned(), 17));
+        assert_eq!(resolve_severity(None, None), ("info".to_owned(), 9));
+
+        // And end to end, through both doors.
+        let records = parse_envelope_item(br#"{"items":[{"level":"info","severity_number":21,"body":"boom"}]}"#);
+        assert_eq!(records[0].severity_text, "fatal");
+        let parsed = parse_ndjson(
+            br#"{"level":"info","severity_number":21,"message":"boom"}"#,
+            1024,
+            MAX_BATCH,
+        );
+        assert_eq!(parsed.records[0].severity_text, "fatal");
+    }
+
+    #[test]
+    fn the_same_batch_indexed_twice_is_one_set_of_rows() {
+        let (db, project) = bed();
+        let rows = [
+            record("first line", "2026-08-19T04:00:00.000000Z"),
+            record("second line", "2026-08-19T04:00:01.000000Z"),
+        ];
+        // The same origin twice is what a sweep does: re-reading one envelope out of
+        // the bucket and digesting it again.
+        assert_eq!(insert(&db, project, &rows, source::ENVELOPE, "a", "envelope-1#0", &now()).unwrap(), 2);
+        assert_eq!(
+            insert(&db, project, &rows, source::ENVELOPE, "b", "envelope-1#0", &now()).unwrap(),
+            0,
+            "a re-digest files nothing new"
+        );
+        assert_eq!(count(&db, project).unwrap(), 2);
+
+        // A different origin is a different batch, even with identical lines.
+        assert_eq!(insert(&db, project, &rows, source::ENVELOPE, "c", "envelope-2#0", &now()).unwrap(), 2);
+        assert_eq!(count(&db, project).unwrap(), 4);
     }
 
     #[test]
@@ -796,6 +962,10 @@ mod tests {
         assert_eq!(fts_match("a AND b"), Some("\"a\" AND \"AND\" AND \"b\"".to_owned()));
         assert_eq!(fts_match("\"\""), None);
         assert_eq!(fts_match("   "), None);
+        // And the chain is capped: FTS5 refuses an expression tree deeper than
+        // SQLITE_MAX_EXPR_DEPTH, which a pasted paragraph would otherwise reach.
+        let many = (0..500).map(|n| format!("w{n}")).collect::<Vec<_>>().join(" ");
+        assert_eq!(fts_match(&many).unwrap().matches(" AND ").count(), MAX_SEARCH_TERMS - 1);
     }
 
     #[test]
@@ -807,7 +977,8 @@ mod tests {
         with_file.code_file = Some("src/net/socket.rs".to_owned());
         with_file.code_line = Some(41);
         let rows = [record("started up", "2026-08-19T04:00:00.000000Z"), with_file];
-        insert(&db, project, &rows, source::NDJSON, "projects/1/logs/x.ndjson", &now()).unwrap();
+        insert(&db, project, &rows, source::NDJSON, "projects/1/logs/x.ndjson", "batch-a", &now())
+            .unwrap();
 
         let all = search(&db, project, &Query { limit: 50, ..Query::default() }).unwrap();
         assert_eq!(all.len(), 2);
@@ -854,7 +1025,7 @@ mod tests {
     fn the_fts_index_forgets_a_row_when_the_row_goes() {
         let (db, project) = bed();
         let rows = [record("ephemeral message", "2026-08-19T04:00:00.000000Z")];
-        insert(&db, project, &rows, source::NDJSON, "k", &now()).unwrap();
+        insert(&db, project, &rows, source::NDJSON, "k", "batch-a", &now()).unwrap();
         let query = Query { text: Some("ephemeral".to_owned()), limit: 10, ..Query::default() };
         assert_eq!(search(&db, project, &query).unwrap().len(), 1);
 
@@ -871,7 +1042,7 @@ mod tests {
         let old = days_ago(45).expect("a date");
         let recent = days_ago(2).expect("a date");
         let rows = [record("ancient history", &old), record("this morning", &recent)];
-        insert(&db, project, &rows, source::NDJSON, "k", &now()).unwrap();
+        insert(&db, project, &rows, source::NDJSON, "k", "batch-a", &now()).unwrap();
         assert_eq!(count(&db, project).unwrap(), 2);
 
         // The default window is 30 days.

@@ -904,3 +904,60 @@ backlog importer would want exactly it. Filling the digest queue *is* test-only,
 is a unit test inside `bugs/mod.rs` (holding reserved permits, which needs private
 access) rather than a public `fill_queue_for_test`. The 429 the route builds from that
 decision is asserted separately, in `web/bugs.rs`'s own test.
+
+### Slice 2, peer-review fixes
+
+**A line-length cap bounds nothing.** The NDJSON door held each line to 1 MiB and had
+no opinion about how many lines there were. 100 MiB of `0\n` is fifty million of them,
+every one under the cap: a `Vec<usize>` of rejected line numbers big enough to end the
+process, and a response echoing all fifty million back. `MAX_BATCH` is 10 000 lines,
+past which the batch is refused whole with 413 and nothing is parsed, stored, or
+echoed. `rejected` became `{count, lines}` — the count exact, the list capped at 20 —
+because the size of an answer must not be something the caller chooses. The envelope
+door is capped the same way, but truncates rather than refuses: an envelope must never
+fail over one item.
+
+**Slots are a poor proxy for memory.** The queue bounded envelope *count* at 1024, and
+each job can carry a 100 MiB decompressed body, so the real bound was about 100 GiB. A
+`Semaphore` with one permit per byte now sits beside the slot; the permit rides in the
+job and is released when the job drops, which is after the digest is done with it.
+`QUEUE_BYTES` is 256 MiB and has to stay above `MAX_DECOMPRESSED`, or a single legal
+envelope could never be admitted at all — there is a test that says so.
+
+**Log rows were not idempotent, which made the sweep a duplicator.** Events have always
+deduped on `(project_id, event_id)`; log rows inserted unconditionally, so `sweep(true)`
+— the reindex primitive — doubled the store on every pass. Rows now carry a
+`dedupe_key` under a unique index, written `INSERT OR IGNORE`. The key is
+`{envelope object key}#{item index}#{record index}` for the envelope door, which is
+stable across re-digests because the object key is; the NDJSON door has no stable
+identity to reach for — each POST is its own event — so its fresh archive key stands in.
+
+The review also asked for `digested_at` to be stamped inside the digest transaction.
+It cannot be: one digest spans a bucket write and N independent item transactions, so
+there is no single transaction to be inside of. Dedupe is what actually buys
+idempotency, and it buys it whatever order the stamping happens in. Stamping stays
+where it was.
+
+**A fatal must not hide under `info`.** `{"level":"info","severity_number":21}` stored
+`("info", 21)`, so the row wore the info badge and answered the info filter while
+carrying a fatal number. `resolve_severity` now lets the number decide the band. The two
+agree in every real payload, so this only fires on a sender that is already confused —
+and it fails towards being seen.
+
+**The reader's budget was the cap plus one chunk.** `read_to_end` appended each chunk
+and then tested the total, so the unauthenticated path's 64 KiB was really 64 KiB plus
+whatever the transport handed over. The test moved ahead of the append.
+
+**Stack frames now resolve like log rows.** SPEC says frames resolve too, and the
+slice-1 implementation only checked that a path was syntactically relative — so a file
+renamed since the release that threw still rendered as a link, straight to a 404. Both
+pages now share `resolve_in_repo`. This changed a slice-1 test that asserted a link to
+`probe_capture_exception.py`, a file the fixture repo does not contain: it was asserting
+a dead link. It now asserts both directions against the fixture's real contents.
+
+Nits from the same review: `page * LOGS_PER_PAGE` is a `saturating_mul`; the FTS chain
+takes at most 32 terms, because SQLite refuses an expression tree past
+`SQLITE_MAX_EXPR_DEPTH` and a pasted paragraph would reach it; the NDJSON door reads
+`severity_number` through `scalar_number` like the envelope door does. The retention
+default lives in two places — a Rust constant and a DDL string — pinned by a test rather
+than by pulling in a const-formatting crate for one line.

@@ -794,15 +794,39 @@ async fn in_app_stack_frames_link_into_the_declared_repo() {
     let (id, key) =
         (created["id"].as_i64().expect("an id"), created["key"].as_str().expect("a key"));
 
-    post_envelope(&bed, id, key, fixture("python-exception.envelope")).await;
+    // The mirror has to exist before a path can be resolved against it.
+    bed.mirrors.refresh_now("demo").await;
+
+    // A frame naming a file the repo really has, and one naming a file it does not.
+    // This is the whole contract: the link is only offered when it would work.
+    let event = serde_json::json!({
+        "event_id": "e".repeat(32),
+        "platform": "python",
+        "exception": {"values": [{
+            "type": "RuntimeError",
+            "value": "boom",
+            "stacktrace": {"frames": [
+                {"filename": "probe_capture_exception.py", "lineno": 24, "in_app": true},
+                {"filename": "src/app.txt", "lineno": 1, "in_app": true},
+            ]},
+        }]},
+    })
+    .to_string();
+    let body = format!("{{}}\n{{\"type\":\"event\"}}\n{event}\n").into_bytes();
+    post_envelope(&bed, id, key, body).await;
     bed.bugs.digested(1).await;
 
     let issues = get(&bed, "/bugs/api", &[JSON]).await.json();
     let issue_id = issues["issues"][0]["id"].as_i64().expect("an issue id");
     let page = get(&bed, &format!("/bugs/api/issues/{issue_id}"), &[]).await;
     assert!(
-        page.body.contains("href=\"/demo/blob/probe_capture_exception.py#L24\""),
-        "an in-app frame links to the file and line"
+        page.body.contains("href=\"/demo/blob/src/app.txt#L1\""),
+        "a frame whose file the repo has links to the line"
+    );
+    assert!(page.body.contains("probe_capture_exception.py:24"), "the other frame is shown");
+    assert!(
+        !page.body.contains("/demo/blob/probe_capture_exception.py"),
+        "and is not linked: the repo has no such file, so the link would 404"
     );
 
     // A project with no repo has nowhere to link to, so the frame is plain text.

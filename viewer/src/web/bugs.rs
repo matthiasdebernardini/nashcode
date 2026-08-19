@@ -168,7 +168,17 @@ async fn accept_logs(cx: &Cx, body: Body) -> Result<Response> {
 
     // One bad line is one bad line. A shipper that tails a file will send a truncated
     // one eventually, and refusing the batch over it would lose the good lines too.
-    let parsed = logs::parse_ndjson(&body, envelope::MAX_ITEM);
+    //
+    // A batch with too many lines in it is a different thing, and is refused whole: a
+    // line cap alone bounds nothing, since 100 MiB of `0\n` is fifty million lines
+    // that each pass it.
+    let parsed = logs::parse_ndjson(&body, envelope::MAX_ITEM, logs::MAX_BATCH);
+    if parsed.too_many {
+        return Ok(sentry_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!("more than {} log lines in one batch", logs::MAX_BATCH),
+        ));
+    }
     let accepted = match bugs.accept_logs(project.id, &parsed.records, logs::source::NDJSON).await {
         Ok(count) => count,
         Err(error) => {
@@ -177,7 +187,9 @@ async fn accept_logs(cx: &Cx, body: Body) -> Result<Response> {
         }
     };
 
-    let payload = serde_json::json!({ "accepted": accepted, "rejected": parsed.rejected });
+    // The reject count is exact; the line numbers are a capped sample. Echoing one
+    // number per bad line lets a small request buy an enormous answer.
+    let payload = serde_json::json!({ "accepted": accepted, "rejected": parsed.report() });
     let mut response = json_response(StatusCode::OK, payload.to_string());
     cors(&mut response);
     Ok(response)
@@ -628,6 +640,10 @@ async fn issue_page(cx: &Cx) -> Result<Response> {
     }
 
     let detail = payload.as_ref().map(Detail::of).unwrap_or_default();
+    // Frames get the same treatment as log rows: a path that does not resolve in the
+    // declared repo is text, not a link. A file renamed since the release that threw
+    // is the case a syntactic check alone gets wrong.
+    let frame_links = frame_links(cx, &project, &detail.frames).await;
     let page = view! { cx =>
         shell(title: format!("{} · bugs", issue.title),
             <div class="d-flex flex-items-center gap-2 mb-2">
@@ -667,10 +683,9 @@ async fn issue_page(cx: &Cx) -> Result<Response> {
             if !detail.frames.is_empty() {
                 <div class="Box mb-3">
                     <div class="Box-header"><strong>"Stack"</strong></div>
-                    let repo = project.repo.clone();
                     for (index, frame) in detail.frames.iter().enumerate() {
                         <div key=(index) class="Box-row text-small nashcode-code">
-                            if let Some(href) = frame.blob_url(repo.as_deref()) {
+                            if let Some(href) = frame_links.get(&index).cloned() {
                                 <a class="Link--primary" href=(href)>(frame.location.clone())</a>
                             } else {
                                 (frame.location.clone())
@@ -722,26 +737,36 @@ struct Frame {
     in_app: bool,
 }
 
-impl Frame {
-    /// Where this frame lives in the declared repo, or `None`.
-    ///
-    /// Only in-app frames, only a repo the viewer knows, and only a path that is
-    /// plainly relative — a frame from site-packages or an absolute path would make a
-    /// dead link, and a dead link is worse than plain text.
-    fn blob_url(&self, repo: Option<&str>) -> Option<String> {
-        if !self.in_app {
-            return None;
-        }
-        let repo = repo?;
-        let path = self.path.as_deref()?;
-        if !linkable(path) {
-            return None;
-        }
-        Some(match self.line {
-            Some(line) if line > 0 => format!("/{repo}/blob/{path}#L{line}"),
-            _ => format!("/{repo}/blob/{path}"),
-        })
+/// The blob URL for each in-app frame whose file really exists in the declared repo,
+/// by its position in the rendered list.
+///
+/// Only in-app frames are candidates: a frame out of site-packages names a file that
+/// is not in this repo even when a file by that name happens to be.
+async fn frame_links(
+    cx: &Cx,
+    project: &Project,
+    frames: &[Frame],
+) -> std::collections::HashMap<usize, String> {
+    let mut links = std::collections::HashMap::new();
+    let Some(repo) = project.repo.as_deref() else { return links };
+    if !app(cx).config.knows_repo(repo) {
+        return links;
     }
+    let wanted: Vec<(usize, &str, Option<i64>)> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, frame)| frame.in_app)
+        .filter_map(|(index, frame)| Some((index, frame.path.as_deref()?, frame.line)))
+        .collect();
+
+    let paths: Vec<&str> = wanted.iter().map(|(_, path, _)| *path).collect();
+    let resolved = resolve_in_repo(cx, repo, &paths).await;
+    for (index, path, line) in wanted {
+        if resolved.contains(path) {
+            links.insert(index, blob_anchor(repo, path, line));
+        }
+    }
+    links
 }
 
 impl Detail {
@@ -883,7 +908,7 @@ async fn logs_page(cx: &Cx) -> Result<Response> {
         level: level.clone(),
         file,
         limit: LOGS_PER_PAGE,
-        offset: page * LOGS_PER_PAGE,
+        offset: page.saturating_mul(LOGS_PER_PAGE),
     };
     // One row over the page tells us whether there is another page without counting
     // the table, which on a hot window of millions is the difference that matters.
@@ -1020,18 +1045,47 @@ async fn code_links(
             linkable(path).then(|| (row.id, path.to_owned(), row.code_line))
         })
         .collect();
-    if wanted.is_empty() {
-        return links;
-    }
 
+    let paths: Vec<&str> = wanted.iter().map(|(_, path, _)| path.as_str()).collect();
+    let resolved = resolve_in_repo(cx, repo, &paths).await;
+    for (id, path, line) in &wanted {
+        if resolved.contains(path.as_str()) {
+            links.insert(*id, blob_anchor(repo, path, *line));
+        }
+    }
+    links
+}
+
+/// Which of `paths` actually name a file in `repo` at its default tip.
+///
+/// This is the code browser's own question, asked the same way it asks it: list the
+/// parent directory and look for the name, rejecting a directory. One `ls-tree` per
+/// distinct directory, so a page of a hundred rows out of three files costs three
+/// calls rather than a hundred.
+///
+/// Everything here exists to keep a dead link off the page. SPEC is explicit that an
+/// unresolvable path renders as text, and a file that has since been renamed is
+/// exactly the case a purely syntactic check would get wrong.
+async fn resolve_in_repo(
+    cx: &Cx,
+    repo: &str,
+    paths: &[&str],
+) -> std::collections::HashSet<String> {
+    let mut resolved = std::collections::HashSet::new();
+    if paths.is_empty() {
+        return resolved;
+    }
     let mirror = app(cx).mirrors.repo(repo);
-    let Ok(branch) = mirror.default_branch().await else { return links };
-    let Ok(tip) = mirror.tip(&branch).await else { return links };
+    let Ok(branch) = mirror.default_branch().await else { return resolved };
+    let Ok(tip) = mirror.tip(&branch).await else { return resolved };
 
     let mut listings: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
-    for (id, path, line) in wanted {
-        let (dir, file) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
+    for path in paths {
+        if !linkable(path) || resolved.contains(*path) {
+            continue;
+        }
+        let (dir, file) = path.rsplit_once('/').unwrap_or(("", path));
         if !listings.contains_key(dir) {
             let entries = mirror
                 .ls_tree(&tip, dir)
@@ -1046,14 +1100,19 @@ async fn code_links(
             listings.insert(dir.to_owned(), entries);
         }
         if listings[dir].iter().any(|name| name == file) {
-            let url = crate::render::blob_url(repo, &path);
-            links.insert(id, match line {
-                Some(line) if line > 0 => format!("{url}#L{line}"),
-                _ => url,
-            });
+            resolved.insert((*path).to_owned());
         }
     }
-    links
+    resolved
+}
+
+/// The blob URL for a path, anchored at its line when it has a usable one.
+fn blob_anchor(repo: &str, path: &str, line: Option<i64>) -> String {
+    let url = crate::render::blob_url(repo, path);
+    match line {
+        Some(line) if line > 0 => format!("{url}#L{line}"),
+        _ => url,
+    }
 }
 
 /// A path that could name a file inside a repo. An absolute one comes from the

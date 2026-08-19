@@ -27,8 +27,14 @@ pub struct Job {
     /// The `bugs_envelopes` row this body came from, stamped `digested_at` when the
     /// job finishes. `None` only when recording the row itself failed.
     pub envelope_id: Option<i64>,
+    /// The bucket object this body is stored as. Stable across re-digests, which is
+    /// what lets the log rows dedupe when a sweep runs the same envelope again.
+    pub envelope_key: String,
     /// The envelope exactly as it arrived, decompressed.
     pub body: Vec<u8>,
+    /// The queue's memory budget for this body. Released when the job is dropped,
+    /// which is after the digest has finished with it.
+    pub _bytes: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// What one envelope did. Returned for tests and for the counters slice 2 needs.
@@ -86,7 +92,7 @@ impl Worker {
         let split = envelope::split(&job.body).map_err(|error| error.to_string())?;
         let mut outcome = Outcome::default();
 
-        for item in &split.items {
+        for (index, item) in split.items.iter().enumerate() {
             // Door one for logs: a `log` container item, which every current SDK
             // sends through the same endpoint as its errors.
             if item.ty == "log" {
@@ -95,12 +101,17 @@ impl Worker {
                     outcome.skipped += 1;
                     continue;
                 }
+                // The origin names the item, not the batch: re-digesting this
+                // envelope must reach the same string or the sweep files every line
+                // again. `logs::insert` dedupes on it.
+                let origin = format!("{}#{index}", job.envelope_key);
                 match logs::store_batch(
                     &self.db,
                     &self.store,
                     job.project_id,
                     &records,
                     logs::source::ENVELOPE,
+                    Some(&origin),
                 )
                 .await
                 {

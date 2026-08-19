@@ -172,7 +172,7 @@ async fn a_sentry_log_item_and_a_curl_ndjson_post_both_land_and_are_searchable()
     let answer = post_ndjson(&bed, id, &key, lines).await;
     assert_eq!(answer.status, 200, "{}", answer.body);
     assert_eq!(answer.json()["accepted"], 2);
-    assert!(answer.json()["rejected"].as_array().expect("a list").is_empty());
+    assert_eq!(answer.json()["rejected"]["count"], 0);
 
     // Four lines in total: two from the SDK, two from curl.
     let page = get(&bed, "/bugs/api/logs", &[JSON]).await.json();
@@ -391,7 +391,8 @@ async fn the_ndjson_door_takes_the_same_key_as_the_envelope_route() {
     let mixed = format!("{line}not json at all\n{line}");
     let answer = post_ndjson(&bed, id, &key, &mixed).await;
     assert_eq!(answer.json()["accepted"], 2);
-    assert_eq!(answer.json()["rejected"], serde_json::json!([2]));
+    assert_eq!(answer.json()["rejected"]["count"], 1);
+    assert_eq!(answer.json()["rejected"]["lines"], serde_json::json!([2]));
 
     // And an oversized body is refused on the same cap the envelopes get.
     let huge = "x".repeat(21 * 1024 * 1024);
@@ -411,4 +412,77 @@ async fn with_no_bucket_the_log_routes_answer_404() {
         send(&bed.router, Method::POST, "/api/1/logs", &[], b"{}\n".to_vec()).await.status,
         404
     );
+}
+
+// ---- the review's two blockers, through the router --------------------------------
+
+#[tokio::test]
+async fn a_batch_with_too_many_lines_is_413_and_nothing_in_it_is_stored() {
+    let (bed, bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api", None).await;
+
+    // The cheap flood: every line passes the per-line length cap, and there are far
+    // too many of them. Before the cap this built a Vec of every rejected line
+    // number and echoed the lot back.
+    let flood = "0\n".repeat(nashcode::bugs::logs::MAX_BATCH + 100);
+    let answer = post_ndjson(&bed, id, &key, &flood).await;
+    assert_eq!(answer.status, 413, "{}", answer.body);
+    assert!(answer.body.len() < 4096, "the refusal is small: {} bytes", answer.body.len());
+
+    // The expensive flood: valid lines, which would have been one enormous
+    // transaction on the connection every page load shares.
+    let valid = "{\"message\":\"x\"}\n".repeat(nashcode::bugs::logs::MAX_BATCH + 1);
+    assert_eq!(post_ndjson(&bed, id, &key, &valid).await.status, 413);
+
+    // Neither one left anything behind.
+    assert_eq!(bed.bugs.log_count(id).unwrap(), 0);
+    assert!(!walk(&bucket).iter().any(|path| path.contains("/logs/")), "no archive object");
+
+    // A batch at the cap still works, so the limit is a limit and not a wall.
+    let full = "{\"message\":\"fine\"}\n".repeat(nashcode::bugs::logs::MAX_BATCH);
+    let answer = post_ndjson(&bed, id, &key, &full).await;
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert_eq!(answer.json()["accepted"], nashcode::bugs::logs::MAX_BATCH);
+}
+
+#[tokio::test]
+async fn many_bad_lines_produce_a_small_answer() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api", None).await;
+
+    let bad = "nope\n".repeat(500);
+    let answer = post_ndjson(&bed, id, &key, &bad).await;
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert_eq!(answer.json()["rejected"]["count"], 500, "the count is exact");
+    assert_eq!(
+        answer.json()["rejected"]["lines"].as_array().expect("a list").len(),
+        nashcode::bugs::logs::MAX_REPORTED_REJECTS,
+        "the sample is capped"
+    );
+    assert!(answer.body.len() < 1024, "a small request buys a small answer");
+}
+
+#[tokio::test]
+async fn a_sweep_files_each_log_line_once_however_often_it_runs() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api", None).await;
+
+    assert_eq!(post_envelope(&bed, id, &key, fixture("sentry-logs.envelope")).await.status, 200);
+    bed.bugs.digested(1).await;
+    assert_eq!(bed.bugs.log_count(id).unwrap(), 2);
+
+    // `sweep(true)` is the reindex primitive: it re-reads every stored envelope and
+    // digests it again. Events have always deduped on their id; log rows did not,
+    // so every pass used to double the store.
+    assert_eq!(bed.bugs.sweep(true).await, 1);
+    bed.bugs.digested(2).await;
+    assert_eq!(bed.bugs.log_count(id).unwrap(), 2, "a re-digest files nothing new");
+
+    assert_eq!(bed.bugs.sweep(true).await, 1);
+    bed.bugs.digested(3).await;
+    assert_eq!(bed.bugs.log_count(id).unwrap(), 2);
+
+    // And the search still finds one of each, not three.
+    let found = get(&bed, "/bugs/api/logs?q=cache", &[JSON]).await.json();
+    assert_eq!(found["logs"].as_array().expect("logs").len(), 1);
 }

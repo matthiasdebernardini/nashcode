@@ -127,11 +127,16 @@ pub enum Landing {
 /// bucket keeps everything anyway, so this only decides what search is fast over.
 pub const DEFAULT_RETENTION_DAYS: i64 = 30;
 
+/// The same number as SQL sees it. A const cannot be formatted without pulling in a
+/// crate for it, so the two are pinned by a test instead — they cannot drift without
+/// the suite going red, which is the property that was wanted.
+const RETENTION_COLUMN: &str = "INTEGER NOT NULL DEFAULT 30";
+
 /// Apply the bugs schema. Idempotent, run on every open.
 pub fn migrate(db: &Db) -> DbResult<()> {
     db.with(|conn| {
         conn.execute_batch(SCHEMA)?;
-        add_missing_columns(conn)
+        add_columns(conn, ADDED_COLUMNS)
     })
 }
 
@@ -495,12 +500,14 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     // write leaves the object safe and the row unfinished.
     ("bugs_envelopes", "digested_at", "TEXT"),
     // How long a project's log rows stay in the hot window.
-    ("bugs_projects", "retention_days", "INTEGER NOT NULL DEFAULT 30"),
+    ("bugs_projects", "retention_days", RETENTION_COLUMN),
 ];
 
 /// Add a column if the table does not have it yet.
-fn add_missing_columns(conn: &Connection) -> DbResult<()> {
-    for (table, column, definition) in ADDED_COLUMNS {
+///
+/// Shared with [`crate::bugs::logs`], which owns its own table and so its own list.
+pub fn add_columns(conn: &Connection, wanted: &[(&str, &str, &str)]) -> DbResult<()> {
+    for (table, column, definition) in wanted {
         let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
         let mut present = false;
         let names = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -588,6 +595,15 @@ mod tests {
             platform: Some("python".to_owned()),
             timestamp: Some("2026-08-19T00:00:00Z".to_owned()),
         }
+    }
+
+    #[test]
+    fn the_column_default_and_the_rust_constant_are_the_same_number() {
+        assert_eq!(
+            RETENTION_COLUMN,
+            format!("INTEGER NOT NULL DEFAULT {DEFAULT_RETENTION_DAYS}"),
+            "a project created before the column existed would get a different window"
+        );
     }
 
     #[test]
