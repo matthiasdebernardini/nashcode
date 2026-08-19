@@ -107,14 +107,37 @@ impl Config {
     }
 
     /// Path of the `--mirror` clone for a repo.
+    ///
+    /// A repo name that is not a plain name yields a path *inside* the mirror
+    /// directory that cannot exist, so it resolves to nothing rather than escaping.
+    /// [`knows_repo`](Self::knows_repo) is the real gate and every handler goes
+    /// through it; this is the second lock on the same door, for the day a caller
+    /// forgets. `git --git-dir` takes whatever it is handed, so "forgot" would
+    /// otherwise mean "read any repository on the box".
     pub fn mirror_path(&self, repo: &str) -> PathBuf {
+        if !is_plain_name(repo) {
+            return self.mirrors.join("__rejected__.invalid");
+        }
         self.mirrors.join(format!("{repo}.git"))
     }
 
     /// True when `repo` is one of the configured repos. Guards every path parameter.
     pub fn knows_repo(&self, repo: &str) -> bool {
-        self.repos.iter().any(|known| known == repo)
+        is_plain_name(repo) && self.repos.iter().any(|known| known == repo)
     }
+}
+
+/// A name with no path in it: no separator, no traversal, no leading dash that a git
+/// subcommand would read as a flag. dgit's own rule is narrower still, but this is the
+/// property that matters here.
+fn is_plain_name(repo: &str) -> bool {
+    !repo.is_empty()
+        && repo != "."
+        && repo != ".."
+        && !repo.starts_with('-')
+        && !repo.contains('/')
+        && !repo.contains('\\')
+        && !repo.contains('\0')
 }
 
 /// Read the webhook map. A missing or malformed file is not fatal: webhooks are a
@@ -178,6 +201,27 @@ mod tests {
     #[test]
     fn a_missing_webhook_file_is_not_fatal() {
         assert!(load_webhooks(Path::new("/nonexistent/hooks.json")).is_empty());
+    }
+
+    #[test]
+    fn a_repo_name_carrying_a_path_is_never_known_and_never_becomes_one() {
+        let config = Config {
+            repos: vec!["demo".to_owned()],
+            mirrors: PathBuf::from("/srv/mirrors"),
+            ..Config::from_env()
+        };
+        assert!(config.knows_repo("demo"));
+        assert_eq!(config.mirror_path("demo"), PathBuf::from("/srv/mirrors/demo.git"));
+
+        // `git --git-dir` would happily take any of these.
+        for hostile in ["../../../../srv/git/private", "..", ".", "a/b", "-c", "x\0y", ""] {
+            assert!(!config.knows_repo(hostile), "{hostile} must not be known");
+            let path = config.mirror_path(hostile);
+            assert!(
+                path.starts_with("/srv/mirrors") && !path.to_string_lossy().contains(".."),
+                "{hostile} escaped to {path:?}"
+            );
+        }
     }
 
     #[test]

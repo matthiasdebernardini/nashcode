@@ -681,6 +681,33 @@ async fn brain_ask_offers_the_code_tools_and_feeds_their_answers_back() {
 }
 
 #[tokio::test]
+async fn brain_ask_refuses_a_repo_it_was_never_configured_with() {
+    // `repo` reaches Config::mirror_path and from there `git --git-dir`. Unchecked,
+    // this reads any repository on the box; it must not get as far as the model.
+    let never_answered = serde_json::json!({
+        "content": [{ "type": "text", "text": "this must never be reached" }],
+        "stop_reason": "end_turn",
+        "model": "claude-opus-5",
+    });
+    let mut stub = common::spawn_stub("HTTP/1.1 200 OK", never_answered.to_string()).await;
+    let bed = asking_bed(&stub.url);
+
+    for hostile in ["../../../../srv/git/private", "..", "other-repo", "demo/../evil"] {
+        let (status, body) = post_json(
+            &bed.router,
+            "/brain/ask",
+            serde_json::json!({ "question": "anything", "repo": hostile }),
+        )
+        .await;
+        assert_eq!(status, 404, "{hostile} was accepted: {body}");
+    }
+    assert!(
+        stub.received.try_recv().is_err(),
+        "a rejected repo must not reach the upstream API at all"
+    );
+}
+
+#[tokio::test]
 async fn a_tool_call_naming_a_repo_out_of_scope_is_refused() {
     let asked = serde_json::json!({
         "content": [{

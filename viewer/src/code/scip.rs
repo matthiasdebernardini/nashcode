@@ -55,10 +55,25 @@ struct Indexer {
 }
 
 /// The indexers, in the order they run. Each is optional; none is required.
+///
+/// `rust-analyzer scip` runs `cargo check` unless told otherwise, and `cargo check`
+/// executes the repo's `build.rs` and expands its proc macros. That is arbitrary code
+/// from the indexed repository, so both are switched off: what the overlay needs is
+/// name resolution, not a build. Together with the cleared environment in
+/// [`run_indexer`], indexing a repository does not hand it the server.
 const INDEXERS: &[Indexer] = &[
     Indexer {
         program: "rust-analyzer",
-        args: &["scip", ".", "--output", "{out}"],
+        args: &[
+            "scip",
+            ".",
+            "--output",
+            "{out}",
+            "--config",
+            "cargo.buildScripts.enable=false",
+            "--config",
+            "procMacro.enable=false",
+        ],
         language: "rust",
         marker: "Cargo.toml",
     },
@@ -195,10 +210,19 @@ async fn run_indexer(
         .map(|arg| arg.replace("{out}", &output.to_string_lossy()))
         .collect();
 
+    // The same rule the CI worker runs jobs under: an indexer is repo-controlled code
+    // (rust-analyzer alone shells out to cargo), so it gets a shell's worth of
+    // environment and nothing else. `ANTHROPIC_API_KEY`, `GIT_TOKEN`, and every other
+    // secret the server holds stay with the server.
     let mut command = tokio::process::Command::new(indexer.program);
     command
         .args(&args)
         .current_dir(checkout)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()))
+        .env("HOME", std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+        // Nothing here may stop to ask a human for a password.
+        .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -487,5 +511,63 @@ mod tests {
     fn an_absent_indexer_is_simply_not_found() {
         assert!(which("nashcode-no-such-indexer-exists").is_none());
         assert!(which("sh").is_some(), "sh is on PATH everywhere this runs");
+    }
+
+    #[tokio::test]
+    async fn an_indexer_sees_a_shells_worth_of_environment_and_nothing_else() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("fake-indexer");
+        // Dump the whole environment where the test can read it back.
+        std::fs::write(&script, "#!/bin/sh\nenv > \"$1\"\n").expect("write");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+
+        let indexer = Indexer {
+            program: Box::leak(script.to_string_lossy().into_owned().into_boxed_str()),
+            args: &["{out}"],
+            language: "fake",
+            marker: "anything",
+        };
+        let output = dir.path().join("env.txt");
+        run_indexer(&indexer, dir.path(), &output).await.expect("the fake runs");
+
+        let seen: Vec<String> = std::fs::read_to_string(&output)
+            .expect("the fake wrote its environment")
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name.to_owned()))
+            .collect();
+
+        // The parent process is a cargo test binary, so it carries dozens of
+        // variables. The child must have inherited none of them.
+        assert!(seen.contains(&"PATH".to_owned()), "{seen:?}");
+        assert!(seen.contains(&"HOME".to_owned()), "{seen:?}");
+        for leaked in ["ANTHROPIC_API_KEY", "GIT_TOKEN", "CARGO", "CARGO_PKG_NAME"] {
+            assert!(
+                !seen.contains(&leaked.to_owned()),
+                "{leaked} reached an indexer: {seen:?}"
+            );
+        }
+        // `env` adds PWD and _ of its own; nothing else may be there.
+        let unexpected: Vec<&String> = seen
+            .iter()
+            .filter(|name| {
+                !matches!(
+                    name.as_str(),
+                    "PATH" | "HOME" | "GIT_TERMINAL_PROMPT" | "PWD" | "_" | "SHLVL"
+                )
+            })
+            .collect();
+        assert!(unexpected.is_empty(), "unexpected variables: {unexpected:?}");
+    }
+
+    #[test]
+    fn the_rust_indexer_never_builds_the_repository_it_is_reading() {
+        // `cargo check` would run the repo's build.rs and expand its proc macros,
+        // which is arbitrary code from the thing being indexed.
+        let rust = INDEXERS.iter().find(|i| i.program == "rust-analyzer").expect("rust");
+        assert!(rust.args.contains(&"cargo.buildScripts.enable=false"), "{:?}", rust.args);
+        assert!(rust.args.contains(&"procMacro.enable=false"), "{:?}", rust.args);
     }
 }

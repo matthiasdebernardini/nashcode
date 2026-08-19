@@ -717,6 +717,15 @@ async fn brain_ask(cx: &Cx, Json(input): Json<AskIn>) -> Result<Response> {
     if input.question.trim().is_empty() {
         return Err(bad_request("question is required").into());
     }
+    // `repo` reaches `Config::mirror_path` and from there `git --git-dir`, so an
+    // unchecked value is a way to read any repository on the box. Every other handler
+    // takes its repo from a path parameter it has already validated; this one takes it
+    // from a JSON body, which is why the check has to be here.
+    if let Some(repo) = &input.repo
+        && !app.config.knows_repo(repo)
+    {
+        return Err(topcoat::router::error::not_found().into());
+    }
 
     let state = app
         .brain
