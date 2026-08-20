@@ -135,12 +135,29 @@ pub fn init(dsn: Option<&str>, release: Option<String>) -> Option<ClientInitGuar
         // Warnings become log lines rather than issues, which is why the `logs` feature
         // is on: the logs page is where the context around an error lives.
         .enable_logs(true)
+        // The last gate, and the only one some events ever pass. Two kinds reach the
+        // client without going through the tracing layer at all, so the layer's filter
+        // never sees them: a **panic**, captured by the panic hook, and a **log record
+        // from a foreign crate**, captured because `enable_logs` is on. A panic inside
+        // the ingest door while it handles a self-report envelope is the loop the layer
+        // was written to close, arriving by the one path the layer cannot watch.
+        //
+        // `in_pipeline` is readable here for the same reason it is readable in the
+        // layer: a hook fires synchronously, on the task that captured, inside the poll
+        // that `quietly` scoped.
         .before_send(|mut event: Event<'static>| {
-            if !within_cap(now_secs()) {
+            if in_pipeline() || !within_cap(now_secs()) {
                 return None;
             }
             event.tags.insert(SELF_TAG.to_owned(), "1".to_owned());
             Some(event)
+        })
+        .before_send_log(|mut log| {
+            if in_pipeline() || !within_cap(now_secs()) {
+                return None;
+            }
+            log.attributes.insert(SELF_TAG.to_owned(), true.into());
+            Some(log)
         });
     options.dsn = Some(parsed);
     if let Some(release) = release {

@@ -362,24 +362,48 @@ that can run curl. Auth for the NDJSON door is the same DSN key (`?sentry_key=<k
 Read state as JSON, same accept-header convention as everything else:
 
 ```sh
-curl -s -H 'accept: application/json' "$NASHCODE/bugs"                       # projects
+curl -s -H 'accept: application/json' "$NASHCODE/bugs"                       # projects + notification state
 curl -s -H 'accept: application/json' "$NASHCODE/bugs/<project>"             # issues (+ ?state=unresolved|resolved|muted)
 curl -s -H 'accept: application/json' "$NASHCODE/bugs/<project>/issues/<id>" # one issue, events, stack
 curl -s -H 'accept: application/json' "$NASHCODE/bugs/<project>/logs?q=timeout&level=error"
 ```
 
+`GET /bugs` answers an object, not a bare list:
+`{"projects": [...], "pushover": {"on": <bool>, "budget": {...}}}`. The budget carries
+what is left of the month's notification allowance, how many messages are waiting, and
+`parked_until` when the queue is being held — read it before you conclude that a quiet
+phone means a quiet week.
+
 The logs search takes free text (FTS), a `file:` token to narrow by source file, a
 `level`, and a zero-based `page` (newest first). Resolve or mute an issue with
 `POST /bugs/<project>/issues/<id>/state` and a form body `state=resolved`.
 
-Two habits that make this useful to you:
+**Notifications go out on state changes only** — a new issue, a regression, an unmute —
+plus one extra as an unresolved issue crosses 10, 100 and 1000 events. Never one per
+event, and never for a log line. If you are wondering whether your thousand-event
+crash loop woke somebody: it sent four messages, and each rung rings once in an issue's
+life.
+
+Three habits that make this useful to you:
 
 - Attach `code.file.path` and `code.line.number` attributes to log records when your
   runtime does not already (Rust `tracing` does; Python's logger does not yet). A row
   that carries them links straight to the source line in the code browser when the
-  project declares its repo.
-- Set `release` to the git SHA you are running (most SDKs do this by default). It is
-  what pins a log line or stack frame to the exact commit.
+  project declares its repo, and carries the three lines either side.
+- **Set `release` to the git SHA you are running** (most SDKs do this by default). It is
+  what pins a log line or stack frame to the exact commit: with a SHA the mirror knows,
+  the source shown is the source that ran. Anything else — `v2.4.1`, a build number —
+  falls back to the default-branch tip, and the page says "tip, not release" so you know
+  you are reading today's code about yesterday's crash.
+- Report the path your process actually sees and do not try to make it repo-relative.
+  `/app/src/handler.py` from inside a container resolves by matching the longest suffix
+  that names exactly one file in the repo. Two files of the same name in different
+  directories are ambiguous and render as plain text rather than a link to the wrong
+  one, so a fuller path resolves where a bare filename will not.
+
+The viewer reports its own errors the same way when `NASHCODE_BUGS_SELF_DSN` is set,
+through the same public door. Notification links are built from `NASHCODE_URL`, so a
+deployment that leaves it unset sends links only that box can open.
 
 ## Rules
 

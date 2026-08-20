@@ -81,9 +81,16 @@ async fn serve() {
     let config = Arc::new(Config::from_env());
     // Held for the life of the process. Dropping it shuts the transport down, and the
     // last events — the ones from whatever is killing us — never leave.
+    // The release is read at run time, not baked in. It was `option_env!` first, which
+    // meant nothing ever set it and the one project this feature dogfoods was the one
+    // project whose snippets always said "tip, not release". Set it to the deployed
+    // commit and context capture works on nashcode's own issues too.
     let _reporting = nashcode::bugs::selfreport::init(
         config.bugs_self_dsn.as_deref(),
-        option_env!("NASHCODE_RELEASE").map(str::to_owned),
+        std::env::var("NASHCODE_RELEASE")
+            .ok()
+            .map(|release| release.trim().to_owned())
+            .filter(|release| !release.is_empty()),
     );
     // `Option<Layer>` is itself a `Layer`, so the wiring is the same either way.
     let reporting_layer = _reporting.as_ref().map(|_| nashcode::bugs::selfreport::layer());
@@ -323,6 +330,23 @@ fn doctor(config: &Config) {
         eprintln!(
             "doctor: NASHCODE_PUSHOVER_TOKEN and NASHCODE_PUSHOVER_USER are unset; a new \
              issue or a regression is recorded and shown, and nothing leaves the box"
+        );
+    } else if std::env::var("NASHCODE_URL").is_err() {
+        // Every notification carries a link, and with no NASHCODE_URL that link is the
+        // bind address — which resolves to the phone that is reading it. Silent until
+        // somebody taps one, which is the worst moment to find out.
+        eprintln!(
+            "doctor: Pushover is on and NASHCODE_URL is unset, so every notification \
+             will link to {}, which is this box and not a URL a phone can open. Set \
+             NASHCODE_URL to the tailnet address.",
+            config.public_url
+        );
+    }
+    if config.bugs_self_dsn.is_some() && std::env::var("NASHCODE_RELEASE").is_err() {
+        eprintln!(
+            "doctor: NASHCODE_BUGS_SELF_DSN is set and NASHCODE_RELEASE is not, so \
+             nashcode's own issues carry no release and their source snippets read the \
+             default-branch tip rather than the deployed commit"
         );
     }
     if config.bugs_self_dsn.is_none() {

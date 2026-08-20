@@ -36,6 +36,20 @@ pub const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 /// thing, silently.
 const MIN_SHA_LEN: usize = 7;
 
+/// How much of a tree listing is worth holding. `sentry.release` is a free-text
+/// attribute on every log row, so the number of trees a page could be asked to open is
+/// bounded by the sender and not by us; the bytes each one costs have to be bounded
+/// here. Eight mebibytes of path names is on the order of two hundred thousand files —
+/// far past any repository this serves, and far short of a page that swaps the box.
+pub const MAX_TREE_BYTES: usize = 8 * 1024 * 1024;
+
+/// How many distinct trees one page may hold at once.
+///
+/// In practice a page names one release. Four leaves room for a deploy in progress and
+/// a straggler, and refuses the pathological case: a hundred rows carrying a hundred
+/// different release strings is a sender being odd, not a page worth a hundred trees.
+pub const MAX_SOURCES: usize = 4;
+
 /// One repository, at one revision, ready to answer questions about paths.
 ///
 /// The tree listing is read once and reused, which is what makes suffix-matching a
@@ -47,8 +61,13 @@ pub struct Source {
     /// True when [`Source::rev`] is the default-branch tip because the release was
     /// missing or the mirror did not know it. The page has to say so.
     pub tip_not_release: bool,
-    /// Every path in the tree at `rev`.
+    /// Every path in the tree at `rev`, unless [`Source::truncated`].
     files: Vec<String>,
+    /// True when the tree listing hit [`MAX_TREE_BYTES`] and is only a prefix of the
+    /// repository. Exact matches off a partial list are still sound — a path that is
+    /// present is present — but *uniqueness* is not, so suffix matching is switched
+    /// off rather than allowed to link somebody to the wrong file.
+    truncated: bool,
 }
 
 /// What a reported path turned out to be.
@@ -110,46 +129,37 @@ impl Snippet {
 }
 
 impl Source {
-    /// Open a repository at the commit `release` names, or at the default tip.
+    /// Read the tree at an already-resolved commit.
     ///
-    /// `None` when the mirror cannot answer at all — no branches, no tree. That is a
-    /// degraded page, never an error: the log row or the frame renders as plain text
-    /// and the rest of the page is unaffected.
-    pub async fn open(repo: Repo, release: Option<&str>) -> Option<Self> {
-        let (rev, tip_not_release) = match Self::commit_for(&repo, release).await {
-            Some(rev) => (rev, false),
-            None => {
-                let branch = repo.default_branch().await.ok()?;
-                (repo.tip(&branch).await.ok()?, true)
-            }
-        };
-        let files = repo.list_files(&rev, "").await.ok()?;
-        Some(Self { repo, rev, tip_not_release, files })
-    }
-
-    /// Resolve `release` to a commit the mirror actually has.
+    /// Private, and the only way to build one: [`Catalog`] owns the question of *which*
+    /// commit, because that is where the bound on how many trees a page opens lives.
+    /// `None` when the mirror cannot answer — a degraded page, never an error.
     ///
-    /// Only something that looks like an object id is tried. A release named `v2.4.1`
-    /// or `main` would resolve — to a tag or a branch, which is not what the sender
-    /// meant and moves under us — so anything that is not hex of a plausible length is
-    /// refused here rather than half-trusted later.
-    async fn commit_for(repo: &Repo, release: Option<&str>) -> Option<String> {
-        let release = release?.trim();
-        let candidate = release.rsplit(['@', '+', '-']).next().unwrap_or(release);
-        for wanted in [release, candidate] {
-            if !looks_like_sha(wanted) {
-                continue;
-            }
-            // `^{commit}` refuses anything that is not a commit, so a blob whose id
-            // happens to share the prefix cannot become a revision.
-            if let Ok(rev) = repo.rev_parse(&format!("{wanted}^{{commit}}")).await {
-                let rev = rev.trim().to_owned();
-                if !rev.is_empty() {
-                    return Some(rev);
-                }
-            }
+    /// One `ls-tree -r`, byte-capped. The listing is what every path question on the
+    /// page is then answered from, in memory.
+    async fn open_at(repo: Repo, rev: String, tip_not_release: bool) -> Option<Self> {
+        let (code, bytes, truncated) = repo
+            .run_capped_bytes(
+                &["ls-tree", "-r", "--name-only", "-z", "--end-of-options", &rev],
+                MAX_TREE_BYTES,
+            )
+            .await
+            .ok()?;
+        if code.is_some_and(|code| code != 0) {
+            return None;
         }
-        None
+        let listing = String::from_utf8_lossy(&bytes);
+        let mut files: Vec<String> = listing
+            .split('\0')
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect();
+        // A cap that lands mid-name would invent a path that is not in the repository.
+        if truncated {
+            files.pop();
+        }
+        Some(Self { repo, rev, tip_not_release, files, truncated })
     }
 
     /// Which file in this tree the reported path means.
@@ -162,6 +172,10 @@ impl Source {
         let normalized = reported.replace('\\', "/");
         if self.files.iter().any(|file| file == &normalized) {
             return Resolution::Exact(normalized);
+        }
+        // Uniqueness over a partial listing is not uniqueness. See `truncated`.
+        if self.truncated {
+            return Resolution::Missing;
         }
         suffix_match(&self.files, &normalized)
     }
@@ -267,29 +281,134 @@ fn looks_like_sha(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// One repository's sources, one per release seen on the page.
+/// One repository's sources for the life of one page render.
 ///
-/// A page of log rows can name several releases; almost always it names one. Opening a
-/// source per row would run `ls-tree -r` per row, so they are kept here and shared.
+/// **Keyed on the resolved commit, never on the release string.** That distinction is
+/// the whole design. `sentry.release` is a free-text attribute that any sender can put
+/// anything in, so a hundred rows can carry a hundred different release strings. Keyed
+/// on the string, each one that the mirror cannot resolve would open its own source —
+/// `default_branch`, `tip`, and a full `ls-tree -r` apiece — and every one of them would
+/// be the *same tree*. Keyed on the commit, they all collapse onto the tip source: one
+/// listing, held once.
+///
+/// Two more bounds sit on top of that, because collapsing is not a bound. A release that
+/// cannot be an object id costs no subprocess at all, since the syntax check happens
+/// before the `rev_parse`; and one that can is remembered, so a repeated string is asked
+/// about once. Past [`MAX_SOURCES`] distinct trees the page stops opening new ones and
+/// falls back to the tip, which is honest — the snippet is then marked "tip, not
+/// release", which is exactly what it is.
 pub struct Catalog {
     repo: Repo,
-    sources: HashMap<Option<String>, Option<Arc<Source>>>,
+    /// Open trees by commit.
+    sources: HashMap<String, Option<Arc<Source>>>,
+    /// Release string to commit. `None` means "resolved to nothing", which is the tip.
+    resolved: HashMap<String, Option<String>>,
+    /// The default-branch tip. The outer `Option` is "not asked yet".
+    tip: Option<Option<String>>,
+    /// Every git subprocess this catalog has caused. Read by the tests that pin the
+    /// bound: the point of the cache is a number, so the number is observable.
+    git_calls: usize,
 }
 
 impl Catalog {
     pub fn new(repo: Repo) -> Self {
-        Self { repo, sources: HashMap::new() }
+        Self {
+            repo,
+            sources: HashMap::new(),
+            resolved: HashMap::new(),
+            tip: None,
+            git_calls: 0,
+        }
+    }
+
+    /// How many git subprocesses have been spawned for path resolution on this page.
+    pub fn git_calls(&self) -> usize {
+        self.git_calls
+    }
+
+    /// How many distinct trees are being held.
+    pub fn sources_open(&self) -> usize {
+        self.sources.values().filter(|source| source.is_some()).count()
     }
 
     /// The source for a release, opening it the first time and reusing it after.
     pub async fn source(&mut self, release: Option<&str>) -> Option<Arc<Source>> {
-        let key = release.map(str::to_owned);
-        if let Some(cached) = self.sources.get(&key) {
+        let named = match release {
+            Some(release) => self.rev_for(release).await,
+            None => None,
+        };
+        let (rev, tip_not_release) = match named {
+            Some(rev) => (rev, false),
+            None => (self.tip_rev().await?, true),
+        };
+        if let Some(cached) = self.sources.get(&rev) {
             return cached.clone();
         }
-        let opened = Source::open(self.repo.clone(), release).await.map(Arc::new);
-        self.sources.insert(key, opened.clone());
+        // Past the cap, everything lands on the tip rather than opening another tree.
+        // The tip is already held, so this costs nothing and says what it is.
+        if self.sources.len() >= MAX_SOURCES {
+            let tip = self.tip_rev().await?;
+            return self.sources.get(&tip).cloned().flatten();
+        }
+
+        self.git_calls += 1;
+        let opened =
+            Source::open_at(self.repo.clone(), rev.clone(), tip_not_release).await.map(Arc::new);
+        self.sources.insert(rev, opened.clone());
         opened
+    }
+
+    /// The commit a release names, when the mirror has one. `None` means "use the tip".
+    ///
+    /// The syntax check comes first and costs nothing, which is what keeps a page of
+    /// `v1.0.1`…`v1.0.100` from being a hundred subprocesses.
+    async fn rev_for(&mut self, release: &str) -> Option<String> {
+        let release = release.trim();
+        if release.is_empty() {
+            return None;
+        }
+        if let Some(known) = self.resolved.get(release) {
+            return known.clone();
+        }
+        // `sentry-cli` writes releases like `my-app@9f3c1a2`, so the tail after a
+        // separator is worth a try when the whole string is not an id. When there is no
+        // separator the tail *is* the whole string, and asking git the same question
+        // twice is one subprocess per row for nothing.
+        let candidate = release.rsplit(['@', '+', '-']).next().unwrap_or(release);
+        let mut tried: Vec<&str> = Vec::new();
+        let mut found = None;
+        for wanted in [release, candidate] {
+            if !looks_like_sha(wanted) || tried.contains(&wanted) {
+                continue;
+            }
+            tried.push(wanted);
+            self.git_calls += 1;
+            // `^{commit}` refuses anything that is not a commit, so a blob whose id
+            // happens to share the prefix cannot become a revision.
+            if let Ok(rev) = self.repo.rev_parse(&format!("{wanted}^{{commit}}")).await {
+                let rev = rev.trim().to_owned();
+                if !rev.is_empty() {
+                    found = Some(rev);
+                    break;
+                }
+            }
+        }
+        self.resolved.insert(release.to_owned(), found.clone());
+        found
+    }
+
+    /// The default-branch tip, asked for at most once.
+    async fn tip_rev(&mut self) -> Option<String> {
+        if let Some(known) = &self.tip {
+            return known.clone();
+        }
+        self.git_calls += 2;
+        let found = match self.repo.default_branch().await {
+            Ok(branch) => self.repo.tip(&branch).await.ok(),
+            Err(_) => None,
+        };
+        self.tip = Some(found.clone());
+        found
     }
 }
 
@@ -401,6 +520,31 @@ mod tests {
         );
         assert_eq!(release_of(&json!({"release": "  "})), None);
         assert_eq!(release_of(&json!({})), None);
+    }
+
+    /// A truncated listing can prove a path is present and cannot prove it is unique.
+    /// Exact matching survives; suffix matching does not, and pretending otherwise
+    /// would link somebody to a file that only looks like the right one.
+    #[test]
+    fn a_truncated_tree_still_matches_exactly_and_never_by_suffix() {
+        // Never touched: `resolve` reads the listing and nothing else.
+        let repo = Repo::mirror(std::path::PathBuf::from("/nonexistent"), crate::git::Auth::new(""));
+        let source = Source {
+            repo,
+            rev: "abc".to_owned(),
+            tip_not_release: false,
+            files: tree(&["src/foo.py", "src/bar.py"]),
+            truncated: true,
+        };
+        assert_eq!(source.resolve("src/foo.py"), Resolution::Exact("src/foo.py".to_owned()));
+        assert_eq!(source.resolve("/app/src/foo.py"), Resolution::Missing);
+
+        // Complete, the same question resolves.
+        let whole = Source { truncated: false, ..source };
+        assert_eq!(
+            whole.resolve("/app/src/foo.py"),
+            Resolution::Suffix("src/foo.py".to_owned())
+        );
     }
 
     #[test]

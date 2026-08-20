@@ -1463,6 +1463,15 @@ repeat key:
 That last one is why there is no cycle counter on `bugs_issues`. A rung is crossed once
 in an issue's life whatever happens to its state in between.
 
+**That is a decision, not an accident, and the SPEC said the opposite for a day.** The
+first draft claimed a rung could ring again per resolve cycle. It cannot: the event
+counter never resets, so a rung that has been crossed can never be crossed again, and a
+key with a cycle in it would have been a key that could never collide. The alternative —
+resetting the count on resolve — was considered and refused, because the ladder is about
+volume and volume is cumulative: an issue at 900 events that gets resolved and comes back
+is not an issue at zero. The regression push is the state change; the ladder is the
+weight. The SPEC sentence was amended to match the code rather than the other way round.
+
 ### The message budget belongs to the tags, not the exception
 
 The first build spent the whole 1024 characters on the exception value and clipped the
@@ -1524,6 +1533,33 @@ properties fall out of it and both are deliberate:
 Segment boundaries matter: `src/notfoo.py` ends with the string `foo.py` and is a
 different file.
 
+### The source cache is keyed on the commit, never on the release string
+
+The first build keyed it on the raw `sentry.release`. That is a sender-controlled
+free-text attribute on every log row, and the consequence was quadratic in the wrong
+variable: a hundred rows carrying `v1.0.1` … `v1.0.100` would open a hundred sources —
+`default_branch`, `tip` and a whole `ls-tree -r` apiece — and every one of them would be
+*the same tree*, because not one of those strings resolves to a commit.
+
+Resolving first and keying on the answer collapses them onto one. Three properties fall
+out and each one matters on its own:
+
+- A release that cannot be an object id costs no subprocess at all, because the syntax
+  check runs before the `rev_parse`.
+- A release that can is remembered, so fifty rows naming one release ask once.
+- Every unresolvable release lands on the same tip source, which is already open.
+
+`MAX_SOURCES = 4` sits on top, because collapsing is not a bound: four real commits on
+one page is a deploy in progress, forty is a sender being strange. Past the cap the page
+falls back to the tip, and the snippet then says "tip, not release", which is what it is.
+
+The tree listing is byte-capped at 8 MiB too — it used to go through `list_files`, which
+is uncapped, while the *snippet* read beside it was capped. A truncated listing turns
+suffix matching off rather than trusting it: membership still proves a path exists, but
+uniqueness over a partial list is not uniqueness, and a wrong link is worse than plain
+text. The last entry is dropped as well, since a cap that lands mid-name would invent a
+path that is not in the repository.
+
 ### What a page is allowed to spend
 
 Reading source is one `git show` per distinct `file:line`. A page of a hundred log rows
@@ -1538,6 +1574,43 @@ the constant to raise first if anybody complains.
 It was a bare array of projects. Whether a notification can still get out this month is
 part of the state of the feature, and a reader that has to make a second request for it
 will not make it. `{"projects": [...], "pushover": {"on": bool, "budget": {...}}}`.
+
+### Three things the review found that a test would not have
+
+- **The panic hook bypassed both non-recursion guards.** The tracing layer's filter is
+  the obvious place for them, and it is the wrong place for two kinds of event: a panic,
+  which the panic hook captures directly, and a log record from a foreign crate, which
+  `enable_logs` captures directly. A panic inside the ingest door while it handles a
+  self-report envelope is precisely the loop the guards exist for, arriving by the one
+  path the layer cannot watch. Both guards now also sit in `before_send` and
+  `before_send_log`, which every event passes through whatever captured it.
+- **`NASHCODE_RELEASE` was `option_env!`.** Compile-time, and nothing anywhere set it —
+  so the one project this phase dogfoods was the one project whose snippets always read
+  "tip, not release". It is `std::env::var` now, with a doctor line when the self-DSN is
+  set and the release is not.
+- **The 60/minute self-report cap discards; it does not defer.** Worth saying plainly
+  because "cap" reads like a queue. Over the limit, `before_send` returns `None` and the
+  event is gone. That is the right trade for a last-resort guard against a hot path that
+  fails on every request — the alternative is a buffer that grows exactly when the
+  process is least able to afford one — but it means the cap is a data-loss mechanism
+  and should never be the *first* line of defence. The name-based and task-based guards
+  are.
+
+### Two smaller things, written down because they will look arbitrary later
+
+- **A message is claimed before it is sent, not marked after.** `next_pending` is one
+  `UPDATE … RETURNING` that writes a 60-second lease into `not_before`. Nothing today
+  runs two senders — one task per process — but "one process" is a property of the
+  deployment, not of the code, and a restart that overlaps its predecessor would
+  otherwise have both send every pending notification. The lease rides the field the
+  retry path already respects, so a sender that dies holding one releases it by doing
+  nothing.
+- **A future `nashcode bugs reindex` must build its digest with `Notifier::off()`.**
+  Re-digesting the bucket replays every event through `index::record`, which will report
+  every issue as new again. The dedupe keys stop the *queue* from doubling, but only
+  because the rows are still there; a reindex into a fresh database has no rows and would
+  ring for the entire history at once. The sweep is safe today because it re-digests
+  envelopes whose issues already exist.
 
 ### `Config` grew three fields, and `db.rs` grew two functions
 

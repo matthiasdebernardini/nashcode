@@ -138,18 +138,25 @@ impl Notifier {
     ///
     /// `event` is the raw event JSON, for the exception value and the tags. It is
     /// optional because the ladder can fire from a replay that has no payload to hand.
+    ///
+    /// `added` is how many events this landing put on the issue. The digest adds one,
+    /// always, because it is a single writer — but that invariant lives in another
+    /// module, and the ladder depends on it: a writer that added five at once would
+    /// step straight over a rung and the push would silently never happen. Passing the
+    /// step makes the dependency an argument instead of an assumption.
     pub fn landed(
         &self,
         db: &Db,
         project: &Project,
         issue: &Issue,
         landing: Landing,
+        added: i64,
         event: Option<&Value>,
     ) {
         if !self.on {
             return;
         }
-        for queued in self.messages_for(project, issue, landing, event) {
+        for queued in self.messages_for(project, issue, landing, added, event) {
             if let Err(error) = enqueue(db, &queued) {
                 // A notification that cannot be queued is not worth failing a digest
                 // over: the event itself is indexed and the issue is on the page.
@@ -187,6 +194,7 @@ impl Notifier {
         project: &Project,
         issue: &Issue,
         landing: Landing,
+        added: i64,
         event: Option<&Value>,
     ) -> Vec<Queued> {
         let mut queued = Vec::new();
@@ -223,8 +231,16 @@ impl Notifier {
 
         // The ladder. Only for an issue somebody could still act on: a muted or
         // resolved one is a decision already taken, and a rung is not news.
+        //
+        // A *range*, not equality on the count. Equality is correct only because the
+        // digest is a single writer that adds exactly one, which is an invariant living
+        // in another module: the day a batch import adds five at once, equality would
+        // step straight over a rung and the push would never happen. Asking whether the
+        // rung is inside the step costs nothing and does not care how big the step is.
+        let before = issue.events - added.max(0);
         if issue.state == state::UNRESOLVED
-            && let Some(rung) = LADDER.iter().copied().find(|rung| *rung == issue.events)
+            && let Some(rung) =
+                LADDER.iter().copied().find(|rung| before < *rung && *rung <= issue.events)
         {
             queued.push(Queued {
                 project_id: project.id,
@@ -331,7 +347,7 @@ fn tag_line(event: Option<&Value>) -> String {
     let mut chosen: Vec<String> = Vec::new();
     for key in preferred {
         if let Some(value) = tags.get(key).and_then(render_tag) {
-            chosen.push(format!("{key}={value}"));
+            chosen.push(format!("{}={value}", render_key(key)));
         }
     }
     for (key, value) in tags {
@@ -342,11 +358,17 @@ fn tag_line(event: Option<&Value>) -> String {
             continue;
         }
         if let Some(value) = render_tag(value) {
-            chosen.push(format!("{key}={value}"));
+            chosen.push(format!("{}={value}", render_key(key)));
         }
     }
     chosen.truncate(TAGS_SHOWN);
     chosen.join(" · ")
+}
+
+/// A tag key is sender-controlled too, and a four-kilobyte key would spend the whole
+/// message budget before the exception value got a character. Same rule as the value.
+fn render_key(key: &str) -> String {
+    clip(key, TAG_VALUE_MAX)
 }
 
 fn render_tag(value: &Value) -> Option<String> {
@@ -426,17 +448,39 @@ pub struct Pending {
     pub attempts: i64,
 }
 
+/// How long a claimed message is invisible to another sender.
+///
+/// Longer than the HTTP timeout, so a sender that is merely slow keeps its own row; short
+/// enough that a sender which died mid-send hands the row back inside a minute.
+pub const LEASE_SECS: i64 = 60;
+
+/// Take the next message, and take it *exclusively*.
+///
+/// The select and the claim are one statement, so two senders cannot both read the same
+/// row and both post it. Nothing today runs two — there is one task per process — but
+/// "one process" is a deployment property, not a code property: a restart that overlaps
+/// its predecessor, or a second viewer pointed at the same SQLite file, would otherwise
+/// each send every pending notification. The claim is one `UPDATE ... RETURNING` and
+/// costs nothing, which is the argument for doing it now rather than after somebody's
+/// phone has buzzed twice.
+///
+/// The lease is written into `not_before`, which the ordinary retry path already
+/// respects — so a sender that dies holding a claim releases it by doing nothing.
 fn next_pending(db: &Db) -> DbResult<Option<Pending>> {
     let now = now();
+    let lease = now_offset(LEASE_SECS);
     db.with(|conn| {
         conn.query_row(
-            "SELECT id, reason, title, message, url, priority, attempts
-             FROM bugs_pushes
-             WHERE sent_at IS NULL AND failed_at IS NULL
-               AND (not_before IS NULL OR not_before <= ?1)
-             ORDER BY COALESCE(not_before, queued_at), id
-             LIMIT 1",
-            params![now],
+            "UPDATE bugs_pushes SET not_before = ?2
+             WHERE id = (
+                 SELECT id FROM bugs_pushes
+                 WHERE sent_at IS NULL AND failed_at IS NULL
+                   AND (not_before IS NULL OR not_before <= ?1)
+                 ORDER BY COALESCE(not_before, queued_at), id
+                 LIMIT 1
+             )
+             RETURNING id, reason, title, message, url, priority, attempts",
+            params![now, lease],
             |row| {
                 Ok(Pending {
                     id: row.get(0)?,
@@ -830,7 +874,15 @@ impl Sender {
             // The message was fine and the account is out of budget. Every message is
             // still a row, so parking costs nothing but time.
             Answer::RateLimited { until } => {
-                let until = until.unwrap_or_else(|| now_offset(BLIND_PARK_SECS));
+                // A reset that has already passed — a clock that disagrees with ours, a
+                // header echoed from a cached response — parks the queue until a moment
+                // in the past, which is not a park at all: the next turn would send
+                // again immediately and be refused again, once every tick for as long
+                // as the limit lasts. The floor makes the worst case a retry every five
+                // seconds instead of a retry every turn.
+                let until = until
+                    .unwrap_or_else(|| now_offset(BLIND_PARK_SECS))
+                    .max(now_offset(RETRY_FLOOR_SECS));
                 if let Err(error) = park(&self.db, &until, "Pushover answered 429") {
                     tracing::warn!(%error, "bugs: cannot park the Pushover queue");
                 }
@@ -983,12 +1035,13 @@ mod tests {
             active: true,
         };
         let messages =
-            notifier().messages_for(&project, &issue(2, "error", state::UNRESOLVED), Landing::Repeat, None);
+            notifier().messages_for(&project, &issue(2, "error", state::UNRESOLVED), Landing::Repeat, 1, None);
         assert!(messages.is_empty());
         let duplicate = notifier().messages_for(
             &project,
             &issue(1, "error", state::UNRESOLVED),
             Landing::Duplicate,
+            1,
             None,
         );
         assert!(duplicate.is_empty());
@@ -1012,6 +1065,7 @@ mod tests {
                         &project,
                         &issue(*count, "error", state::UNRESOLVED),
                         Landing::Repeat,
+                        1,
                         None,
                     )
                     .is_empty()
@@ -1023,7 +1077,7 @@ mod tests {
         for quiet in [state::RESOLVED, state::MUTED] {
             assert!(
                 notifier()
-                    .messages_for(&project, &issue(100, "error", quiet), Landing::Repeat, None)
+                    .messages_for(&project, &issue(100, "error", quiet), Landing::Repeat, 1, None)
                     .is_empty(),
                 "{quiet} rang"
             );
@@ -1043,7 +1097,7 @@ mod tests {
         };
         let mut long = issue(1, "error", state::UNRESOLVED);
         long.title = "t".repeat(4000);
-        let messages = notifier().messages_for(&project, &long, Landing::New, None);
+        let messages = notifier().messages_for(&project, &long, Landing::New, 1, None);
         assert_eq!(messages.len(), 1);
         assert!(messages[0].title.chars().count() <= TITLE_MAX);
         assert!(messages[0].message.chars().count() <= MESSAGE_MAX);
@@ -1052,7 +1106,7 @@ mod tests {
         // body: Pushover answers 4xx to an empty message, and a 4xx is final.
         let mut blank = issue(1, "error", state::UNRESOLVED);
         blank.title = String::new();
-        let blank = notifier().messages_for(&project, &blank, Landing::New, Some(&json!({})));
+        let blank = notifier().messages_for(&project, &blank, Landing::New, 1, Some(&json!({})));
         assert!(!blank[0].message.trim().is_empty());
     }
 
@@ -1109,7 +1163,7 @@ mod tests {
     fn a_disabled_notifier_writes_nothing() {
         let (db, project) = bed();
         let off = Notifier::off();
-        off.landed(&db, &project, &issue(1, "error", state::UNRESOLVED), Landing::New, None);
+        off.landed(&db, &project, &issue(1, "error", state::UNRESOLVED), Landing::New, 1, None);
         assert_eq!(pending_count(&db).unwrap(), 0);
     }
 
@@ -1142,6 +1196,35 @@ mod tests {
 
         unpark(&db).unwrap();
         assert!(budget(&db).unwrap().parked_until.is_none());
+    }
+
+    /// Every deadline this module stores is compared with `>` against `now()`, so the
+    /// two other ways a timestamp gets made here have to sort the same way. They come
+    /// out of one formatter today; this is the assertion that notices the day one of
+    /// them does not, because the symptom otherwise is a park that never expires or a
+    /// retry that never waits — both silent.
+    #[test]
+    fn every_way_of_making_a_timestamp_sorts_against_every_other() {
+        let now = now();
+        let past = now_offset(-60);
+        let future = now_offset(60);
+        assert!(past < now && now < future, "{past} {now} {future}");
+
+        // A Unix second is what Pushover dates its reset with, and parking depends on
+        // comparing it to `now()`.
+        let epoch_past = from_unix(1).expect("a timestamp");
+        assert!(epoch_past < now, "{epoch_past} is not before {now}");
+        let epoch_future = from_unix(4_102_444_800).expect("a timestamp");
+        assert!(epoch_future > now, "{epoch_future} is not after {now}");
+
+        // Same instant, two routes, one string. This is the property, not the length.
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock")
+            .as_secs() as i64;
+        let from_epoch = from_unix(seconds).expect("a timestamp");
+        assert_eq!(from_epoch.len(), now.len(), "{from_epoch} and {now} must sort as text");
+        assert!(from_epoch.ends_with('Z') && now.ends_with('Z'));
     }
 
     #[test]

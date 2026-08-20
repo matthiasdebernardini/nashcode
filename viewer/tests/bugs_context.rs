@@ -341,3 +341,76 @@ async fn a_project_with_no_repo_shows_the_frame_and_reads_nothing() {
     assert!(!page.contains("/app/blob/"), "with nowhere to link it");
     assert!(!page.contains("TIP_TWO_DIVISOR"), "and no source is read");
 }
+
+// ---- what a page is allowed to spend -------------------------------------------------
+
+/// `sentry.release` is a free attribute: a sender can put anything in it, on every row.
+///
+/// Keyed on the release *string*, a page of a hundred rows carrying a hundred different
+/// version numbers would open a hundred sources — `default_branch`, `tip` and a full
+/// `ls-tree -r` apiece — and every one of them would be the same tree. Keyed on the
+/// resolved commit, they collapse onto one. This is the bound, measured rather than
+/// asserted by inspection.
+#[tokio::test]
+async fn a_hundred_bogus_releases_cost_the_same_as_one() {
+    let fixture = fixture();
+    fixture.bed.mirrors.refresh_now("app").await;
+
+    let mut catalog =
+        nashcode::bugs::context::Catalog::new(fixture.bed.mirrors.repo("app"));
+    for n in 0..100 {
+        let release = format!("v1.0.{n}");
+        let source = catalog.source(Some(&release)).await.expect("the tip");
+        assert!(source.tip_not_release, "a version number is not a commit");
+    }
+
+    // Two calls, ever: `default_branch` and `tip`, plus the one `ls-tree` that opened
+    // the tree. Not one of the hundred releases could be an object id, so not one of
+    // them cost a `rev_parse` — the syntax check runs before the subprocess does.
+    assert_eq!(catalog.sources_open(), 1, "one tree for a hundred releases");
+    assert_eq!(catalog.git_calls(), 3, "default_branch, tip, ls-tree — and nothing else");
+
+    // A release that *could* be a commit costs exactly one lookup, however often it is
+    // named — one, not two: a release with no `@` in it is its own tail, and asking git
+    // the same question twice is a subprocess per row for nothing.
+    for _ in 0..50 {
+        catalog.source(Some("0123456789abcdef0123456789abcdef01234567")).await;
+    }
+    assert_eq!(catalog.git_calls(), 4, "one rev_parse for fifty rows naming one release");
+    assert_eq!(catalog.sources_open(), 1, "and it resolved to nothing, so still the tip");
+
+    for _ in 0..50 {
+        catalog.source(Some(&fixture.release)).await;
+    }
+    assert_eq!(catalog.sources_open(), 2, "the release the mirror knows is its own tree");
+    assert_eq!(catalog.git_calls(), 6, "one rev_parse and one ls-tree, once");
+}
+
+#[tokio::test]
+async fn a_page_naming_more_trees_than_it_may_hold_falls_back_to_the_tip() {
+    let fixture = fixture();
+    fixture.bed.mirrors.refresh_now("app").await;
+
+    let mut catalog =
+        nashcode::bugs::context::Catalog::new(fixture.bed.mirrors.repo("app"));
+    // Real commits, so each one genuinely wants a tree of its own.
+    let commits: Vec<String> = common::git(
+        &fixture.bed.remote_root().join("app.git"),
+        &["log", "--format=%H", "-n", "2", "main"],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(commits.len(), 2);
+
+    for commit in &commits {
+        catalog.source(Some(commit)).await.expect("a tree");
+    }
+    let held = catalog.sources_open();
+    assert!(held <= nashcode::bugs::context::MAX_SOURCES, "held {held}");
+
+    // Whatever the cap, the page keeps working: every row still gets a source back.
+    for commit in &commits {
+        assert!(catalog.source(Some(commit)).await.is_some());
+    }
+}

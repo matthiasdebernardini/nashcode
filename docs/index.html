@@ -152,9 +152,24 @@
     header img.mark { animation: settle .6s ease-out; }
     @keyframes settle { from { transform: translateY(-6px); opacity: 0; } to { transform: none; opacity: 1; } }
   }
+
+  /* ---- aurora background ---- */
+  #stars { position: fixed; inset: 0; width: 100%; height: 100%; z-index: -1; }
+  /* tiny buffer upscaled + blurred: beads melt into continuous soft light */
+  #aurora { position: fixed; inset: 0; width: 100%; height: 100%; z-index: -1; filter: blur(7px); }
+  /* readability veil lives in CSS so the canvas can accumulate trails freely */
+  #veil {
+    position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background:
+      radial-gradient(closest-side circle at 50% 46%, rgba(13,17,23,.7), transparent 76%),
+      linear-gradient(to bottom, transparent 68%, rgba(13,17,23,.8) 100%);
+  }
 </style>
 </head>
 <body>
+<canvas id="stars" aria-hidden="true"></canvas>
+<canvas id="aurora" aria-hidden="true"></canvas>
+<div id="veil" aria-hidden="true"></div>
 <div class="wrap">
   <nav>
     <a class="brand" href="#"><img src="assets/logo.svg" alt=""> nashcode</a>
@@ -215,6 +230,108 @@
 </div>
 
 <script>
+  // Aurora borealis time-lapse, drawn as a point cloud in the spirit of
+  // tweet-sized Processing sketches. Plain canvas, no library.
+  (() => {
+    const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    // deterministic hash: stable jitter, no frame-to-frame noise flicker
+    const hash = i => { const x = Math.sin(i * 127.1) * 43758.5453; return x - Math.floor(x); };
+
+    // static star field at full resolution, drawn once (body bg shows through aurora)
+    const sv = document.getElementById("stars"), sc = sv.getContext("2d");
+    const drawStars = () => {
+      sv.width = innerWidth; sv.height = innerHeight;
+      sc.fillStyle = "#e6edf3";
+      for (let i = 0; i < 260; i++) {
+        const m = hash(i * 3.7 + 1.1);
+        sc.globalAlpha = 0.08 + 0.45 * m ** 3;
+        const s = m > 0.97 ? 2 : 1;
+        sc.fillRect(hash(i) * sv.width, hash(i * 1.93 + 7) * sv.height * 0.85, s, s);
+      }
+    };
+
+    // the aurora renders into a small buffer; CSS upscales + blurs it so the
+    // point beads melt into continuous, creamy light — no fur, no dashes
+    const cv = document.getElementById("aurora"), cx = cv.getContext("2d");
+    const SCALE = 0.18;
+    let W, H;
+    const fit = () => {
+      W = cv.width = Math.ceil(innerWidth * SCALE);
+      H = cv.height = Math.ceil(innerHeight * SCALE);
+      drawStars();
+    };
+    fit(); addEventListener("resize", fit);
+
+    let t = 0;
+    const frame = () => {
+      t += 0.003;
+      // trail fade on a TRANSPARENT buffer: erase 7.5% alpha per frame, so
+      // ~13 frames of history accumulate into smooth glow over the stars
+      cx.globalCompositeOperation = "destination-out";
+      cx.fillStyle = "rgba(0,0,0,0.075)"; cx.fillRect(0, 0, W, H);
+      cx.globalCompositeOperation = "lighter";
+      // Point-cloud curtains, the つぶやきProcessing way: points sampled from a
+      // parametric surface — a folded footprint curve, field-line rays leaning
+      // in waves, density and color falling with altitude. One wandering arc
+      // is allowed to glow; the rest of the sky stays dark.
+      const CURTAINS = [
+        { nr: 130, ppr: 24, baseY: 0.8, tall: 0.66, dim: 1.0, sp: 1.0, sz: 2 },   // near curtain
+        { nr: 90, ppr: 14, baseY: 0.58, tall: 0.34, dim: 0.45, sp: 0.5, sz: 1.4 }, // far haze
+      ];
+      for (let ci = 0; ci < 2; ci++) {
+        const C = CURTAINS[ci], ts = t * C.sp;
+        const surge = 0.75 + 0.25 * Math.sin(t * 0.8 + ci * 2.1);
+        // the luminous heart of the arc wanders slowly across the sky
+        const uc = 0.5 + 0.38 * Math.sin(t * 0.11 + ci * 2.6);
+        for (let r = 0; r < C.nr; r++) {
+          const kr = r + ci * 8191;
+          const jr = hash(kr); // per-ray personality
+          const u = ((r + 0.5) / C.nr) * 1.3 - 0.15 + (jr - 0.5) * 0.006;
+          const fold = Math.sin(u * 4.1 + ts * 0.13 + ci * 5)
+            + 0.55 * Math.sin(u * 9.7 - ts * 0.21 + ci * 2)
+            + 0.28 * Math.sin(u * 17.3 + ts * 0.34 + ci * 7);
+          const act = (0.3 + 0.7 * Math.sin(u * 2.9 + ts * 0.4 + ci * 5) ** 2)
+            * (0.6 + 0.4 * Math.sin(u * 6.1 - ts * 0.23 + ci))
+            * Math.exp(-((u - uc) ** 2) / 0.11); // spotlight envelope: one arc
+          const striate = 0.25 + 0.75 *
+            Math.sin(u * (90 + ci * 40) + 18 * Math.sin(u * 5.3 + ts * 0.3) + ts * 0.4) ** 2;
+          const len = H * C.tall * (0.35 + 0.65 * act);
+          // drape: the fold compresses rays horizontally — a fold seen edge-on
+          // is exactly what makes a curtain's bright vertical bands
+          const bx = u * W + fold * W * 0.05;
+          const by = H * C.baseY - fold * H * 0.08;
+          // rays lean in slow waves (wind through the curtain), slight corona fan
+          const rx = 0.28 * Math.sin(u * 2.6 + ts * 0.18 + ci * 2)
+            + 0.14 * Math.sin(u * 6.3 - ts * 0.12 + ci * 5)
+            + (0.5 - u) * 0.1;
+          const bend = 3 * Math.sin(u * 13 + ts * 0.24 + ci * 3); // gentle S-curve
+          const seg = len / C.ppr + 1; // beads tile the ray end to end
+          const bright = striate * act ** 1.6 * C.dim * surge;
+          if (bright < 0.02) continue;
+          for (let j = 0; j < C.ppr; j++) {
+            const kj = kr * 131 + j;
+            const rj = hash(kj);
+            // beads drift slowly upward along the field line
+            const v = (j + rj * 0.35 + t * 1.7 * (0.4 + 1.2 * jr)) / C.ppr % 1;
+            const px = bx + rx * v * len + bend * Math.sin(v * 2.3 + jr * 6)
+              + (rj - 0.5) * 1.2;
+            const py = by - v * len;
+            const tw = 0.85 + 0.15 * Math.sin(t * 2.2 + kj * 0.37);
+            const a = 0.9 * (1 - v) * bright * tw;
+            if (a < 0.01) continue;
+            // dominant green; magenta crown above the waist
+            const hue = 140 + 18 * v + (v > 0.45 ? (v - 0.45) / 0.55 * 155 : 0);
+            cx.fillStyle = `hsla(${hue},95%,${50 + v * 26}%,${a})`;
+            cx.fillRect(px, py, C.sz, seg);
+          }
+        }
+      }
+      if (!still) requestAnimationFrame(frame);
+    };
+    if (still) { for (let j = 0; j < 60; j++) frame(); } // one dense static sky
+    else frame();
+  })();
+
   // Two ElevenLabs-generated UI sounds: a tap on interactions, a chime on copy.
   const tap = new Audio("assets/tap.mp3"), ok = new Audio("assets/success.mp3");
   tap.volume = 0.35; ok.volume = 0.4;

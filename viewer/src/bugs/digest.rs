@@ -199,7 +199,9 @@ impl Worker {
         if self.notify.enabled()
             && let Ok(Some(project)) = index::project_by_id(&self.db, project_id)
         {
-            self.notify.landed(&self.db, &project, &issue, landing, Some(event));
+            // One event, one increment: `index::record` is a single writer that adds
+            // exactly one, and the ladder needs to know the size of the step.
+            self.notify.landed(&self.db, &project, &issue, landing, 1, Some(event));
         }
         Ok(())
     }

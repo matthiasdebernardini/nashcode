@@ -97,6 +97,37 @@ fn report_through(dsn: &str) -> sentry::ClientInitGuard {
     guard
 }
 
+/// Every log the process emits, with the guard's answer at the moment it was emitted.
+type Witnessed = Arc<std::sync::Mutex<Vec<(String, bool)>>>;
+
+/// A layer that only remembers. It sits beside the real one, so what it records is what
+/// the real one saw — the same event, on the same task, at the same instant.
+struct Witness(Witnessed);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Witness {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        self.0
+            .lock()
+            .expect("witness")
+            .push((event.metadata().target().to_owned(), selfreport::in_pipeline()));
+    }
+}
+
+/// The same wiring, plus a witness. Used to prove the guard is *live* on a real code
+/// path rather than merely correct as a rule.
+fn report_through_witnessed(dsn: &str) -> (sentry::ClientInitGuard, Witnessed) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let guard = selfreport::init(Some(dsn), None).expect("the SDK starts");
+    let seen: Witnessed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    tracing_subscriber::registry()
+        .with(selfreport::layer())
+        .with(Witness(seen.clone()))
+        .init();
+    (guard, seen)
+}
+
 /// Push whatever the SDK is holding, then let the viewer digest it.
 async fn settle(live: &Live, guard: &sentry::ClientInitGuard, expect: u64) {
     guard.flush(Some(Duration::from_secs(5)));
@@ -218,4 +249,61 @@ async fn the_ingest_door_runs_inside_the_guard() {
 async fn with_no_self_dsn_the_sdk_never_starts() {
     assert!(selfreport::init(None, None).is_none());
     assert!(selfreport::init(Some("   "), None).is_none());
+}
+
+/// The guard, proved against a failure nobody wrote a branch for.
+///
+/// Every other test here states the rule and checks it. This one breaks the bucket
+/// underneath a live ingest — the object store's directory simply stops existing, which
+/// is what a detached volume looks like — and then asks what the shipped wiring did
+/// while a real error was being logged by real code on a real request.
+///
+/// Two things have to be true together, and neither is interesting alone. The door must
+/// genuinely have failed and said so at ERROR, or the test proves nothing but that
+/// nothing happened. And the guard must have been *live* at that instant, on that task,
+/// which is the property `quietly` exists for and the one a rule-shaped test cannot
+/// reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bucket_that_vanishes_mid_flight_is_reported_to_nobody() {
+    let live = live().await;
+    let (guard, seen) = report_through_witnessed(&live.dsn);
+
+    // The volume goes away. Nothing tells the viewer; it finds out by writing.
+    std::fs::remove_dir_all(live._bucket.path()).expect("the bucket goes");
+    // And it cannot come back by accident: `object_store`'s local backend creates
+    // parents, so leaving a file where the directory was is what keeps it broken.
+    std::fs::write(live._bucket.path(), b"not a directory").expect("block the path");
+
+    let event = serde_json::json!({
+        "event_id": "c".repeat(32),
+        "exception": {"values": [{"type": "ValueError", "value": "during an outage"}]},
+    });
+    let url = format!(
+        "{}/api/{}/envelope/?sentry_key={}",
+        live.base, live.project_id, live.project_key
+    );
+    let answer = reqwest::Client::new()
+        .post(&url)
+        .header("content-type", "application/x-sentry-envelope")
+        .body(format!("{{}}\n{{\"type\":\"event\"}}\n{event}\n"))
+        .send()
+        .await
+        .expect("the door answers");
+    // 502, not 500 and not a hang: the payload has nowhere durable to go and the sender
+    // is told so in the one way a Sentry SDK knows how to obey.
+    assert_eq!(answer.status(), 502, "the failure has to be real for this test to mean anything");
+
+    settle(&live, &guard, 0).await;
+
+    let seen = seen.lock().expect("witness").clone();
+    let from_the_door: Vec<&(String, bool)> =
+        seen.iter().filter(|(target, _)| target.starts_with("nashcode::")).collect();
+    assert!(
+        !from_the_door.is_empty(),
+        "the door logged nothing, so this test watched an outage nobody noticed: {seen:?}"
+    );
+    assert!(
+        from_the_door.iter().all(|(_, guarded)| *guarded),
+        "a line was logged from the ingest path with the guard down: {from_the_door:?}"
+    );
 }
