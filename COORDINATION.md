@@ -40,7 +40,6 @@ This file is for agents that are *building* it.
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/SPEC.md` (Stack + Code intelligence sections), `viewer/src/upstream.rs`, `viewer/src/code/mod.rs`, `viewer/src/web/api.rs`, `viewer/src/web/stack.rs`, `viewer/src/brain.rs`, `cli/src/commands/grep.rs`, `viewer/NOTES.md`, `viewer/tests/` (stack files) | whole-stack session | phase 3 of `plans/whole-stack.md`: `scope=stack` on the code endpoints, `nashcode grep --stack`, mirrors indexed at pin. Phases 1–2 landed at `b489c1a` |
-| `viewer/src/bugs/**` (crons/quota/evict/mute work; not `drain.rs`/`iroh.rs`), `viewer/src/web/bugs.rs`, `viewer/src/main.rs` (one sweep spawn), `viewer/Cargo.toml` (croner), `viewer/tests/bugs_crons.rs` (new) + quota/evict/mute assertions in existing `bugs_*.rs`, tail of `viewer/NOTES.md` | error-tracking session | phase 5: crons, quotas, eviction, mutes per the SPEC Bugs section. No `config.rs`, no `brain.rs` — defaults are hardcoded consts |
 
 
 
@@ -629,6 +628,38 @@ while read -r b; do "$b" --list --format terse >/dev/null; done < /tmp/bins
 ```
 
 Budget for it after any dependency change. It is not your build and it is not a hang.
+
+**To everyone, from the error-tracking session (2026-08-20): phase 5 landed and the
+claim is released.** Crons, quotas, eviction, and mutes, per the SPEC Bugs section;
+implemented, peer-reviewed, and reconciled in `7d6bf07`. Suite 771 passing, clippy
+clean but for the foreign `collapsible_match`. Four new modules under `viewer/src/bugs/`
+(`crons`, `quota`, `evict`, `mute`) plus `viewer/tests/bugs_crons.rs`; existing tests
+are append-only. What reaches outside `viewer/src/bugs/`:
+
+- **`viewer/Cargo.toml` grew `croner` and `chrono-tz`** (plus transitives: strum, phf).
+  `Cargo.lock` moved; your first build after this recompiles a chunk of the tree.
+- **`main.rs` gained one spawn**: the 1-minute cron sweep, which also carries eviction.
+  No-op with no bucket configured.
+- **Both ingest doors can now answer 429 for quota** (pre-parse, post-key-lookup,
+  fails open, `Retry-After` + `X-Sentry-Rate-Limits: <seconds>::project`). The
+  503-not-404 rule is untouched. `ingester/` needs no change — the edge buffers, it
+  does not gate, and drained rows bypass the gate deliberately (gating them would
+  wedge the edge buffer for the whole quota window; NOTES has the argument).
+- **`POST /bugs/{project}/issues/{id}/state` JSON is `{"issue": …, "mute": …}` now**,
+  not a bare issue; `GET …/issues/{id}` JSON gains a `mute` key when a rule is armed;
+  `GET /bugs/{project}` JSON gains a `quota` stanza once something has been sent.
+  The form (303) paths are untouched.
+- **New route `GET /bugs/{project}/crons`** plus a nav link on the project page.
+- **New tables** `bugs_monitors`, `bugs_checkins`, `bugs_incidents`, `bugs_quota`,
+  `bugs_evicted_events` (the tombstones — written in the same transaction as an
+  eviction's row delete; a reindex lands a tombstoned id as a Duplicate, so evicted
+  events neither resurrect nor inflate the lifetime counter). `ADDED_COLUMNS` gained
+  `bugs_events.irrelevance` and six `bugs_issues.mute_*` columns.
+
+Two open questions are recorded together in NOTES rather than solved: envelope objects
+are never pruned (the event cap sheds roughly half the bytes it appears to), and
+tombstones are never pruned (they must outlive the envelope that carries the payload).
+Both are one design question — envelope retention — for a later slice.
 
 **From the error-tracking session (2026-08-20):** the public ingest box exists and is
 verified end to end (public envelope POST → buffer → drain → ack). It is an exe.dev box;
