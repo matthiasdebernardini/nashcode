@@ -72,14 +72,33 @@ async fn main() {
 }
 
 async fn serve() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    // Configuration before logging, because the self-DSN decides what logging does.
+    // Anything `Config::from_env` needs to complain about goes to stderr for the same
+    // reason: there is no subscriber yet to hear it.
+    let config = Arc::new(Config::from_env());
+    // Held for the life of the process. Dropping it shuts the transport down, and the
+    // last events — the ones from whatever is killing us — never leave.
+    let _reporting = nashcode::bugs::selfreport::init(
+        config.bugs_self_dsn.as_deref(),
+        option_env!("NASHCODE_RELEASE").map(str::to_owned),
+    );
+    // `Option<Layer>` is itself a `Layer`, so the wiring is the same either way.
+    let reporting_layer = _reporting.as_ref().map(|_| nashcode::bugs::selfreport::layer());
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "nashcode=info,warn".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(reporting_layer)
         .init();
+    if _reporting.is_some() {
+        tracing::info!("bugs: nashcode is reporting its own errors to NASHCODE_BUGS_SELF_DSN");
+    }
 
-    let config = Arc::new(Config::from_env());
     doctor(&config);
 
     let db = match Db::open(&config.db_path) {
@@ -181,6 +200,22 @@ async fn serve() {
         });
     }
 
+    // The one task that talks to Pushover. Off with no credentials, and off with no
+    // bucket too: with error tracking off there is no state change to report.
+    if let Some(pushover) = config.pushover.clone()
+        && bugs.enabled()
+    {
+        let sender = nashcode::bugs::pushover::Sender::new(
+            db.clone(),
+            pushover,
+            &config.public_url,
+        );
+        tracing::info!("bugs: notifications go to Pushover");
+        tokio::spawn(nashcode::bugs::selfreport::quietly(
+            sender.run(std::time::Duration::from_secs(5)),
+        ));
+    }
+
     // The drain. Off unless an ingester is configured, and a refusal to start rather
     // than a warning when it is configured with no bucket: a drainer that acked rows
     // into nowhere durable would delete them off the edge and lose them for good.
@@ -206,7 +241,8 @@ async fn serve() {
                 // quiet one: the viewer serves every page exactly as before and the
                 // buffer on the edge fills until it starts refusing envelopes. The
                 // watcher costs one task and turns a silence into a line.
-                let task = tokio::spawn(drainer.run(drain.interval));
+                let task =
+                    tokio::spawn(nashcode::bugs::selfreport::quietly(drainer.run(drain.interval)));
                 tokio::spawn(async move {
                     match task.await {
                         Ok(()) => tracing::error!("bugs: the drain task ended; nothing is being pulled from the ingester"),
@@ -282,6 +318,18 @@ fn doctor(config: &Config) {
              was built without the `drain-iroh` feature; the drainer will refuse to start"
         ),
         Some(_) => {}
+    }
+    if config.pushover.is_none() {
+        eprintln!(
+            "doctor: NASHCODE_PUSHOVER_TOKEN and NASHCODE_PUSHOVER_USER are unset; a new \
+             issue or a regression is recorded and shown, and nothing leaves the box"
+        );
+    }
+    if config.bugs_self_dsn.is_none() {
+        eprintln!(
+            "doctor: NASHCODE_BUGS_SELF_DSN is unset; nashcode does not report its own \
+             errors anywhere"
+        );
     }
     if config.git_token.is_empty() {
         eprintln!("doctor: GIT_TOKEN is empty; pushes to dgit will be anonymous");

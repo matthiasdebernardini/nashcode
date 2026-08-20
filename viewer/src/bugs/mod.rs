@@ -10,6 +10,7 @@
 //! degraded mode: with no bucket there is nowhere durable to put a payload, so the
 //! honest answer is 404 and one line at startup.
 
+pub mod context;
 pub mod digest;
 pub mod drain;
 pub mod envelope;
@@ -19,6 +20,8 @@ pub mod ingest;
 #[cfg(feature = "drain-iroh")]
 pub mod iroh;
 pub mod logs;
+pub mod pushover;
+pub mod selfreport;
 pub mod store;
 
 /// The iroh transport with the feature off. It exists so [`drain::transport_for`] can
@@ -94,6 +97,9 @@ struct Inner {
     /// dropped, which is after the digest is done with it.
     bytes: Arc<Semaphore>,
     digested: Arc<watch::Sender<u64>>,
+    /// Decides which state changes are worth a person's attention. Off when no
+    /// Pushover credentials are configured, which costs the digest one branch.
+    notify: pushover::Notifier,
 }
 
 /// Why an envelope was not accepted.
@@ -128,6 +134,7 @@ impl Bugs {
         index::migrate(&db)?;
         logs::migrate(&db)?;
         drain::migrate(&db)?;
+        pushover::migrate(&db)?;
         let store = match &config.bugs_bucket {
             None => None,
             Some(bucket) => match store::open(bucket, config.bugs_s3_endpoint.as_deref()) {
@@ -148,6 +155,7 @@ impl Bugs {
                 pending: Mutex::new(Some(pending)),
                 bytes: Arc::new(Semaphore::new(QUEUE_BYTES)),
                 digested: Arc::new(watch::channel(0).0),
+                notify: pushover::Notifier::new(config),
             }),
         })
     }
@@ -425,6 +433,27 @@ impl Bugs {
         logs::prune(self.db())
     }
 
+    // ---- notifications ---------------------------------------------------------------
+
+    /// What is left of the Pushover allowance, what is parked, and what is waiting.
+    /// Rendered on `/bugs` and carried in its JSON: the monthly budget is the number
+    /// that decides whether the next real incident reaches a phone.
+    pub fn push_budget(&self) -> DbResult<pushover::Budget> {
+        pushover::budget(self.db())
+    }
+
+    /// True when credentials are configured. The page says so either way, because
+    /// "nothing has been sent" and "nothing can be sent" are different problems.
+    pub fn notifies(&self) -> bool {
+        self.inner.notify.enabled()
+    }
+
+    /// The notifier the digest uses, for the paths outside the digest that also change
+    /// an issue's state.
+    pub fn notifier(&self) -> &pushover::Notifier {
+        &self.inner.notify
+    }
+
     /// Start the digest task, once.
     fn start_digest(&self) {
         let Some(store) = self.inner.store.clone() else { return };
@@ -439,8 +468,12 @@ impl Bugs {
                 db: self.inner.db.clone(),
                 store,
                 digested: self.inner.digested.clone(),
+                notify: self.inner.notify.clone(),
             };
-            tokio::spawn(worker.run(jobs));
+            // Nothing this task logs, at any depth, is ever reported to the self-DSN.
+            // An error inside the digest, reported into the same digest, is a loop with
+            // an HTTP request in it. See `selfreport`.
+            tokio::spawn(selfreport::quietly(worker.run(jobs)));
         }
     }
 
@@ -457,6 +490,48 @@ impl Bugs {
             }
         }
     }
+}
+
+/// The `bugs` stanza of `/brain`, for one repo or for the whole box.
+///
+/// `repo` names a nashcode repo and answers with the projects that declare it; `None`
+/// answers with everything, plus the notification budget, which belongs to the box
+/// rather than to any one repo.
+///
+/// `None` back means there is nothing to say — no bucket, or no project declaring this
+/// repo — and the key is then absent from the stanza rather than present and empty.
+/// That is the convention `architecture` already set: "does this repo have any" is
+/// answered by whether the key is there at all.
+///
+/// This is a data provider, deliberately. `brain.rs` belongs to another work stream, so
+/// the one line that mounts it lives there and not here. See `COORDINATION.md`.
+pub fn brain_stanza(db: &Db, repo: Option<&str>) -> Option<serde_json::Value> {
+    let projects = index::brain_projects(db, repo).ok()?;
+    if projects.is_empty() {
+        return None;
+    }
+    let unresolved: i64 = projects.iter().map(|project| project.unresolved).sum();
+    let events: i64 = projects.iter().map(|project| project.events).sum();
+    let last_event_at = projects.iter().filter_map(|project| project.last_event_at.clone()).max();
+
+    let mut stanza = serde_json::json!({
+        "projects": projects,
+        "unresolved": unresolved,
+        "events": events,
+        "last_event_at": last_event_at,
+    });
+    // The notification budget is a property of the box, so it joins the global stanza
+    // and not the per-repo one. It is the number that says whether the next real
+    // incident will reach a phone, which is worth one key in the digest an agent reads
+    // before it starts work.
+    if repo.is_none()
+        && let Ok(budget) = pushover::budget(db)
+        && let Some(object) = stanza.as_object_mut()
+        && let Ok(budget) = serde_json::to_value(&budget)
+    {
+        object.insert("notifications".to_owned(), budget);
+    }
+    Some(stanza)
 }
 
 /// A 32-character lowercase hex key, the shape every SDK's DSN parser expects.
@@ -576,6 +651,34 @@ mod tests {
         assert!(QUEUE_BYTES > ingest::MAX_DECOMPRESSED);
         assert!(QUEUE_BYTES <= u32::MAX as usize, "a semaphore counts permits in u32");
     };
+
+    #[test]
+    fn the_brain_stanza_is_absent_rather_than_empty_and_scopes_to_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = format!("file://{}", dir.path().display());
+        let db = Db::in_memory().unwrap();
+        let bugs = Bugs::new(&config(Some(&bucket)), db.clone()).unwrap();
+
+        // Nothing to say yet: the key is absent, not present and zero.
+        assert!(brain_stanza(&db, None).is_none());
+        assert!(brain_stanza(&db, Some("demo")).is_none());
+
+        bugs.create_project("api", Some("demo")).unwrap();
+        bugs.create_project("worker", None).unwrap();
+
+        let global = brain_stanza(&db, None).expect("a global stanza");
+        assert_eq!(global["projects"].as_array().expect("a list").len(), 2);
+        assert_eq!(global["unresolved"], serde_json::json!(0));
+        // The notification budget belongs to the box, so it is on the global stanza.
+        assert!(global["notifications"].is_object());
+
+        let scoped = brain_stanza(&db, Some("demo")).expect("a repo stanza");
+        assert_eq!(scoped["projects"].as_array().expect("a list").len(), 1);
+        assert_eq!(scoped["projects"][0]["name"], serde_json::json!("api"));
+        assert!(scoped["notifications"].is_null(), "the budget is not a repo's business");
+        // A repo no project declares says nothing at all.
+        assert!(brain_stanza(&db, Some("other")).is_none());
+    }
 
     #[test]
     fn a_project_name_that_could_leave_its_path_is_refused() {

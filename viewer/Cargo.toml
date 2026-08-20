@@ -59,6 +59,18 @@ fastembed = { version = "6", default-features = false, features = [
     "hf-hub-rustls-tls",
 ], optional = true }
 sentry-types = "0.49"
+# Dogfooding: nashcode reports its own errors to nashcode, through the ordinary door.
+# `default-features = false` drops `debug-images`, `metrics`, `release-health` and the
+# native-tls transport; rustls is what the rest of the tree already speaks.
+sentry = { version = "0.49", default-features = false, features = [
+    "backtrace",
+    "contexts",
+    "panic",
+    "logs",
+    "reqwest",
+    "rustls",
+] }
+sentry-tracing = { version = "0.49", features = ["logs"] }
 flate2 = "1"
 brotli-decompressor = "5"
 regex = "1"

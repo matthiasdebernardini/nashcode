@@ -21,7 +21,7 @@ use topcoat::router::{
 };
 use topcoat::view::{component, view};
 
-use crate::bugs::{Issue, Project, envelope, group, ingest, logs, state};
+use crate::bugs::{Issue, Project, context, envelope, group, ingest, logs, state};
 use crate::web::components::shell;
 use crate::web::{actor, app, see_other};
 
@@ -106,24 +106,32 @@ fn preflight_answer(cx: &Cx) -> Result<Response> {
 #[route(POST "/api/{project_id}/{*rest}")]
 async fn ingest_envelope(cx: &Cx, body: Body) -> Result<Response> {
     if rest_is(cx, "logs") {
-        return accept_logs(cx, body).await;
+        return quietly(accept_logs(cx, body)).await;
     }
     if !is_envelope_path(cx) {
         return Err(not_found().into());
     }
-    accept_envelope(cx, body).await
+    quietly(accept_envelope(cx, body)).await
 }
 
 #[route(POST "/api/{project_id}/envelope")]
 async fn ingest_bare(cx: &Cx, body: Body) -> Result<Response> {
-    accept_envelope(cx, body).await
+    quietly(accept_envelope(cx, body)).await
+}
+
+/// Everything an ingest door does is inside the error-tracking pipeline, so nothing it
+/// logs — at any depth, including from git, the object store or SQLite — is ever
+/// reported to the self-DSN. Reporting it would post an envelope through this same
+/// door, and a door that fails would then fail again on its own report.
+async fn quietly<F: std::future::Future>(future: F) -> F::Output {
+    crate::bugs::selfreport::quietly(future).await
 }
 
 /// `POST /api/{project_id}/logs` — the second log door, for everything that is not a
 /// Sentry SDK.
 #[route(POST "/api/{project_id}/logs")]
 async fn ingest_logs_bare(cx: &Cx, body: Body) -> Result<Response> {
-    accept_logs(cx, body).await
+    quietly(accept_logs(cx, body)).await
 }
 
 /// NDJSON in, one JSON object per line. Authenticated by the same DSN key as the
@@ -411,8 +419,17 @@ fn on(cx: &Cx) -> Result<()> {
 async fn projects_page(cx: &Cx) -> Result<Response> {
     on(cx)?;
     let projects = app(cx).bugs.projects()?;
+    let budget = app(cx).bugs.push_budget()?;
+    let notifies = app(cx).bugs.notifies();
     if wants_json(cx) {
-        return Ok(json_response(StatusCode::OK, serde_json::to_string(&projects)?));
+        // An object rather than the bare array this used to be. Whether a notification
+        // can still get out this month is part of the state of the feature, and a
+        // reader that has to make a second request for it will not make it.
+        let body = serde_json::json!({
+            "projects": projects,
+            "pushover": { "on": notifies, "budget": budget },
+        });
+        return Ok(json_response(StatusCode::OK, body.to_string()));
     }
 
     let page = view! { cx =>
@@ -445,6 +462,7 @@ async fn projects_page(cx: &Cx) -> Result<Response> {
                     }
                 </div>
             }
+            notifications(notifies: notifies, budget: budget)
             <div class="Box">
                 <div class="Box-header"><strong>"New project"</strong></div>
                 <div class="Box-body">
@@ -567,6 +585,49 @@ fn state_tabs() -> [(&'static str, Option<&'static str>); 4] {
     ]
 }
 
+/// What the notification path can still do.
+///
+/// The monthly allowance is on this page because it is the number that decides whether
+/// the next real incident reaches a phone, and there is no other place a person would
+/// think to look for it before it runs out.
+#[component]
+async fn notifications(notifies: bool, budget: crate::bugs::pushover::Budget) -> Result {
+    let allowance = match (budget.remaining, budget.limit) {
+        (Some(remaining), Some(limit)) => Some(format!("{remaining} of {limit} left this month")),
+        (Some(remaining), None) => Some(format!("{remaining} left this month")),
+        _ => None,
+    };
+    view! {
+        <div class="Box mb-3">
+            <div class="Box-header d-flex flex-items-center gap-2">
+                <strong>"Notifications"</strong>
+                <span class="ml-auto text-small color-fg-muted">
+                    if notifies { "Pushover" } else { "off" }
+                </span>
+            </div>
+            <div class="Box-body text-small color-fg-muted">
+                if !notifies {
+                    "Set NASHCODE_PUSHOVER_TOKEN and NASHCODE_PUSHOVER_USER to be told about a
+                     new issue or a regression. Everything on this page works without them."
+                } else {
+                    <span>
+                        "New issues, regressions and the 10/100/1000 rungs. Never one per event."
+                        if let Some(allowance) = &allowance { " · "(allowance.clone()) }
+                        if budget.pending > 0 { " · "(budget.pending)" waiting" }
+                    </span>
+                    if let Some(until) = &budget.parked_until {
+                        <p class="mt-1 mb-0">
+                            "Held until "(until.clone())
+                            if let Some(why) = &budget.parked_reason { " — "(why.clone()) }
+                            "."
+                        </p>
+                    }
+                }
+            </div>
+        </div>
+    }
+}
+
 #[component]
 async fn dsn_card(#[into] dsn: String, project: Project) -> Result {
     // The one snippet that turns a fresh project into a wired service.
@@ -649,8 +710,17 @@ async fn issue_page(cx: &Cx) -> Result<Response> {
     let detail = payload.as_ref().map(Detail::of).unwrap_or_default();
     // Frames get the same treatment as log rows: a path that does not resolve in the
     // declared repo is text, not a link. A file renamed since the release that threw
-    // is the case a syntactic check alone gets wrong.
-    let frame_links = frame_links(cx, &project, &detail.frames).await;
+    // is the case a syntactic check alone gets wrong — which is also why the source is
+    // read at the release the event names rather than at the tip.
+    let release = payload.as_ref().and_then(context::release_of);
+    let origins = frame_origins(cx, &project, &detail.frames, release.as_deref()).await;
+    // Paired before the view, so the markup only reads.
+    let frames: Vec<(Frame, Origin)> = detail
+        .frames
+        .iter()
+        .enumerate()
+        .map(|(index, frame)| (frame.clone(), origins.get(&index).cloned().unwrap_or_default()))
+        .collect();
     let page = view! { cx =>
         shell(title: format!("{} · bugs", issue.title),
             <div class="d-flex flex-items-center gap-2 mb-2">
@@ -687,21 +757,28 @@ async fn issue_page(cx: &Cx) -> Result<Response> {
                     <div class="Box-body"><pre class="text-small nashcode-code">(value.clone())</pre></div>
                 </div>
             }
-            if !detail.frames.is_empty() {
+            if !frames.is_empty() {
                 <div class="Box mb-3">
                     <div class="Box-header"><strong>"Stack"</strong></div>
-                    for (index, frame) in detail.frames.iter().enumerate() {
-                        <div key=(index) class="Box-row text-small nashcode-code">
-                            if let Some(href) = frame_links.get(&index).cloned() {
-                                <a class="Link--primary" href=(href)>(frame.location.clone())</a>
-                            } else {
-                                (frame.location.clone())
-                            }
-                            if let Some(function) = &frame.function {
-                                " in "(function.clone())
-                            }
-                            if let Some(context) = &frame.context {
-                                "\n    "(context.clone())
+                    for (index, (frame, origin)) in frames.iter().enumerate() {
+                        <div key=(index) class="Box-row text-small">
+                            <div class="nashcode-code">
+                                if let Some(href) = origin.href.clone() {
+                                    <a class="Link--primary" href=(href)>(frame.location.clone())</a>
+                                } else {
+                                    (frame.location.clone())
+                                }
+                                if origin.inferred {
+                                    <span class="Label ml-1" title="matched by path suffix">"matched"</span>
+                                }
+                                if let Some(function) = &frame.function {
+                                    " in "(function.clone())
+                                }
+                            </div>
+                            if let Some(snippet) = origin.snippet.clone() {
+                                source_lines(snippet: snippet)
+                            } else if let Some(context) = &frame.context {
+                                <pre class="text-small nashcode-code mt-1 mb-0">(context.clone())</pre>
                             }
                         </div>
                     }
@@ -733,7 +810,7 @@ struct Detail {
 }
 
 /// One stack frame, split so the file part can become a link into the code browser.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Frame {
     /// `path/to/file.py:41`, or whatever of it the SDK sent.
     location: String,
@@ -744,36 +821,109 @@ struct Frame {
     in_app: bool,
 }
 
-/// The blob URL for each in-app frame whose file really exists in the declared repo,
-/// by its position in the rendered list.
+/// Where one reported path turned out to live, and what is written there.
+///
+/// Every field is optional on purpose. A path the mirror cannot answer for degrades to
+/// the plain string it arrived as, never to an error and never to a dead link.
+#[derive(Debug, Clone, Default)]
+struct Origin {
+    /// The blob URL, anchored at the line.
+    href: Option<String>,
+    /// True when the path was found by matching a suffix rather than as written — the
+    /// container-prefix case. Marked, because the link is then an inference.
+    inferred: bool,
+    /// The three lines either side.
+    snippet: Option<context::Snippet>,
+}
+
+impl Origin {
+    fn is_empty(&self) -> bool {
+        self.href.is_none() && self.snippet.is_none()
+    }
+}
+
+/// How many distinct `file:line` sites one page reads source for.
+///
+/// Reading is one `git show` per site, and a page of a hundred log rows out of one hot
+/// loop is three sites, not a hundred — the cache below is what usually decides this.
+/// The cap is for the page that really does name a hundred different files: the links
+/// are all still there, and the first two dozen carry their source.
+const SNIPPETS_PER_PAGE: usize = 24;
+
+/// Resolve reported paths against the declared repo and read the source around them.
+///
+/// One catalog per page: the tree listing is read once per release seen, and each
+/// distinct `file:line` is read at most once however many rows name it.
+struct Capture {
+    repo: String,
+    catalog: context::Catalog,
+    seen: std::collections::HashMap<(String, String, i64), Option<context::Snippet>>,
+    budget: usize,
+}
+
+impl Capture {
+    /// `None` when the project declares no repo, or one this viewer does not serve.
+    fn open(cx: &Cx, project: &Project) -> Option<Self> {
+        let repo = project.repo.as_deref()?;
+        if !app(cx).config.knows_repo(repo) {
+            return None;
+        }
+        Some(Self {
+            repo: repo.to_owned(),
+            catalog: context::Catalog::new(app(cx).mirrors.repo(repo)),
+            seen: std::collections::HashMap::new(),
+            budget: SNIPPETS_PER_PAGE,
+        })
+    }
+
+    async fn origin(&mut self, reported: &str, line: Option<i64>, release: Option<&str>) -> Origin {
+        let Some(source) = self.catalog.source(release).await else { return Origin::default() };
+        let resolved = source.resolve(reported);
+        let Some(path) = resolved.path() else { return Origin::default() };
+        let origin = Origin {
+            href: Some(blob_anchor(&self.repo, path, line)),
+            inferred: resolved.inferred(),
+            snippet: None,
+        };
+        let Some(line) = line.filter(|line| *line > 0) else { return origin };
+
+        let key = (source.rev.clone(), path.to_owned(), line);
+        if let Some(cached) = self.seen.get(&key) {
+            return Origin { snippet: cached.clone(), ..origin };
+        }
+        if self.budget == 0 {
+            return origin;
+        }
+        self.budget -= 1;
+        let snippet = source.snippet(path, line).await;
+        self.seen.insert(key, snippet.clone());
+        Origin { snippet, ..origin }
+    }
+}
+
+/// The origin of each in-app frame, by its position in the rendered list.
 ///
 /// Only in-app frames are candidates: a frame out of site-packages names a file that
 /// is not in this repo even when a file by that name happens to be.
-async fn frame_links(
+async fn frame_origins(
     cx: &Cx,
     project: &Project,
     frames: &[Frame],
-) -> std::collections::HashMap<usize, String> {
-    let mut links = std::collections::HashMap::new();
-    let Some(repo) = project.repo.as_deref() else { return links };
-    if !app(cx).config.knows_repo(repo) {
-        return links;
-    }
-    let wanted: Vec<(usize, &str, Option<i64>)> = frames
-        .iter()
-        .enumerate()
-        .filter(|(_, frame)| frame.in_app)
-        .filter_map(|(index, frame)| Some((index, frame.path.as_deref()?, frame.line)))
-        .collect();
-
-    let paths: Vec<&str> = wanted.iter().map(|(_, path, _)| *path).collect();
-    let resolved = resolve_in_repo(cx, repo, &paths).await;
-    for (index, path, line) in wanted {
-        if resolved.contains(path) {
-            links.insert(index, blob_anchor(repo, path, line));
+    release: Option<&str>,
+) -> std::collections::HashMap<usize, Origin> {
+    let mut origins = std::collections::HashMap::new();
+    let Some(mut capture) = Capture::open(cx, project) else { return origins };
+    for (index, frame) in frames.iter().enumerate() {
+        if !frame.in_app {
+            continue;
+        }
+        let Some(path) = frame.path.as_deref() else { continue };
+        let origin = capture.origin(path, frame.line, release).await;
+        if !origin.is_empty() {
+            origins.insert(index, origin);
         }
     }
-    links
+    origins
 }
 
 impl Detail {
@@ -923,7 +1073,7 @@ async fn logs_page(cx: &Cx) -> Result<Response> {
     let more = rows.len() as i64 > LOGS_PER_PAGE;
     rows.truncate(LOGS_PER_PAGE as usize);
 
-    let origins = code_links(cx, &project, &rows).await;
+    let origins = code_origins(cx, &project, &rows).await;
 
     if wants_json(cx) {
         let body = serde_json::json!({
@@ -935,9 +1085,14 @@ async fn logs_page(cx: &Cx) -> Result<Response> {
         return Ok(json_response(StatusCode::OK, body.to_string()));
     }
 
-    // Pair each row with its link before the view, so the markup only reads.
-    let rendered: Vec<(crate::bugs::LogRow, Option<String>)> =
-        rows.into_iter().map(|row| { let link = origins.get(&row.id).cloned(); (row, link) }).collect();
+    // Pair each row with its origin before the view, so the markup only reads.
+    let rendered: Vec<(crate::bugs::LogRow, Origin)> = rows
+        .into_iter()
+        .map(|row| {
+            let origin = origins.get(&row.id).cloned().unwrap_or_default();
+            (row, origin)
+        })
+        .collect();
 
     let page_view = view! { cx =>
         shell(title: format!("{name} · logs"),
@@ -965,8 +1120,8 @@ async fn logs_page(cx: &Cx) -> Result<Response> {
                 </div></div>
             } else {
                 <div class="Box">
-                    for (row, link) in &rendered {
-                        log_row(key: row.id, row: row.clone(), link: link.clone())
+                    for (row, origin) in &rendered {
+                        log_row(key: row.id, row: row.clone(), origin: origin.clone())
                     }
                 </div>
                 <div class="d-flex gap-2 mt-2 flex-items-center">
@@ -995,26 +1150,66 @@ fn logs_url(project: &str, q: &str, level: Option<&str>, page: i64) -> String {
     url
 }
 
+/// The three lines either side of the one that failed.
+///
+/// The revision is on the label, always. A snippet read at the tip because the mirror
+/// did not know the release is *probably* the right lines and might not be, and the
+/// only honest way to show it is to say which it is.
 #[component]
-async fn log_row(row: crate::bugs::LogRow, link: Option<String>) -> Result {
-    let origin = match (&row.code_file, row.code_line) {
+async fn source_lines(snippet: context::Snippet) -> Result {
+    let short: String = snippet.rev.chars().take(8).collect();
+    view! {
+        <div class="mt-1">
+            <pre class="text-small nashcode-code mb-1">
+                for (number, text) in snippet.numbered() {
+                    <div key=(number) class=(if number == snippet.line { "color-fg-danger" } else { "" })>
+                        (format!("{number:>5} "))
+                        if number == snippet.line { "▸ " } else { "  " }
+                        (text.to_owned())
+                    </div>
+                }
+            </pre>
+            <span class="text-small color-fg-muted">
+                if snippet.tip_not_release {
+                    "tip, not release · "(short)
+                } else {
+                    "at "(short)
+                }
+            </span>
+        </div>
+    }
+}
+
+#[component]
+async fn log_row(row: crate::bugs::LogRow, origin: Origin) -> Result {
+    let location = match (&row.code_file, row.code_line) {
         (Some(file), Some(line)) if line > 0 => Some(format!("{file}:{line}")),
         (Some(file), _) => Some(file.clone()),
         (None, _) => None,
     };
     view! {
-        <div class="Box-row d-flex flex-items-baseline gap-2 text-small">
-            <span class="color-fg-muted nashcode-code">(row.ts.clone())</span>
-            <span class=(level_class(&row.severity_text))>(row.severity_text.clone())</span>
-            <span class="flex-auto">(row.message.clone())</span>
-            if let Some(origin) = origin {
-                // A path that does not resolve in the declared repo is plain text.
-                // A dead link is worse than no link.
-                if let Some(href) = link {
-                    <a class="Link--secondary nashcode-code" href=(href)>(origin)</a>
-                } else {
-                    <span class="color-fg-muted nashcode-code">(origin)</span>
+        <div class="Box-row text-small">
+            <div class="d-flex flex-items-baseline gap-2">
+                <span class="color-fg-muted nashcode-code">(row.ts.clone())</span>
+                <span class=(level_class(&row.severity_text))>(row.severity_text.clone())</span>
+                <span class="flex-auto">(row.message.clone())</span>
+                if let Some(location) = location {
+                    // A path that does not resolve in the declared repo is plain text.
+                    // A dead link is worse than no link.
+                    if let Some(href) = origin.href.clone() {
+                        <a class="Link--secondary nashcode-code" href=(href)>(location)</a>
+                    } else {
+                        <span class="color-fg-muted nashcode-code">(location)</span>
+                    }
                 }
+            </div>
+            // Folded away: a page of a hundred rows stays a page of a hundred rows,
+            // and the one row you are reading opens.
+            if let Some(snippet) = origin.snippet.clone() {
+                <details>
+                    <summary class="text-small color-fg-muted">"source"</summary>
+                    source_lines(snippet: snippet)
+                </details>
             }
         </div>
     }
@@ -1029,88 +1224,27 @@ fn level_class(level: &str) -> &'static str {
     }
 }
 
-/// The blob URL for each row whose code origin actually exists in the declared repo.
+/// Where each log row's code origin lives, and the source around it.
 ///
-/// Resolution is the code browser's own question, asked the same way: list the
-/// parent directory at the default tip and look for the name. One listing per
-/// distinct directory on the page, so a hundred rows out of three files cost three
-/// `ls-tree` calls, not a hundred.
-async fn code_links(
+/// The reported path is whatever the process saw — `/app/src/foo.py` from inside a
+/// container, `src/foo.py` from a checkout — so it is resolved against the repo tree
+/// rather than trusted, and the release the row names decides which tree.
+async fn code_origins(
     cx: &Cx,
     project: &Project,
     rows: &[crate::bugs::LogRow],
-) -> std::collections::HashMap<i64, String> {
-    let mut links = std::collections::HashMap::new();
-    let Some(repo) = project.repo.as_deref() else { return links };
-    if !app(cx).config.knows_repo(repo) {
-        return links;
-    }
-    let wanted: Vec<(i64, String, Option<i64>)> = rows
-        .iter()
-        .filter_map(|row| {
-            let path = row.code_file.as_deref()?;
-            linkable(path).then(|| (row.id, path.to_owned(), row.code_line))
-        })
-        .collect();
-
-    let paths: Vec<&str> = wanted.iter().map(|(_, path, _)| path.as_str()).collect();
-    let resolved = resolve_in_repo(cx, repo, &paths).await;
-    for (id, path, line) in &wanted {
-        if resolved.contains(path.as_str()) {
-            links.insert(*id, blob_anchor(repo, path, *line));
+) -> std::collections::HashMap<i64, Origin> {
+    let mut origins = std::collections::HashMap::new();
+    let Some(mut capture) = Capture::open(cx, project) else { return origins };
+    for row in rows {
+        let Some(path) = row.code_file.as_deref() else { continue };
+        let release = context::release_of(&row.attributes);
+        let origin = capture.origin(path, row.code_line, release.as_deref()).await;
+        if !origin.is_empty() {
+            origins.insert(row.id, origin);
         }
     }
-    links
-}
-
-/// Which of `paths` actually name a file in `repo` at its default tip.
-///
-/// This is the code browser's own question, asked the same way it asks it: list the
-/// parent directory and look for the name, rejecting a directory. One `ls-tree` per
-/// distinct directory, so a page of a hundred rows out of three files costs three
-/// calls rather than a hundred.
-///
-/// Everything here exists to keep a dead link off the page. SPEC is explicit that an
-/// unresolvable path renders as text, and a file that has since been renamed is
-/// exactly the case a purely syntactic check would get wrong.
-async fn resolve_in_repo(
-    cx: &Cx,
-    repo: &str,
-    paths: &[&str],
-) -> std::collections::HashSet<String> {
-    let mut resolved = std::collections::HashSet::new();
-    if paths.is_empty() {
-        return resolved;
-    }
-    let mirror = app(cx).mirrors.repo(repo);
-    let Ok(branch) = mirror.default_branch().await else { return resolved };
-    let Ok(tip) = mirror.tip(&branch).await else { return resolved };
-
-    let mut listings: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-    for path in paths {
-        if !linkable(path) || resolved.contains(*path) {
-            continue;
-        }
-        let (dir, file) = path.rsplit_once('/').unwrap_or(("", path));
-        if !listings.contains_key(dir) {
-            let entries = mirror
-                .ls_tree(&tip, dir)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|entry| entry.kind != crate::git::EntryKind::Dir)
-                .map(|entry| entry.name)
-                .collect();
-            listings.insert(dir.to_owned(), entries);
-        }
-        if listings[dir].iter().any(|name| name == file) {
-            resolved.insert((*path).to_owned());
-        }
-    }
-    resolved
+    origins
 }
 
 /// The blob URL for a path, anchored at its line when it has a usable one.
@@ -1120,15 +1254,6 @@ fn blob_anchor(repo: &str, path: &str, line: Option<i64>) -> String {
         Some(line) if line > 0 => format!("{url}#L{line}"),
         _ => url,
     }
-}
-
-/// A path that could name a file inside a repo. An absolute one comes from the
-/// machine the process ran on, not from the repo, and `..` is nobody's source file.
-fn linkable(path: &str) -> bool {
-    !path.is_empty()
-        && !path.starts_with('/')
-        && !path.starts_with('.')
-        && !path.split('/').any(|segment| segment == ".." || segment.is_empty())
 }
 
 #[cfg(test)]

@@ -362,6 +362,9 @@ mod tests {
             bugs_s3_endpoint: None,
             bugs_ingest_url: "http://127.0.0.1:0".to_owned(),
             bugs_drain: None,
+            pushover: None,
+            public_url: "http://127.0.0.1:0".to_owned(),
+            bugs_self_dsn: None,
         };
         let mirrors = Mirrors::new(Arc::new(config), Db::in_memory().unwrap());
 

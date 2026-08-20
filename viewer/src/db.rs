@@ -32,6 +32,23 @@ fn format_time(value: OffsetDateTime) -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00.000000Z".to_owned())
 }
 
+/// A moment `seconds` from now, in the canonical storage format. A negative offset
+/// looks backwards, which is what the head of a rolling window is.
+///
+/// Every deadline stored here — a retry, a parked queue — is a timestamp string
+/// compared lexicographically, so it has to come out of the same formatter as
+/// [`now`] or the comparison quietly means nothing.
+pub fn now_offset(seconds: i64) -> String {
+    format_time(OffsetDateTime::now_utc() + time::Duration::seconds(seconds))
+}
+
+/// A Unix epoch second, in the canonical storage format. Third parties date things
+/// this way — Pushover's `X-Limit-App-Reset` among them — and a deadline is only
+/// useful here once it can be compared with [`now`].
+pub fn from_unix(seconds: i64) -> Option<String> {
+    OffsetDateTime::from_unix_timestamp(seconds).ok().map(format_time)
+}
+
 /// Normalise any RFC3339 input to the canonical storage format so it can be compared
 /// against stored timestamps. Returns `None` when the input is not a timestamp.
 pub fn normalize_timestamp(raw: &str) -> Option<String> {

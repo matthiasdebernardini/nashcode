@@ -17,7 +17,7 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
-use crate::bugs::{envelope, group, index, logs, store};
+use crate::bugs::{envelope, group, index, logs, pushover, store};
 use crate::db::Db;
 
 /// One accepted envelope, waiting to be understood.
@@ -55,6 +55,10 @@ pub struct Worker {
     pub db: Db,
     pub store: Arc<dyn ObjectStore>,
     pub digested: Arc<watch::Sender<u64>>,
+    /// Notifications happen here and nowhere else on the ingest path. The digest is
+    /// the one place that knows an issue is *new* rather than merely present, so it
+    /// is the one place that can tell the difference between news and noise.
+    pub notify: pushover::Notifier,
 }
 
 impl Worker {
@@ -171,7 +175,7 @@ impl Worker {
             .map_err(|error| format!("cannot write {key}: {error}"))?;
 
         let grouped = group::group(event);
-        index::record(
+        let (issue, landing) = index::record(
             &self.db,
             &index::NewEvent {
                 project_id,
@@ -188,6 +192,15 @@ impl Worker {
             },
         )
         .map_err(|error| error.to_string())?;
+
+        // The choke point. Whether this landing is worth waking somebody for is the
+        // notifier's judgement, not the digest's, and a disabled one returns here
+        // before it reads anything.
+        if self.notify.enabled()
+            && let Ok(Some(project)) = index::project_by_id(&self.db, project_id)
+        {
+            self.notify.landed(&self.db, &project, &issue, landing, Some(event));
+        }
         Ok(())
     }
 }

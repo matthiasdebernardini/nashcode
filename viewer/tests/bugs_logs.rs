@@ -38,6 +38,9 @@ fn bugs_bed() -> (TestBed, PathBuf) {
         bugs_s3_endpoint: None,
         bugs_ingest_url: "https://bugs.example.invalid".to_owned(),
         bugs_drain: None,
+        pushover: None,
+        public_url: "http://127.0.0.1:0".to_owned(),
+        bugs_self_dsn: None,
     });
     let bed = common::testbed_from_config(root, config);
     (bed, bucket)

@@ -45,6 +45,43 @@ pub struct Config {
     /// `NASHCODE_BUGS_DRAIN` and friends. `None` means the drainer never starts, which
     /// is the shipped default: without a public ingester there is nothing to drain.
     pub bugs_drain: Option<Drain>,
+    /// `NASHCODE_PUSHOVER_TOKEN` + `NASHCODE_PUSHOVER_USER`. `None` means no
+    /// notification ever leaves the box; everything else works unchanged.
+    pub pushover: Option<Pushover>,
+    /// `NASHCODE_URL`: where this viewer is, from outside. Every absolute link nashcode
+    /// puts in a message hangs off it, because a notification whose link only works on
+    /// the box that sent it is a notification nobody can act on.
+    pub public_url: String,
+    /// `NASHCODE_BUGS_SELF_DSN`: the DSN nashcode reports its own errors to. Unset means
+    /// it reports nothing about itself.
+    pub bugs_self_dsn: Option<String>,
+}
+
+/// The Pushover application credentials and where to send them.
+///
+/// Both halves or neither: a token with no user key produces a 4xx per message and a
+/// queue that never drains, which is a worse failure than being off.
+#[derive(Clone)]
+pub struct Pushover {
+    /// `NASHCODE_PUSHOVER_TOKEN`, the application token.
+    pub token: String,
+    /// `NASHCODE_PUSHOVER_USER`, the user or group key.
+    pub user: String,
+    /// `NASHCODE_PUSHOVER_URL`, the API origin. Overridable so a test can point the
+    /// sender at a listener it started rather than at a real phone.
+    pub api_url: String,
+}
+
+/// Hand-written for the same reason [`Drain`]'s is: a derived one would print the
+/// application token in every panic message that carries a `Config`.
+impl std::fmt::Debug for Pushover {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pushover")
+            .field("token", &"<redacted>")
+            .field("user", &"<redacted>")
+            .field("api_url", &self.api_url)
+            .finish()
+    }
 }
 
 /// Where the drainer pulls buffered envelopes and log batches from.
@@ -156,6 +193,28 @@ impl Config {
             interval: drain_interval,
         });
 
+        // Both or neither. Half-configured is the state that looks like it works and
+        // never delivers, so it is refused loudly and then treated as off.
+        let pushover = match (optional("NASHCODE_PUSHOVER_TOKEN"), optional("NASHCODE_PUSHOVER_USER"))
+        {
+            (Some(token), Some(user)) => Some(Pushover {
+                token,
+                user,
+                api_url: env_or("NASHCODE_PUSHOVER_URL", "https://api.pushover.net")
+                    .trim_end_matches('/')
+                    .to_owned(),
+            }),
+            (None, None) => None,
+            (token, _) => {
+                let missing =
+                    if token.is_some() { "NASHCODE_PUSHOVER_USER" } else { "NASHCODE_PUSHOVER_TOKEN" };
+                // stderr, not `tracing`: configuration is read before the subscriber
+                // exists, so a `tracing::error!` here would be shouted into nothing.
+                eprintln!("{missing} is unset and its other half is not; Pushover stays off");
+                None
+            }
+        };
+
         Self {
             dgit_url: env_or("DGIT_URL", "").trim_end_matches('/').to_owned(),
             git_token: env_or("GIT_TOKEN", ""),
@@ -167,6 +226,11 @@ impl Config {
                 .trim_end_matches('/')
                 .to_owned(),
             bugs_drain,
+            pushover,
+            public_url: env_or("NASHCODE_URL", &format!("http://{bind}"))
+                .trim_end_matches('/')
+                .to_owned(),
+            bugs_self_dsn: optional("NASHCODE_BUGS_SELF_DSN"),
             bind,
             db_path,
             ci_logs,

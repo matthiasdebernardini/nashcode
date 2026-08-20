@@ -228,6 +228,52 @@ pub fn set_project_active(db: &Db, id: i64, active: bool) -> DbResult<bool> {
     })
 }
 
+/// One project as `/brain` wants it: enough to answer "is anything on fire", and
+/// nothing that costs a second query.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BrainProject {
+    pub name: String,
+    /// The nashcode repo this project declares, when it declares one.
+    pub repo: Option<String>,
+    pub active: bool,
+    pub unresolved: i64,
+    pub issues: i64,
+    pub events: i64,
+    /// When the newest issue of this project last moved. `None` for a project that has
+    /// never been sent anything, which is a different thing from a quiet one.
+    pub last_event_at: Option<String>,
+}
+
+/// Every project, or every project declaring `repo`, with the counts `/brain` shows.
+pub fn brain_projects(db: &Db, repo: Option<&str>) -> DbResult<Vec<BrainProject>> {
+    db.with(|conn| {
+        let mut statement = conn.prepare(
+            "SELECT p.name, p.repo, p.active,
+                    COALESCE(SUM(i.state = 'unresolved'), 0),
+                    COUNT(i.id),
+                    COALESCE(SUM(i.events), 0),
+                    MAX(i.last_seen)
+             FROM bugs_projects p
+             LEFT JOIN bugs_issues i ON i.project_id = p.id
+             WHERE (?1 IS NULL OR p.repo = ?1)
+             GROUP BY p.id
+             ORDER BY p.name",
+        )?;
+        let rows = statement.query_map(params![repo], |row| {
+            Ok(BrainProject {
+                name: row.get(0)?,
+                repo: row.get(1)?,
+                active: row.get(2)?,
+                unresolved: row.get(3)?,
+                issues: row.get(4)?,
+                events: row.get(5)?,
+                last_event_at: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    })
+}
+
 /// Every project as the public ingester's registry wants it: id, key, and whether the
 /// key still opens the door. Deliberately lean — the registry is pushed on a timer and
 /// has no use for issue counts.

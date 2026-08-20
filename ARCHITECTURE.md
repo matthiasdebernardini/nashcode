@@ -101,6 +101,7 @@ graph LR
   viewer_brain --> viewer_upstream
   viewer_bugs --> viewer_config
   viewer_bugs --> viewer_db
+  viewer_bugs --> viewer_git
   viewer_ci --> viewer_code
   viewer_ci --> viewer_config
   viewer_ci --> viewer_db

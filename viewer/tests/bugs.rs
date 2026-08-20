@@ -41,6 +41,9 @@ fn bugs_bed() -> (TestBed, PathBuf) {
         bugs_s3_endpoint: None,
         bugs_ingest_url: "https://bugs.example.invalid".to_owned(),
         bugs_drain: None,
+        pushover: None,
+        public_url: "http://127.0.0.1:0".to_owned(),
+        bugs_self_dsn: None,
     });
     let bed = common::testbed_from_config(root, config);
     (bed, bucket)
@@ -186,7 +189,11 @@ async fn a_project_created_in_the_ui_shows_a_dsn_and_an_sdk_snippet() {
     .await;
     assert_eq!(bad.status, 400);
 
-    assert_eq!(get(&bed, "/bugs", &[JSON]).await.json().as_array().expect("a list").len(), 1);
+    let listed = get(&bed, "/bugs", &[JSON]).await.json();
+    assert_eq!(listed["projects"].as_array().expect("a list").len(), 1);
+    // The notification state travels with the list: whether anything can get out is
+    // part of the state of the feature.
+    assert_eq!(listed["pushover"]["on"], serde_json::json!(false));
 }
 
 // ---- fact 2: the response shape ---------------------------------------------------
