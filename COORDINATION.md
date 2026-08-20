@@ -40,6 +40,7 @@ This file is for agents that are *building* it.
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/SPEC.md` (Stack + Code intelligence sections), `viewer/src/upstream.rs`, `viewer/src/code/mod.rs`, `viewer/src/web/api.rs`, `viewer/src/web/stack.rs`, `viewer/src/brain.rs`, `cli/src/commands/grep.rs`, `viewer/NOTES.md`, `viewer/tests/` (stack files) | whole-stack session | phase 3 of `plans/whole-stack.md`: `scope=stack` on the code endpoints, `nashcode grep --stack`, mirrors indexed at pin. Phases 1–2 landed at `b489c1a` |
+| `viewer/src/bugs/{context,pushover,selfreport}.rs`, `viewer/src/web/bugs.rs`, `viewer/src/main.rs`, `viewer/src/config.rs` (one doctor line), `viewer/SPEC.md` (Bugs section), `AGENTS.md` (Bugs section), `viewer/tests/bugs_*.rs`, tail of `viewer/NOTES.md` | error-tracking session | phase-4 peer-review fixes: the source cache keys on the resolved rev, the panic hook joins the non-recursion guards, doc drift |
 
 
 
