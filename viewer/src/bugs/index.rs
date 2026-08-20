@@ -322,6 +322,27 @@ pub fn record(db: &Db, new: &NewEvent) -> DbResult<(Issue, Landing)> {
             return Ok((issue, Landing::Duplicate));
         }
 
+        // An event this project has already had and already thrown away. The row is
+        // gone, so the check above cannot see it — but the payload is still in an
+        // envelope object, and a reindex re-reads those. Without the tombstone this
+        // lands as an ordinary repeat, writes the row back, and moves the issue's
+        // lifetime counter a second time; that counter only ever goes up and the
+        // escalation ladder reads it, so the inflation would be permanent and exactly
+        // the size of the eviction. See `bugs::evict`.
+        let evicted: Option<i64> = tx
+            .query_row(
+                "SELECT issue_id FROM bugs_evicted_events
+                 WHERE project_id = ?1 AND event_id = ?2",
+                params![new.project_id, new.event_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(issue_id) = evicted {
+            let issue = read_issue_row(&tx, issue_id)?;
+            tx.commit()?;
+            return Ok((issue, Landing::Duplicate));
+        }
+
         let existing: Option<(i64, String)> = tx
             .query_row(
                 "SELECT id, state FROM bugs_issues WHERE project_id = ?1 AND grouping_hash = ?2",
@@ -375,11 +396,24 @@ pub fn record(db: &Db, new: &NewEvent) -> DbResult<(Issue, Landing)> {
         // First-seen and regression-trigger events are the two an eviction pass must
         // never take, so the flag is set here rather than inferred later.
         let keep = matches!(landing, Landing::New | Landing::Regression);
+
+        // How crowded the issue already is decides how relevant this event will look to
+        // a later eviction pass. Computed here because here is the one place holding
+        // both the issue and the transaction; the *stored* count is what counts, not the
+        // issue's lifetime total, since a thinned issue has genuinely made room.
+        let stored_in_issue: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM bugs_events WHERE issue_id = ?1",
+            params![issue_id],
+            |row| row.get(0),
+        )?;
+        let irrelevance =
+            crate::bugs::evict::item_irrelevance(&new.event_id, stored_in_issue + 1);
+
         tx.execute(
             "INSERT INTO bugs_events
                (project_id, issue_id, event_id, object_key, level, platform, timestamp,
-                received_at, keep)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                received_at, keep, irrelevance)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 new.project_id,
                 issue_id,
@@ -390,6 +424,7 @@ pub fn record(db: &Db, new: &NewEvent) -> DbResult<(Issue, Landing)> {
                 new.timestamp,
                 received_at,
                 keep as i64,
+                irrelevance,
             ],
         )?;
 
@@ -435,10 +470,17 @@ pub fn set_state(db: &Db, project_id: i64, id: i64, state: &str, actor: &str) ->
         // paint the issue "regression" forever, including the next time it is opened
         // fresh, and the flag is what tells a reader "this came back after we said it
         // was fixed".
+        //
+        // Every move clears the mute rule, including a move *to* muted: the caller arms
+        // the new rule immediately after, and starting from nothing is what stops a
+        // re-mute from inheriting a half-counted window off the last one. It is also
+        // what makes an unmute final — a rule that survived it would fire again.
         let changed = conn.execute(
             "UPDATE bugs_issues
              SET state = ?3, actor = ?4, acted_at = ?5,
-                 regression = CASE WHEN ?3 = 'resolved' THEN 0 ELSE regression END
+                 regression = CASE WHEN ?3 = 'resolved' THEN 0 ELSE regression END,
+                 mute_rule = NULL, mute_until = NULL, mute_count = NULL,
+                 mute_window = NULL, mute_from = NULL, mute_events = 0
              WHERE project_id = ?1 AND id = ?2",
             params![project_id, id, state, actor, acted_at],
         )?;
@@ -558,6 +600,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS bugs_events_unique
 CREATE INDEX IF NOT EXISTS bugs_events_by_issue
     ON bugs_events (issue_id, received_at);
 
+-- The eviction tombstones. One row per evicted event, and they are what make eviction
+-- stick.
+--
+-- Without them a reindex undoes the whole pass. `Bugs::sweep(true)` re-reads
+-- `bugs_envelopes`, not `bugs_events`, so every evicted event is still inside an
+-- envelope object in the bucket; re-digesting it finds no `(project_id, event_id)` row,
+-- treats it as an ordinary repeat, writes the row back and increments the issue's
+-- lifetime counter a second time. That counter only ever goes up and the escalation
+-- ladder reads it, so the damage would be permanent and exactly the size of the
+-- eviction. A tombstone makes the second sighting what it is: an event this project has
+-- already had, and already thrown away.
+--
+-- It lives here rather than in `bugs::evict` because `record` reads it on the hot path
+-- and the events it tombstones are this module's table. `evict` writes it.
+--
+-- `issue_id` rides along so a tombstoned id can still be answered with its issue, which
+-- is what keeps `record`'s return type honest.
+CREATE TABLE IF NOT EXISTS bugs_evicted_events (
+    project_id INTEGER NOT NULL REFERENCES bugs_projects(id),
+    event_id   TEXT NOT NULL,
+    issue_id   INTEGER NOT NULL,
+    evicted_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, event_id)
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS bugs_envelopes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id  INTEGER NOT NULL REFERENCES bugs_projects(id),
@@ -581,6 +648,20 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     // Whether the project still authenticates. Every project that existed before this
     // column did was authenticating, so the default has to be 1.
     ("bugs_projects", "active", "INTEGER NOT NULL DEFAULT 1"),
+    // What eviction weighs. Fixed when the event is stored, from how crowded its issue
+    // already was; see `bugs::evict`. Zero for every event that predates the column,
+    // which makes those the *most* relevant of all — right, and deliberately so: a
+    // database that has been running since before eviction existed holds the history
+    // somebody has been reading, and age alone will retire it soon enough.
+    ("bugs_events", "irrelevance", "INTEGER NOT NULL DEFAULT 0"),
+    // The mute rule, and how far along it is. All six are cleared by `set_state` on
+    // every move, so a rule can never outlive the mute that armed it. See `bugs::mute`.
+    ("bugs_issues", "mute_rule", "TEXT"),
+    ("bugs_issues", "mute_until", "TEXT"),
+    ("bugs_issues", "mute_count", "INTEGER"),
+    ("bugs_issues", "mute_window", "INTEGER"),
+    ("bugs_issues", "mute_from", "TEXT"),
+    ("bugs_issues", "mute_events", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 /// Add a column if the table does not have it yet.
@@ -615,6 +696,24 @@ pub fn record_envelope(db: &Db, project_id: i64, object_key: &str) -> DbResult<i
             params![project_id, object_key, now()],
         )?;
         Ok(conn.last_insert_rowid())
+    })
+}
+
+/// Has this event id already been evicted?
+///
+/// [`record`] enforces this inside its own transaction, which is what makes it true.
+/// This is the cheap look ahead of it, so the digest can skip re-writing a bucket
+/// object for an event it is about to be told is a duplicate — one indexed read instead
+/// of one object-store PUT.
+pub fn evicted(db: &Db, project_id: i64, event_id: &str) -> DbResult<bool> {
+    db.with(|conn| {
+        conn.query_row(
+            "SELECT 1 FROM bugs_evicted_events WHERE project_id = ?1 AND event_id = ?2",
+            params![project_id, event_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|found| found.is_some())
     })
 }
 

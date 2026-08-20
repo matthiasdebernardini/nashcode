@@ -203,8 +203,41 @@ async fn serve() {
                     Ok(deleted) => tracing::info!(deleted, "bugs: pruned log rows past retention"),
                     Err(error) => tracing::warn!(%error, "bugs: cannot prune the log window"),
                 }
+                // Check-ins are the other unbounded table: one a minute is half a
+                // million rows a year. Same retention, same nightly pass.
+                match bugs.prune_checkins() {
+                    Ok(0) => {}
+                    Ok(deleted) => tracing::info!(deleted, "bugs: pruned check-ins past retention"),
+                    Err(error) => tracing::warn!(%error, "bugs: cannot prune the check-in history"),
+                }
             }
         });
+    }
+
+    // The cron sweep, with the eviction pass riding along on the same tick. A minute is
+    // the finest resolution a cron schedule has, so it is the finest "late" can mean;
+    // eviction shares the tick because a project under its cap costs one indexed count
+    // and a project over it must not stay over for an hour.
+    if bugs.enabled() {
+        let bugs = bugs.clone();
+        tokio::spawn(nashcode::bugs::selfreport::quietly(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_secs(
+                nashcode::bugs::crons::SWEEP_INTERVAL_SECS,
+            ));
+            loop {
+                every.tick().await;
+                match bugs.sweep_crons() {
+                    Ok(swept) if swept.total() == 0 => {}
+                    Ok(swept) => tracing::info!(
+                        missed = swept.missed,
+                        timed_out = swept.timed_out,
+                        "bugs: cron monitors went late"
+                    ),
+                    Err(error) => tracing::warn!(%error, "bugs: cannot sweep the cron monitors"),
+                }
+                bugs.evict().await;
+            }
+        }));
     }
 
     // The one task that talks to Pushover. Off with no credentials, and off with no

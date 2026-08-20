@@ -11,16 +11,20 @@
 //! honest answer is 404 and one line at startup.
 
 pub mod context;
+pub mod crons;
 pub mod digest;
 pub mod drain;
 pub mod envelope;
+pub mod evict;
 pub mod group;
 pub mod index;
 pub mod ingest;
 #[cfg(feature = "drain-iroh")]
 pub mod iroh;
 pub mod logs;
+pub mod mute;
 pub mod pushover;
+pub mod quota;
 pub mod selfreport;
 pub mod store;
 
@@ -135,6 +139,8 @@ impl Bugs {
         logs::migrate(&db)?;
         drain::migrate(&db)?;
         pushover::migrate(&db)?;
+        crons::migrate(&db)?;
+        quota::migrate(&db)?;
         let store = match &config.bugs_bucket {
             None => None,
             Some(bucket) => match store::open(bucket, config.bugs_s3_endpoint.as_deref()) {
@@ -235,6 +241,18 @@ impl Bugs {
         index::set_state(self.db(), project_id, id, state, actor)
     }
 
+    /// Arm a mute rule on an issue that has just been muted. `set_state` cleared the
+    /// last one, so this always writes onto a clean row. See [`mute`].
+    pub fn arm_mute(&self, issue_id: i64, rule: &mute::Rule) -> DbResult<()> {
+        mute::arm(self.db(), issue_id, rule)
+    }
+
+    /// Why an issue is quiet, and how far along its rule is. `None` when nothing is
+    /// armed.
+    pub fn mute_progress(&self, issue_id: i64) -> DbResult<Option<mute::Progress>> {
+        mute::progress(self.db(), issue_id)
+    }
+
     pub fn events(&self, issue_id: i64, limit: i64) -> DbResult<Vec<EventRow>> {
         index::events(self.db(), issue_id, limit)
     }
@@ -273,6 +291,7 @@ impl Bugs {
             envelope_id: Some(envelope_id),
             envelope_key,
             body,
+            silent: false,
             _bytes: Some(bytes),
         });
         Ok(())
@@ -327,6 +346,13 @@ impl Bugs {
     /// bucket and the row without a `digested_at`; nothing else would ever look at it
     /// again. Run at startup. `all` re-reads every envelope instead, which is what
     /// rebuilding the index from the bucket would need.
+    ///
+    /// **`all` digests in silence.** Re-reading the bucket replays every event through
+    /// `index::record`, and every issue is new again to a database that has just been
+    /// rebuilt — so a reindex with the ordinary notifier would ring for the whole
+    /// history at once, on a phone, at whatever hour the rebuild was started. The
+    /// crash-recovery pass (`all` false) keeps its voice, because those envelopes were
+    /// genuinely never digested and their news is genuinely news.
     pub async fn sweep(&self, all: bool) -> usize {
         let Some(store) = self.inner.store.clone() else { return 0 };
         let pending = match index::undigested(self.db(), all, SWEEP_LIMIT) {
@@ -373,6 +399,7 @@ impl Bugs {
                     envelope_id: Some(row.id),
                     envelope_key: row.object_key.clone(),
                     body,
+                    silent: all,
                     _bytes: bytes,
                 })
                 .await
@@ -431,6 +458,81 @@ impl Bugs {
     /// bucket archive is untouched.
     pub fn prune_logs(&self) -> DbResult<usize> {
         logs::prune(self.db())
+    }
+
+    /// Drop check-in rows past each project's `retention_days`. Rides the same nightly
+    /// job as the log prune, and for the same reason: a monitor checking in every
+    /// minute files half a million rows a year and nothing else would ever remove one.
+    pub fn prune_checkins(&self) -> DbResult<usize> {
+        crons::prune(self.db())
+    }
+
+    // ---- crons -------------------------------------------------------------------
+
+    /// Work out which monitors are late. The one-minute job.
+    ///
+    /// Missed and timeout exist nowhere else: a check-in cannot report them and this is
+    /// the only writer that sets them. See [`crons`].
+    pub fn sweep_crons(&self) -> DbResult<crons::Swept> {
+        crons::sweep(self.db(), &self.inner.notify)
+    }
+
+    pub fn monitors(&self, project_id: i64) -> DbResult<Vec<crons::Monitor>> {
+        crons::monitors(self.db(), project_id)
+    }
+
+    pub fn cron_incidents(&self, project_id: i64, limit: i64) -> DbResult<Vec<crons::Incident>> {
+        crons::incidents(self.db(), project_id, limit)
+    }
+
+    pub fn checkins(&self, project_id: i64, limit: i64) -> DbResult<Vec<crons::CheckInRow>> {
+        crons::checkins(self.db(), project_id, limit)
+    }
+
+    // ---- quotas and eviction -----------------------------------------------------
+
+    /// Is there room for one more request from this project? The pre-parse gate; see
+    /// [`quota`].
+    pub fn quota(&self, project_id: i64) -> quota::Verdict {
+        quota::check(self.db(), project_id)
+    }
+
+    /// Count one accepted request. Called once the request has been stored, never
+    /// before — an unauthenticated sender must not be able to spend anybody's budget.
+    pub fn count_request(&self, project_id: i64) {
+        quota::record(self.db(), project_id);
+    }
+
+    pub fn quota_state(&self, project_id: i64) -> DbResult<Vec<quota::WindowState>> {
+        quota::state(self.db(), project_id)
+    }
+
+    /// Take every project back under the stored-event cap. Runs beside the cron sweep;
+    /// a project under its cap costs one indexed `COUNT(*)` and nothing else.
+    pub async fn evict(&self) -> usize {
+        self.evict_to(evict::MAX_STORED_EVENTS).await
+    }
+
+    /// The same, to a stated cap. This is the seam a test drives: proving the *rule* —
+    /// what survives and what goes — needs a handful of events and a cap of five, not
+    /// ten thousand events and the patience to make them.
+    pub async fn evict_to(&self, cap: i64) -> usize {
+        let Some(store) = self.inner.store.clone() else { return 0 };
+        let projects = match index::registry(self.db()) {
+            Ok(projects) => projects,
+            Err(error) => {
+                tracing::warn!(%error, "bugs: cannot list projects to evict");
+                return 0;
+            }
+        };
+        let mut evicted = 0;
+        for (project_id, _, _) in projects {
+            match evict::evict(self.db(), &store, project_id, cap).await {
+                Ok(count) => evicted += count,
+                Err(error) => tracing::warn!(%error, project_id, "bugs: cannot evict events"),
+            }
+        }
+        evicted
     }
 
     // ---- notifications ---------------------------------------------------------------

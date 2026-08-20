@@ -73,6 +73,15 @@ sentry = { version = "0.49", default-features = false, features = [
 sentry-tracing = { version = "0.49", features = ["logs"] }
 flate2 = "1"
 brotli-decompressor = "5"
+# Cron monitors. `croner` parses the 5-field Vixie schedules an SDK sends in a
+# `monitor_config` and answers "when is the next one". Its whole API speaks
+# `chrono::DateTime`, so chrono is not a choice — it is croner's alphabet — and
+# `chrono-tz` is what makes a monitor scheduled `0 9 * * *` in America/Chicago mean
+# nine in Chicago. Storage stays on `time`, the way the rest of the tree does; chrono
+# is confined to the schedule arithmetic in `bugs::crons`.
+croner = "3"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10"
 regex = "1"
 object_store = { version = "0.14", features = ["aws"] }
 futures-core = "0.3"

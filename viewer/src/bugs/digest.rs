@@ -17,7 +17,7 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
-use crate::bugs::{envelope, group, index, logs, pushover, store};
+use crate::bugs::{crons, envelope, group, index, logs, mute, pushover, store};
 use crate::db::Db;
 
 /// One accepted envelope, waiting to be understood.
@@ -32,6 +32,9 @@ pub struct Job {
     pub envelope_key: String,
     /// The envelope exactly as it arrived, decompressed.
     pub body: Vec<u8>,
+    /// Digest this one without telling anybody. Set by the reindex path, where every
+    /// issue is "new" again and the whole history would otherwise ring at once.
+    pub silent: bool,
     /// The queue's memory budget for this body. Released when the job is dropped,
     /// which is after the digest has finished with it.
     pub _bytes: Option<tokio::sync::OwnedSemaphorePermit>,
@@ -43,6 +46,11 @@ pub struct Outcome {
     pub events: usize,
     /// Log lines lifted out of `log` container items.
     pub logs: usize,
+    /// Cron check-ins filed.
+    pub check_ins: usize,
+    /// Events skipped because this project already evicted them. Only a reindex ever
+    /// sees one, and seeing them is how you know eviction held.
+    pub evicted: usize,
     /// Items whose type this build does not handle. Counted, never an error.
     pub skipped: usize,
     /// Items that failed on the way to the bucket or the index. Counted so the item
@@ -80,6 +88,8 @@ impl Worker {
                     project_id,
                     events = outcome.events,
                     logs = outcome.logs,
+                    check_ins = outcome.check_ins,
+                    evicted = outcome.evicted,
                     skipped = outcome.skipped,
                     failed = outcome.failed,
                     "digested"
@@ -127,9 +137,22 @@ impl Worker {
                 }
                 continue;
             }
+            // Door two for crons: a `check_in` item. The monitor it names moves here
+            // and nowhere else on the ingest path.
+            if item.ty == "check_in" {
+                match self.check_in(job, item.payload) {
+                    Ok(true) => outcome.check_ins += 1,
+                    Ok(false) => outcome.skipped += 1,
+                    Err(error) => {
+                        outcome.failed += 1;
+                        tracing::warn!(project_id = job.project_id, %error, "cannot record a check-in");
+                    }
+                }
+                continue;
+            }
             if item.ty != "event" {
-                // `check_in` and `client_report` land in slice 3. Everything else is
-                // counted and dropped, which the protocol requires.
+                // `client_report`, `session`, `profile` and everything else are counted
+                // and dropped, which the protocol requires.
                 outcome.skipped += 1;
                 continue;
             }
@@ -140,8 +163,9 @@ impl Worker {
             // One item's failure is that item's failure. The envelope is already in
             // the bucket, so the sweep can retry the whole thing later; abandoning
             // the items after this one would lose them for nothing.
-            match self.record(job.project_id, &split, &event, item.payload).await {
-                Ok(()) => outcome.events += 1,
+            match self.record(job, &split, &event, item.payload).await {
+                Ok(true) => outcome.events += 1,
+                Ok(false) => outcome.evicted += 1,
                 Err(error) => {
                     outcome.failed += 1;
                     tracing::warn!(project_id = job.project_id, %error, "cannot record an event");
@@ -152,13 +176,39 @@ impl Worker {
         Ok(outcome)
     }
 
+    /// The notifier this job digests with. A reindex gets a silent one, so replaying
+    /// history never rings a phone about a fire that was put out last month.
+    fn notifier(&self, job: &Job) -> pushover::Notifier {
+        if job.silent { pushover::Notifier::off() } else { self.notify.clone() }
+    }
+
+    /// File one `check_in` item and move the monitor it names.
+    ///
+    /// `Ok(false)` means the payload was not a check-in this server can file — no
+    /// monitor slug, or not JSON at all — which is a skip and never an error.
+    fn check_in(&self, job: &Job, raw: &[u8]) -> Result<bool, String> {
+        let Ok(payload) = serde_json::from_slice::<Value>(raw) else { return Ok(false) };
+        let Some(check_in) = crons::CheckIn::parse(&payload) else { return Ok(false) };
+        let Some(project) = index::project_by_id(&self.db, job.project_id)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(false);
+        };
+        crons::record(&self.db, &project, &check_in, &self.notifier(job))
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+
+    /// Index one event. `Ok(false)` means the id was evicted and deliberately skipped:
+    /// nothing was written, and the caller counts it apart from the events it stored.
     async fn record(
         &self,
-        project_id: i64,
+        job: &Job,
         split: &envelope::Envelope<'_>,
         event: &Value,
         raw: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
+        let project_id = job.project_id;
         let event_id = event
             .get("event_id")
             .and_then(Value::as_str)
@@ -166,6 +216,14 @@ impl Worker {
             .or_else(|| split.event_id())
             .unwrap_or_else(new_event_id);
         let event_id = sanitize_id(&event_id);
+
+        // An event that was evicted must not come back. `index::record` enforces that
+        // inside its transaction; checking here as well is what saves the bucket write,
+        // and a reindex after an eviction is exactly the case where every second event
+        // would otherwise be re-put and then discarded.
+        if index::evicted(&self.db, project_id, &event_id).unwrap_or(false) {
+            return Ok(false);
+        }
 
         // The detail view reads this object, not the database.
         let key = store::event_key(project_id, &event_id);
@@ -193,17 +251,59 @@ impl Worker {
         )
         .map_err(|error| error.to_string())?;
 
+        let notify = self.notifier(job);
+        // A muted issue is the only one with a rule to judge, so the lookup that would
+        // cost every event a query costs only those. The rule is judged *before* the
+        // notifier sees the landing: an event that lifts a mute has to reach the
+        // notifier as an event on an open issue, or the escalation ladder — which will
+        // not ring for a muted issue, and rightly — would step over the rung this very
+        // event just crossed.
+        let mut issue = issue;
+        let mut project = None;
+        // A duplicate event id is a client retry, or a re-digest of an envelope this
+        // index has already seen. Nothing happened: the issue's own counter did not
+        // move, so a mute rule counting events must not move either. Without this, a
+        // reindex walks the whole bucket and quietly unmutes every issue somebody
+        // silenced with a "when it gets loud" rule.
+        if issue.state == index::state::MUTED && landing != index::Landing::Duplicate {
+            project = match index::project_by_id(&self.db, project_id) {
+                Ok(project) => project,
+                Err(error) => {
+                    // Carry on: the event is indexed and on the page either way. But a
+                    // project lookup that fails means the mute rule was not judged, and
+                    // an issue that should have come off mute silently did not.
+                    tracing::warn!(%error, project_id, "bugs: cannot read the project to judge a mute rule");
+                    None
+                }
+            };
+            if let Some(project) = &project {
+                match mute::evaluate(&self.db, project, &issue, &notify) {
+                    Ok(Some(unmuted)) => issue = unmuted,
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        %error,
+                        issue = issue.id,
+                        "bugs: cannot evaluate a mute rule; the issue stays muted"
+                    ),
+                }
+            }
+        }
+
         // The choke point. Whether this landing is worth waking somebody for is the
         // notifier's judgement, not the digest's, and a disabled one returns here
         // before it reads anything.
-        if self.notify.enabled()
-            && let Ok(Some(project)) = index::project_by_id(&self.db, project_id)
-        {
-            // One event, one increment: `index::record` is a single writer that adds
-            // exactly one, and the ladder needs to know the size of the step.
-            self.notify.landed(&self.db, &project, &issue, landing, 1, Some(event));
+        if notify.enabled() {
+            let project = match project {
+                Some(project) => Some(project),
+                None => index::project_by_id(&self.db, project_id).unwrap_or(None),
+            };
+            if let Some(project) = project {
+                // One event, one increment: `index::record` is a single writer that adds
+                // exactly one, and the ladder needs to know the size of the step.
+                notify.landed(&self.db, &project, &issue, landing, 1, Some(event));
+            }
         }
-        Ok(())
+        Ok(true)
     }
 }
 

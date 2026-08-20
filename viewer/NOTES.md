@@ -1619,3 +1619,287 @@ will not make it. `{"projects": [...], "pushover": {"on": bool, "budget": {...}}
 nine files. `db::now_offset` and `db::from_unix` are new: every deadline stored here is a
 timestamp string compared lexicographically, so it has to come out of the same formatter
 as `db::now` or the comparison quietly means nothing.
+
+## Phase 5: crons, quotas, eviction, mutes
+
+### Three dependencies, not one
+
+`croner` was the one the SPEC named. Its whole API speaks `chrono::DateTime`, so `chrono`
+is not a choice — it is croner's alphabet. `chrono-tz` is the third, and it is the one
+worth arguing about: a `monitor_config` carries an IANA timezone, and `0 9 * * *` in
+`America/Chicago` is 14:00 UTC in summer and 15:00 in winter. Evaluating that in UTC
+would file a missed-check-in alert every morning for a job that ran on time. Storing the
+zone and ignoring it is worse than not storing it, so the zone is applied — and a zone
+this box cannot resolve is dropped at parse time rather than kept and quietly disregarded.
+
+Storage stays on `time`. chrono is confined to `bugs::crons`, between reading a Unix
+second and producing the next one.
+
+### The schema lives with the module, not in `index.rs`
+
+`bugs_monitors`, `bugs_checkins`, `bugs_incidents` and `bugs_quota` are created by
+`crons::migrate` and `quota::migrate`, the way `logs` and `pushover` already own theirs.
+`Bugs::new` calls each. Only the columns on tables `index.rs` owns went through its
+`ADDED_COLUMNS` list: `bugs_events.irrelevance` and the six `bugs_issues.mute_*`.
+
+`irrelevance` defaults to 0, which makes every event predating the column the *most*
+relevant of all. That is deliberate: those are the events somebody has been reading, and
+age retires them soon enough on its own.
+
+### Only the server says missed or timeout
+
+A `check_in` may say `in_progress`, `ok` or `error`. Anything else — including the
+`missed` and `timeout` a client has no way to know, and any word this build does not
+recognise — is stored as `error` with a `coerced` flag. A process healthy enough to
+report that it was missed was not missed.
+
+The two states the server does own are computed by a one-minute sweep off two stored
+deadlines, `next_checkin_latest` and `timeout_at`. Timeouts are decided first: a run that
+overran is a run that started, so filing it as missing as well would file one silence
+twice. Each transition pushes the deadline past `now`, which is what stops the same
+lateness being filed every minute.
+
+### A monitor needs a schedule or it is not a monitor
+
+Upserted only when a `monitor_config` carries a schedule this box can evaluate. A
+check-in with no config, or with a config whose schedule will not parse, is stored and
+declares nothing. The reasoning is that a monitor with no schedule can never be late, so
+inventing one puts a row on the page that says "ok" for ever — worse than an empty page,
+because it looks like coverage.
+
+`failure_issue_threshold` and `recovery_threshold` are parsed past and not implemented.
+One failure is an incident here. Thresholds are a real feature and they are not in the
+SPEC bullet.
+
+### The all-zero `check_in_id` is a sentinel and never an identity
+
+The protocol lets an SDK send `"00000000000000000000000000000000"` to mean "update
+whichever run is still in progress". Storing that as an id would have been quietly
+catastrophic: check-in uniqueness is `(project, check_in_id, status)`, so every `ok` a
+sender ever sent with the sentinel would collide with the first one and every run after
+the first would move nothing at all. It gets a minted id instead. The cost is that the
+two halves of that run are not paired, which costs a duration on the page.
+
+### One open incident per monitor
+
+A job that errors, then starts missing, then times out is one thing being broken. A
+second failure of a different kind opens nothing and rings nothing; an `ok` closes the
+one incident and rings the recovery. Both go through `Notifier::cron_incident` and
+`Notifier::cron_recovered`, which are two more rows on the existing push queue and not a
+second send path. Dedupe keys name the incident, so each opens once and closes once
+however often the sweep runs.
+
+### Quotas are checked before the body and counted after it
+
+Two calls, and the split is the point. `quota::check` runs the moment the project is
+known and before a byte is read or decompressed — a gate that fires after 20 MiB is in
+memory has spent exactly what it exists to save. `quota::record` runs once the request is
+stored. Nothing increments a counter for a request that turned out to have the wrong key,
+so knowing a numeric project id does not let anybody spend that project's month.
+
+The gap between the two is a race, and the overshoot it allows is a handful of requests
+under concurrency. That is the right trade for a budget: a lock here would put SQLite
+contention on the hot path to make a bucket bill exact to three decimal places.
+
+Windows are fixed, not sliding: one row per project per window, rolled on read and on
+write. A sliding window needs a row per request. The boundary effect — up to two windows'
+worth inside one window's span, either side of a roll — is the standard cost and is fine
+for a number that bounds storage rather than a login form.
+
+**The gate fails open.** A database that will not answer a question about a budget is not
+a reason to drop somebody's telemetry, and the bounded digest queue is still there to
+stop the box from drowning.
+
+**The refusal names the earliest reset, not the latest.** With two windows full, being
+asked back too soon costs one wasted request that gets the same answer; being asked back
+too late costs an SDK sitting on events it could have delivered.
+
+**A 429 carries `X-Sentry-Rate-Limits: <seconds>::project`** as well as `Retry-After`.
+Empty categories means every category and the scope is this DSN, so an SDK stops sending
+altogether for the window instead of retrying into a refusal. `ingester/` needs no change:
+the edge does not gate quotas, it buffers, and the viewer is where the budget lives.
+
+**Drained rows bypass the quota**, and this is the one hole worth writing down. The gate
+is on the tailnet HTTP doors, where a live SDK can hear a 429 and back off. A drained row
+has already left the edge and there is nowhere for it to go back to — gating it would end
+the cycle with no ack and wedge that project's buffer for as long as the quota lasts,
+which for the monthly window is a month. Eviction is the backstop that bounds storage
+whichever door an event came in by.
+
+### Eviction: how close to Bugsink
+
+Close on the arithmetic, deliberately apart on one rule.
+
+Kept verbatim: the two-part score, `nonzero_leading_bits(round(r · count · 2))` fixed at
+ingest from the issue's *stored* count, plus `log₄(hours + 1)` computed at eviction time,
+added together. Base four is Bugsink's empirical calibration and the reason it works is
+worth keeping — it makes a week aging into a month cost about what a doubling of an
+issue's volume costs, so age and volume trade against each other instead of one always
+winning. The 500-row batch ceiling is theirs too, and so is the 5%-of-cap floor.
+
+Three deviations:
+
+- **The multiplier is derived from the event id, not from a random source.** Bugsink
+  randomises so that a count hovering around one value does not hand out the same score
+  every time — which matters, because a project that fills and is evicted and fills again
+  hovers by construction. An FNV-1a hash of the event id breaks the same ties for the same
+  reason and is reproducible, which is worth a lot in a function that decides what gets
+  deleted: the same event scores the same in a test, on a rerun, and after a reindex.
+- **The candidates are sorted, not walked down a falling threshold.** Same events, stricter
+  order, and a project's candidate set is at most a cap's worth of small rows.
+- **`keep` is absolute.** Bugsink recurses with `include_never_evict=True` rather than fail
+  to reach its target — "never say never". Here the first-seen event and every regression
+  trigger stay, and a project that reaches its cap with nothing left to take gets a warning
+  line. An issue whose first event is gone cannot answer "when did this start", which is
+  the question the issue page exists for. A cap that can only be met by deleting the answer
+  is a cap that is too small, and that is a thing to say rather than to solve silently.
+
+`bugs_issues.events` is **not** decremented. It is a lifetime counter and the escalation
+ladder depends on it only ever going up; eviction removes stored payloads, not history.
+
+Rows go before objects. An object with no row is invisible and costs storage; a row with
+no object is a dead link where a person expected an answer. So a pass interrupted halfway
+leaks bytes rather than breaking a page.
+
+Eviction rides the cron sweep's one-minute tick rather than the nightly prune. A project
+under its cap costs one indexed `COUNT(*)`; a project over it must not stay over for an
+hour.
+
+### Mute-until counts over a window, not over a life
+
+Sentry's "ignore until it happens this many times in this window", read the way the words
+say: an issue at three events an hour stays muted for ever under a rule of ten-in-an-hour,
+and that is the point of the rule rather than a bug in it. The window is fixed and rolls
+whole; a sliding one needs a row per event to be exact, which is a table the size of the
+log store to answer "is this loud now".
+
+Rules are evaluated on ingest, in the digest, and nowhere else. There is no timer, because
+an issue nothing is arriving at never needs to come off mute — coming off mute is only
+interesting when there is something to be told about.
+
+**A duplicate landing does not advance a rule.** Found while writing the reindex test: a
+re-digest replays every stored envelope, every event id is already indexed, and without
+this the whole bucket would walk an issue's mute-until counter up and quietly unmute
+everything somebody had silenced. A duplicate event id means nothing happened — the
+issue's own counter does not move either.
+
+Mutes are judged *before* the notifier sees the landing. An event that lifts a mute has to
+reach the notifier as an event on an open issue, or the escalation ladder — which does not
+ring for a muted issue, rightly — steps straight over the rung that very event crossed.
+
+The rule lives in six columns on `bugs_issues` and not on the `Issue` struct. Adding fields
+to `Issue` would have rippled into every exhaustive literal in the tests, for data only two
+pages read; `mute::progress` is its own query and its own `mute` key in the issue JSON,
+absent rather than null when nothing is armed.
+
+`set_state` clears all six on every move, including a move *to* muted — the caller arms the
+new rule immediately after. That is what stops a re-mute inheriting a half-counted window,
+and what makes an unmute final.
+
+A rule that will not parse is a 400, not a downgrade to "forever". Somebody who asked for
+an hour and silently got for ever does not find out until the outage they miss.
+
+### `sweep(true)` digests in silence
+
+`digest::Job` grew a `silent` flag and `Bugs::sweep(all: true)` sets it; the worker then
+runs on `Notifier::off()`. The crash-recovery pass (`all: false`) keeps its voice, because
+those envelopes were genuinely never digested and their news is genuinely news.
+
+Worth being straight about what the test proves today: against the same database every
+replayed event is a duplicate, so the dedupe keys would cover it anyway. The flag is what
+makes the *fresh-database* reindex safe — the case `nashcode bugs reindex` will actually
+be, where no rows exist and every issue is new again. The test asserts the reachable half
+(a replay moves nothing and rings nothing) and the flag carries the rest.
+
+### Phase 5, after peer review
+
+Six things changed shape. The three that were wrong are worth reading; the rest are
+where the code and its own comments had drifted apart.
+
+**Eviction now leaves tombstones, because deleting a row does not delete an event.**
+The original pass deleted the `bugs_events` row and the per-event object and called the
+event gone. It was not: `sweep(true)` — the reindex primitive — re-reads
+`bugs_envelopes`, and the evicted payload is still sitting in an envelope object. On the
+next reindex it found no `(project_id, event_id)` row, landed as an ordinary repeat,
+wrote the row back, and **incremented the issue's lifetime counter a second time**. That
+counter only ever goes up and the escalation ladder reads it, so every reindex after an
+eviction inflated it permanently, by exactly the eviction volume. The old comment
+claiming "a reindex never resurrects what was evicted, because the row is what it would
+have read" was simply false.
+
+`bugs_evicted_events (project_id, event_id, issue_id, evicted_at)` fixes it, written in
+the same transaction as the delete — a row deleted without its tombstone is a row the
+next reindex puts straight back, so a crash between two transactions would reopen the
+hole. `index::record` consults it and answers `Duplicate`; the digest consults it once
+more before the bucket write, which turns an object-store PUT into one indexed read on
+the one path where that matters. The table lives in `index.rs` rather than `evict.rs`
+because `record` reads it on the hot path and the events it tombstones are that module's.
+
+The cost: tombstones are never pruned. They are about a third the size of the event row
+they replace and they have to outlive the envelope that carries the payload, so pruning
+them would restore the bug. Bounding them properly means envelope retention, which is
+the next gap.
+
+**`crons::record` is one transaction, and the gap it closed was reachable twice.** It
+used to be three writes — upsert the monitor, insert the check-in, apply the state — and
+the one-minute sweep could land between the second and the third: it found a monitor
+whose deadline had passed because the `ok` had not been applied yet, opened a missed
+incident and pushed it, and then `apply` landed, closed that incident and pushed a
+recovery. Two phone notifications for a job that ran exactly on time. A crash in the same
+gap was worse and permanent: the check-in row is durable, so redelivery hit
+`INSERT OR IGNORE`, found the row, and returned before applying anything — leaving the
+monitor at `unknown` with a NULL deadline, which both sweep predicates skip. It could
+never go missing and never recover, for ever, silently.
+
+One transaction closes the race outright. There is no test for it, and there cannot
+usefully be one — the structure is the proof. The wedged monitor *is* tested, through
+`stale_since`: an already-stored check-in is normally a replay and must move nothing, but
+if the monitor's own `last_checkin_at` is behind that row's timestamp then the monitor
+never absorbed it, and it is applied — from the row's timestamp, not from now, because
+that is when the job actually ran. `transition` got the same treatment.
+
+Notifications are collected inside the transaction as a `News` value and delivered after
+it commits. `Db::with` holds one mutex over one connection, so queueing a push from
+inside a transaction would take that lock twice and wedge the digest task against itself.
+
+**A schedule that parses is not a schedule that fires.** `0 0 30 2 *` — the thirtieth of
+February — is well-formed and croner accepts it, and `find_next_occurrence` then never
+resolves. The monitor got a NULL deadline and became invisible to the missed sweep: the
+page said "ok" for ever while covering nothing, which is worse than an empty page because
+it looks like coverage. `Schedule::parse` now asks for one occurrence before believing a
+pattern. Anywhere a deadline still computes to `None` after that — a daylight-saving gap
+an interval step landed inside, a calendar step off the end of the range — now warns
+instead of writing NULL in silence.
+
+**Check-ins are pruned; envelopes are not, and that is the honest hole in this phase.**
+`bugs_checkins` had no cap: a monitor checking in every minute files half a million rows
+a year and nothing would ever remove one. It now rides the nightly log prune under the
+same `retention_days`. Incidents and monitors stay — there are few of them and they are
+the history a person actually reads.
+
+But **eviction does not bound bucket storage.** It caps the index rows and the per-event
+objects; the raw envelope objects hold the same payloads and are never pruned, so a
+project at its cap has shed roughly half the bytes it appears to have shed. This is not
+built and was not attempted this pass: envelope retention interacts with the reindex path
+(dropping an envelope makes its events unrecoverable) and with the tombstones above
+(dropping an envelope is the only thing that would ever make a tombstone safe to drop),
+and that is a design question, not a patch. Phase 5 bounds the index and the event
+objects. Envelope retention is open.
+
+**Two smaller reversals.**
+
+- A corrupt `mute_from` used to make a `mute-until` rule permanently unfireable: the
+  unparseable stamp read as zero, the window looked like 1970, so it rolled on every
+  event and the count reset to one for ever. A corrupt row silencing an issue permanently
+  is the wrong direction, and the `mute-for` arm two lines above already argues the
+  opposite explicitly — an unreadable deadline is treated as passed. The window now
+  re-opens at now and keeps its count, so the rule stays fireable.
+- `quota::WindowState`'s doc claimed it was shown on the project page. It was not — the
+  function had no web caller at all. Rather than correct the comment down, the page and
+  its JSON now carry it, because "why is my SDK getting 429s" should be answerable
+  without reading a log. It renders only once something has been sent; three zeroes on a
+  fresh project would be noise on a page that is about issues.
+
+Errors in the digest's mute path are logged rather than swallowed, `mute::Rule::parse`'s
+doc no longer contradicts the handler that refuses an unparseable rule with a 400, and
+`crons::seconds_of` says so when it substitutes now for a stamp that will not parse.

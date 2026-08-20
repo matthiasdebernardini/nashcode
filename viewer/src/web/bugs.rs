@@ -21,7 +21,9 @@ use topcoat::router::{
 };
 use topcoat::view::{component, view};
 
-use crate::bugs::{Issue, Project, context, envelope, group, ingest, logs, state};
+use crate::bugs::{
+    Issue, Project, context, crons, envelope, group, ingest, logs, mute, quota, state,
+};
 use crate::web::components::shell;
 use crate::web::{actor, app, see_other};
 
@@ -157,6 +159,10 @@ async fn accept_logs(cx: &Cx, body: Body) -> Result<Response> {
         Some(_) => return Ok(sentry_error(StatusCode::FORBIDDEN, "wrong key for this project")),
         None => return Ok(sentry_error(StatusCode::FORBIDDEN, "no sentry_key")),
     }
+    // The quota, before a byte of the body is read. See `accept_envelope`.
+    if let quota::Verdict::Over { window, retry_after } = bugs.quota(project.id) {
+        return Ok(over_quota(&window, retry_after));
+    }
 
     let raw = match ingest::read_capped(body, ingest::MAX_COMPRESSED).await {
         Ok(raw) => raw,
@@ -197,6 +203,7 @@ async fn accept_logs(cx: &Cx, body: Body) -> Result<Response> {
             return Ok(sentry_error(StatusCode::BAD_GATEWAY, "cannot store the logs"));
         }
     };
+    bugs.count_request(project.id);
 
     // The reject count is exact; the line numbers are a capped sample. Echoing one
     // number per bad line lets a small request buy an enormous answer.
@@ -228,6 +235,13 @@ async fn accept_envelope(cx: &Cx, body: Body) -> Result<Response> {
         && key != &project.key
     {
         return Ok(sentry_error(StatusCode::FORBIDDEN, "wrong key for this project"));
+    }
+
+    // The quota gate, and it is here on purpose: the project is known and not one byte
+    // of the body has been read or decompressed. A gate that fires after the 20 MiB is
+    // in memory has spent exactly what it exists to save. Three primary-key lookups.
+    if let quota::Verdict::Over { window, retry_after } = bugs.quota(project.id) {
+        return Ok(over_quota(&window, retry_after));
     }
 
     let encoding = request::headers(cx)
@@ -324,6 +338,10 @@ async fn accept_envelope(cx: &Cx, body: Body) -> Result<Response> {
             return Ok(sentry_error(StatusCode::BAD_GATEWAY, "cannot store the envelope"));
         }
     }
+    // Counted here and not at the gate. A request that turned out to be unauthenticated,
+    // malformed or too large never reaches this line, so nobody can spend a project's
+    // budget without its key.
+    bugs.count_request(project.id);
 
     let payload = serde_json::json!({ "id": event_id });
     let mut response = json_response(StatusCode::OK, payload.to_string());
@@ -339,6 +357,31 @@ async fn accept_envelope(cx: &Cx, body: Body) -> Result<Response> {
 fn busy() -> Response {
     let mut response = sentry_error(StatusCode::TOO_MANY_REQUESTS, "the digest queue is full");
     response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+    response
+}
+
+/// This project has sent more than its share. Backpressure and a quota are different
+/// facts — one is about this box being behind, the other about one project having had
+/// its turn — and an SDK is right not to care: both mean "come back in N seconds", and
+/// both say so the same way.
+///
+/// `X-Sentry-Rate-Limits: <seconds>::project` is the extra word a quota can say that
+/// backpressure cannot. An empty category list means every category, and the project
+/// scope means this DSN, so an SDK stops sending altogether for the stated window
+/// instead of retrying into a refusal. That is the whole difference between a quota
+/// that saves work and one that only moves it.
+fn over_quota(window: &str, retry_after: i64) -> Response {
+    let mut response = sentry_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        &format!("over this project's {window} ingest quota"),
+    );
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&retry_after.to_string()) {
+        headers.insert(header::RETRY_AFTER, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&format!("{retry_after}::project")) {
+        headers.insert("x-sentry-rate-limits", value);
+    }
     response
 }
 
@@ -538,20 +581,42 @@ async fn project_page(cx: &Cx) -> Result<Response> {
     };
     let issues = app(cx).bugs.issues(project.id, filter)?;
     let dsn = app(cx).bugs.dsn(&project);
+    // What this project has left of its ingest allowance. On the page and in the JSON
+    // because "why is my SDK getting 429s" has to be answerable without reading a log.
+    let quota = app(cx).bugs.quota_state(project.id)?;
 
     if wants_json(cx) {
-        let body = serde_json::json!({ "project": project, "dsn": dsn, "issues": issues });
+        let body = serde_json::json!({
+            "project": project,
+            "dsn": dsn,
+            "issues": issues,
+            "quota": quota,
+        });
         return Ok(json_response(StatusCode::OK, body.to_string()));
     }
+
+    // Only worth a line once something has been sent. A fresh project showing three
+    // zeroes is noise on the one page that should be about issues.
+    let spent: Vec<String> = quota
+        .iter()
+        .filter(|window| window.used > 0)
+        .map(|window| format!("{} of {} per {}", window.used, window.limit, window.window))
+        .collect();
 
     let page = view! { cx =>
         shell(title: format!("{name} · bugs"),
             <div class="d-flex flex-items-center gap-2 mb-2">
                 <h3><i class="ph ph-bug"></i>" "(name.clone())</h3>
                 <a class="ml-auto Link--primary text-small" href=(format!("/bugs/{name}/logs"))>"Logs"</a>
+                <a class="Link--primary text-small" href=(format!("/bugs/{name}/crons"))>"Crons"</a>
                 <a class="Link--primary text-small" href="/bugs">"All projects"</a>
             </div>
             dsn_card(dsn: dsn, project: project.clone())
+            if !spent.is_empty() {
+                <p class="text-small color-fg-muted mb-2">
+                    "Ingest quota: "(spent.join(" · "))
+                </p>
+            }
             <div class="d-flex gap-2 mb-2">
                 for (label, value) in state_tabs() {
                     <a key=(label) class=(if filter == value { "btn btn-sm btn-primary" } else { "btn btn-sm" })
@@ -698,11 +763,17 @@ async fn issue_page(cx: &Cx) -> Result<Response> {
         None => None,
     };
 
+    // Why the issue is quiet lives in its own columns rather than on `Issue`, so it is
+    // its own read and its own key. Absent rather than null when nothing is armed, the
+    // way the rest of the feature's optional stanzas behave.
+    let muted = app(cx).bugs.mute_progress(issue.id)?;
+
     if wants_json(cx) {
         let body = serde_json::json!({
             "issue": issue,
             "event": latest,
             "payload": payload,
+            "mute": muted,
         });
         return Ok(json_response(StatusCode::OK, body.to_string()));
     }
@@ -735,15 +806,40 @@ async fn issue_page(cx: &Cx) -> Result<Response> {
                 " · "(issue.state.clone())
                 if issue.regression { " · regression" }
             </p>
-            <div class="d-flex gap-2 mb-3">
-                for (label, value) in [("Resolve", state::RESOLVED), ("Mute", state::MUTED), ("Reopen", state::UNRESOLVED)] {
+            <div class="d-flex gap-2 mb-2 flex-items-center flex-wrap">
+                for (label, value) in [("Resolve", state::RESOLVED), ("Reopen", state::UNRESOLVED)] {
                     <form key=(label) method="post"
                           action=(format!("/bugs/{name}/issues/{}/state", issue.id))>
                         <input type="hidden" name="state" value=(value)>
                         <button class="btn btn-sm" type="submit" disabled=(issue.state == value)>(label)</button>
                     </form>
                 }
+                // Muting takes a rule, so it is a form with a choice in it rather than a
+                // button. "Forever" is still there and still first, because it is what
+                // most mutes mean; the others exist so that "not now" does not have to
+                // be spelled "never".
+                <form method="post" class="d-flex gap-2 flex-items-center"
+                      action=(format!("/bugs/{name}/issues/{}/state", issue.id))>
+                    <input type="hidden" name="state" value=(state::MUTED)>
+                    <select class="form-select" name="rule">
+                        <option value="forever">"forever"</option>
+                        for (label, seconds) in mute::DURATIONS {
+                            <option key=(label) value=(format!("for:{seconds}"))>"for "(label)</option>
+                        }
+                        for (label, count, window) in mute::CONDITIONS {
+                            <option key=(label) value=(format!("until:{count}:{window}"))>
+                                "until "(label)
+                            </option>
+                        }
+                    </select>
+                    <button class="btn btn-sm" type="submit">"Mute"</button>
+                </form>
             </div>
+            if let Some(muted) = &muted {
+                <p class="text-small color-fg-muted mb-3">
+                    <i class="ph ph-bell-slash"></i>" "(muted.summary.clone())
+                </p>
+            }
             <div class="Box mb-3">
                 <div class="Box-header"><strong>"Grouping"</strong></div>
                 <div class="Box-body">
@@ -995,6 +1091,9 @@ fn render_frame(frame: &serde_json::Value) -> Frame {
 #[derive(Debug, Default, Deserialize)]
 struct StateIn {
     state: Option<String>,
+    /// The mute rule, for `state=muted`: `forever`, `for:<seconds>` or
+    /// `until:<count>:<seconds>`. Ignored for every other state.
+    rule: Option<String>,
 }
 
 /// `POST /bugs/{project}/issues/{issue}/state {state}` — resolve, mute, or reopen.
@@ -1013,17 +1112,32 @@ async fn set_state(cx: &Cx, body: request::Bytes) -> Result<Response> {
     let Some(wanted) = input.state.filter(|value| state::known(value)) else {
         return Err(bad_request("state is unresolved, resolved or muted").into());
     };
+    // A rule is only meaningful on a mute, and a rule that will not parse is refused
+    // rather than quietly downgraded: somebody who asked for "an hour" and silently got
+    // "for ever" would not find out until the outage they missed.
+    let rule = match (&wanted[..], input.rule.as_deref()) {
+        (state::MUTED, Some(raw)) => Some(mute::Rule::parse(raw).ok_or_else(|| {
+            bad_request("rule is forever, for:<seconds> or until:<count>:<seconds>")
+        })?),
+        (state::MUTED, None) => Some(mute::Rule::Forever),
+        _ => None,
+    };
     let Some(project) = app(cx).bugs.project(&name)? else {
         return Err(not_found().into());
     };
     let Some(issue) = app(cx).bugs.set_state(project.id, id, &wanted, &actor(cx).login)? else {
         return Err(not_found().into());
     };
+    if let Some(rule) = &rule {
+        app(cx).bugs.arm_mute(issue.id, rule)?;
+    }
 
     if form {
         return see_other(&format!("/bugs/{name}/issues/{}", issue.id));
     }
-    Ok(json_response(StatusCode::OK, serde_json::to_string(&issue)?))
+    let muted = app(cx).bugs.mute_progress(issue.id)?;
+    let body = serde_json::json!({ "issue": issue, "mute": muted });
+    Ok(json_response(StatusCode::OK, body.to_string()))
 }
 
 // ---- logs page ---------------------------------------------------------------------
@@ -1148,6 +1262,162 @@ fn logs_url(project: &str, q: &str, level: Option<&str>, page: i64) -> String {
         url.push_str(&format!("&level={level}"));
     }
     url
+}
+
+// ---- crons page ---------------------------------------------------------------------
+
+/// How many incidents and check-ins the page shows. Both are history, and the page is
+/// for "is it running", not for an audit.
+const CRON_HISTORY: i64 = 50;
+
+/// `GET /bugs/{project}/crons` — the monitors, and what they have been doing.
+#[route(GET "/bugs/{project_name}/crons")]
+async fn crons_page(cx: &Cx) -> Result<Response> {
+    on(cx)?;
+    let name = path_param::<ProjectName>(cx).to_owned();
+    let Some(project) = app(cx).bugs.project(&name)? else {
+        return Err(not_found().into());
+    };
+    let monitors = app(cx).bugs.monitors(project.id)?;
+    let incidents = app(cx).bugs.cron_incidents(project.id, CRON_HISTORY)?;
+    let checkins = app(cx).bugs.checkins(project.id, CRON_HISTORY)?;
+
+    if wants_json(cx) {
+        let body = serde_json::json!({
+            "project": project,
+            "monitors": monitors,
+            "incidents": incidents,
+            "check_ins": checkins,
+        });
+        return Ok(json_response(StatusCode::OK, body.to_string()));
+    }
+
+    // Paired before the view, so the markup only reads — the convention the logs page
+    // and the issue page already follow.
+    let open: std::collections::HashMap<i64, crons::Incident> = incidents
+        .iter()
+        .filter(|incident| incident.resolved_at.is_none())
+        .map(|incident| (incident.monitor_id, incident.clone()))
+        .collect();
+    let slugs: std::collections::HashMap<i64, String> =
+        monitors.iter().map(|monitor| (monitor.id, monitor.slug.clone())).collect();
+    let rows: Vec<(crons::Monitor, bool)> =
+        monitors.iter().map(|monitor| (monitor.clone(), open.contains_key(&monitor.id))).collect();
+    let history: Vec<(crons::Incident, String)> = incidents
+        .iter()
+        .map(|incident| {
+            let slug =
+                slugs.get(&incident.monitor_id).cloned().unwrap_or_else(|| "?".to_owned());
+            (incident.clone(), slug)
+        })
+        .collect();
+
+    let page = view! { cx =>
+        shell(title: format!("{name} · crons"),
+            <div class="d-flex flex-items-center gap-2 mb-2">
+                <a class="Link--primary text-small" href=(format!("/bugs/{name}"))>(name.clone())</a>
+                <span class="color-fg-muted">"/"</span>
+                <h3 class="mb-0"><i class="ph ph-clock-countdown"></i>" Crons"</h3>
+                <a class="ml-auto Link--primary text-small" href="/bugs">"All projects"</a>
+            </div>
+            if rows.is_empty() {
+                <div class="Box mb-3"><div class="Box-body color-fg-muted">
+                    "No monitors. A monitor appears when a "<code>"check_in"</code>" arrives
+                     carrying a "<code>"monitor_config"</code>" — the schedule is what lets this
+                     page know a check-in is late, so a check-in without one is stored and
+                     declares nothing."
+                </div></div>
+            } else {
+                <div class="Box mb-3">
+                    <div class="Box-header"><strong>"Monitors"</strong></div>
+                    for (monitor, broken) in &rows {
+                        monitor_row(key: monitor.id, monitor: monitor.clone(), broken: *broken)
+                    }
+                </div>
+            }
+            if !history.is_empty() {
+                <div class="Box mb-3">
+                    <div class="Box-header"><strong>"Incidents"</strong></div>
+                    for (incident, slug) in &history {
+                        <div key=(incident.id) class="Box-row d-flex flex-items-center gap-2 text-small">
+                            <span class=(if incident.resolved_at.is_none() { "Label Label--danger" } else { "Label" })>
+                                (incident.kind.clone())
+                            </span>
+                            <span class="nashcode-code">(slug.clone())</span>
+                            if let Some(detail) = &incident.detail {
+                                <span class="color-fg-muted">(detail.clone())</span>
+                            }
+                            <span class="ml-auto color-fg-muted">
+                                (incident.opened_at.clone())
+                                if let Some(resolved) = &incident.resolved_at {
+                                    " → recovered "(resolved.clone())
+                                }
+                            </span>
+                        </div>
+                    }
+                </div>
+            }
+            if !checkins.is_empty() {
+                <div class="Box">
+                    <div class="Box-header"><strong>"Check-ins"</strong></div>
+                    for row in &checkins {
+                        <div key=(row.id) class="Box-row d-flex flex-items-center gap-2 text-small">
+                            <span class="color-fg-muted nashcode-code">(row.received_at.clone())</span>
+                            <span class=(cron_class(&row.status))>(row.status.clone())</span>
+                            <span class="nashcode-code">(row.slug.clone())</span>
+                            if row.coerced {
+                                <span class="Label" title="the client claimed a status only the server decides">
+                                    "coerced"
+                                </span>
+                            }
+                            <span class="ml-auto color-fg-muted">
+                                if let Some(duration) = row.duration { (format!("{duration:.1}s")) }
+                                if let Some(environment) = &row.environment { " · "(environment.clone()) }
+                            </span>
+                        </div>
+                    }
+                </div>
+            }
+        )
+    }?;
+    page.into_response(cx)
+}
+
+#[component]
+async fn monitor_row(monitor: crons::Monitor, broken: bool) -> Result {
+    let schedule = monitor.schedule().describe();
+    view! {
+        <div class="Box-row d-flex flex-items-center gap-2">
+            <span class=(cron_class(&monitor.status))>(monitor.status.clone())</span>
+            <strong class="nashcode-code">(monitor.slug.clone())</strong>
+            <span class="text-small color-fg-muted nashcode-code">(schedule)</span>
+            if let Some(zone) = &monitor.timezone {
+                <span class="text-small color-fg-muted">(zone.clone())</span>
+            }
+            if broken {
+                <span class="Label Label--danger">"incident open"</span>
+            }
+            <span class="ml-auto text-small color-fg-muted">
+                if let Some(last) = &monitor.last_checkin_at {
+                    "last "(last.clone())
+                } else {
+                    "never checked in"
+                }
+                if let Some(next) = &monitor.next_checkin_latest {
+                    " · due by "(next.clone())
+                }
+            </span>
+        </div>
+    }
+}
+
+fn cron_class(status: &str) -> &'static str {
+    match status {
+        "ok" => "Label Label--success",
+        "error" | "missed" | "timeout" => "Label Label--danger",
+        "in_progress" => "Label Label--accent",
+        _ => "Label",
+    }
 }
 
 /// The three lines either side of the one that failed.

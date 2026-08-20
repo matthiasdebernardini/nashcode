@@ -509,3 +509,90 @@ async fn a_log_line_never_notifies() {
     assert_eq!(sender(&bed).tick().await, Tick::Idle);
     assert_eq!(stub.count(), 0, "logs never push");
 }
+
+// ---- mutes: the one notification an expiring rule is allowed to send -----------------
+
+/// Mute the project's only issue with a rule, through the form the issue page posts.
+async fn mute(bed: &TestBed, issue_id: i64, rule: &str) {
+    let (status, _, body) = common::post_form(
+        &bed.router,
+        &format!("/bugs/api/issues/{issue_id}/state"),
+        &[("state", "muted"), ("rule", rule)],
+    )
+    .await;
+    assert_eq!(status, 303, "{body}");
+}
+
+async fn only_issue(bed: &TestBed, project_id: i64) -> i64 {
+    let issues = bed.bugs.issues(project_id, None).expect("issues");
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    issues[0].id
+}
+
+#[tokio::test]
+async fn an_expiring_mute_rings_once_through_the_hook_that_was_already_there() {
+    let stub = Stub::spawn(vec![Reply::ok()]).await;
+    let (bed, _bucket) = bed(Some(&stub.url));
+    let project = bed.bugs.create_project("api", None).expect("project");
+
+    send_events(&bed, project.id, 1, 1, "boom").await;
+    let issue_id = only_issue(&bed, project.id).await;
+    assert_eq!(pushover::history(&bed.db, 20).expect("history").len(), 1, "the new issue");
+
+    // Quiet while it stays at this volume; loud when it stops being background.
+    mute(&bed, issue_id, "until:3:3600").await;
+    send_events(&bed, project.id, 2, 2, "boom").await;
+    assert_eq!(
+        pushover::history(&bed.db, 20).expect("history").len(),
+        1,
+        "two events is not three, and a muted issue is silent"
+    );
+
+    // The third inside the window lifts it, and that is one message.
+    send_events(&bed, project.id, 4, 1, "boom").await;
+    let queued = pushover::history(&bed.db, 20).expect("history");
+    assert_eq!(queued.len(), 2);
+    assert_eq!(queued[0].reason, "unmute", "there is no second kind of notification for this");
+
+    // And every event after it is an ordinary event on an ordinary open issue.
+    send_events(&bed, project.id, 5, 3, "boom").await;
+    assert_eq!(pushover::history(&bed.db, 20).expect("history").len(), 2, "once, not once per event");
+}
+
+#[tokio::test]
+async fn a_re_digest_never_advances_a_mute_rule_and_never_rings() {
+    let stub = Stub::spawn(vec![Reply::ok()]).await;
+    let (bed, _bucket) = bed(Some(&stub.url));
+    let project = bed.bugs.create_project("api", None).expect("project");
+
+    send_events(&bed, project.id, 1, 1, "boom").await;
+    let issue_id = only_issue(&bed, project.id).await;
+    mute(&bed, issue_id, "until:5:3600").await;
+    send_events(&bed, project.id, 2, 2, "boom").await;
+
+    let before = pushover::history(&bed.db, 50).expect("history").len();
+    let counted = bed.bugs.mute_progress(issue_id).expect("a rule").expect("armed").seen;
+    assert_eq!(counted, Some(2));
+
+    // `sweep(true)` is the reindex primitive: it re-reads every stored envelope and
+    // digests it again. History replaying must not move anything and must not ring.
+    let queued = bed.bugs.sweep(true).await;
+    assert!(queued > 0, "there are envelopes to re-read");
+    bed.bugs.digested((3 + queued) as u64).await;
+
+    assert_eq!(
+        bed.bugs.mute_progress(issue_id).expect("a rule").expect("armed").seen,
+        Some(2),
+        "a replayed event is not a new event, so the window did not move"
+    );
+    assert_eq!(
+        bed.bugs.issues(project.id, None).expect("issues")[0].state,
+        "muted",
+        "and the issue stayed silenced"
+    );
+    assert_eq!(
+        pushover::history(&bed.db, 50).expect("history").len(),
+        before,
+        "a reindex rings for nothing"
+    );
+}

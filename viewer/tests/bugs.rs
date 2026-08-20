@@ -970,3 +970,420 @@ async fn a_long_number_in_a_message_does_not_open_an_issue_per_value() {
     assert_eq!(issues[0]["grouping_key"], "TimeoutError: no answer since <int>");
     assert_eq!(issues[0]["events"], 2);
 }
+
+// ---- quotas: a project's share of the pipeline ------------------------------------
+//
+// Backpressure and a quota share a status code and mean different things. The digest
+// queue's 429 says "this box is behind"; a quota's says "this project has had its
+// turn". The tests below are about the second one, and the property that matters most
+// is *when* it fires: before the body is read, or it has saved nothing.
+
+/// One envelope whose exception type decides its issue. Type, never a number in the
+/// value: grouping parameterizes integers out on purpose, so `boom 1` … `boom 25` is
+/// one issue and a test that counted on twenty-five would be testing nothing.
+fn typed_envelope(event_id: &str, ty: &str) -> Vec<u8> {
+    let event = serde_json::json!({
+        "event_id": event_id,
+        "timestamp": "2026-08-19T04:05:06Z",
+        "platform": "python",
+        "exception": {"values": [{"type": ty, "value": "boom"}]},
+    })
+    .to_string();
+    format!("{{}}\n{{\"type\":\"event\"}}\n{event}\n").into_bytes()
+}
+
+/// The tightest window's allowance, which is the one every test here fills.
+fn tightest_quota() -> i64 {
+    nashcode::bugs::quota::WINDOWS[0].2
+}
+
+/// Spend a project's whole five-minute allowance without making the requests. The gate
+/// under test is the gate, not the thousand file writes it would take to reach it.
+fn spend_quota(bed: &TestBed, project_id: i64) {
+    for _ in 0..tightest_quota() {
+        bed.bugs.count_request(project_id);
+    }
+}
+
+#[tokio::test]
+async fn a_project_over_its_quota_is_refused_before_its_body_is_read() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+    spend_quota(&bed, id);
+
+    // A body that could never be accepted on its own terms: it is not an envelope at
+    // all. Getting 429 rather than 400 is the proof that nothing parsed it — the gate
+    // ran on the project alone, which is the whole point of putting it there.
+    let answer = post_envelope(&bed, id, &key, b"this is not an envelope".to_vec()).await;
+    assert_eq!(answer.status, 429, "{}", answer.body);
+    assert_eq!(answer.header("x-sentry-error").map(|e| e.contains("quota")), Some(true));
+
+    // And an SDK can obey it: a delay to wait, and the rate-limit header that tells it
+    // to stop sending every category rather than retry into the same refusal.
+    let retry: i64 =
+        answer.header("retry-after").expect("a delay").parse().expect("whole seconds");
+    assert!(retry >= 1 && retry <= nashcode::bugs::quota::WINDOWS[0].1, "{retry}");
+    let limits = answer.header("x-sentry-rate-limits").expect("a rate-limit header");
+    assert_eq!(limits, format!("{retry}::project"), "empty categories means all of them");
+    assert_eq!(answer.header("access-control-allow-origin"), Some("*"), "a browser must see it");
+}
+
+#[tokio::test]
+async fn the_log_door_is_held_to_the_same_quota_as_the_envelope_door() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+
+    // Both doors count against one budget, because what the quota bounds is requests
+    // through the front of the pipeline and not which shape they arrived in.
+    let line = "{\"level\":\"error\",\"message\":\"boom\"}\n";
+    let answer = send(
+        &bed.router,
+        Method::POST,
+        &format!("/api/{id}/logs?sentry_key={key}"),
+        &[("content-type", "application/x-ndjson")],
+        line.as_bytes().to_vec(),
+    )
+    .await;
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert_eq!(bed.bugs.quota_state(id).expect("quota")[0].used, 1, "the log door counted");
+
+    spend_quota(&bed, id);
+    let answer = send(
+        &bed.router,
+        Method::POST,
+        &format!("/api/{id}/logs?sentry_key={key}"),
+        &[("content-type", "application/x-ndjson")],
+        line.as_bytes().to_vec(),
+    )
+    .await;
+    assert_eq!(answer.status, 429, "{}", answer.body);
+    assert!(answer.header("retry-after").is_some());
+}
+
+#[tokio::test]
+async fn one_project_over_its_quota_costs_every_other_project_nothing() {
+    let (bed, _bucket) = bugs_bed();
+    let (loud, loud_key) = project(&bed, "loud").await;
+    let (quiet, quiet_key) = project(&bed, "quiet").await;
+    spend_quota(&bed, loud);
+
+    assert_eq!(post_envelope(&bed, loud, &loud_key, typed_envelope(&"a".repeat(32), "A")).await.status, 429);
+    let answer = post_envelope(&bed, quiet, &quiet_key, typed_envelope(&"b".repeat(32), "B")).await;
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert_eq!(bed.bugs.quota_state(quiet).expect("quota")[0].used, 1);
+}
+
+#[tokio::test]
+async fn nothing_that_was_refused_ever_spends_a_projects_budget() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, _key) = project(&bed, "api").await;
+
+    // A wrong key, then an unknown project. Neither is an accepted request, so neither
+    // may cost the project anything — otherwise anybody who knows a numeric id can
+    // spend somebody else's month.
+    let wrong = post_envelope(&bed, id, &"f".repeat(32), typed_envelope(&"a".repeat(32), "A")).await;
+    assert_eq!(wrong.status, 403);
+    let missing = post_envelope(&bed, 9999, &"f".repeat(32), typed_envelope(&"b".repeat(32), "B")).await;
+    assert_eq!(missing.status, 404, "an unknown project is a verdict, and a 4xx is final");
+
+    assert_eq!(bed.bugs.quota_state(id).expect("quota")[0].used, 0);
+}
+
+#[tokio::test]
+async fn an_unknown_project_stays_a_404_with_the_quota_gate_in_place() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+    spend_quota(&bed, id);
+
+    // The gate sits after the project lookup, so a project that is not there is still
+    // answered by the lookup and not by the quota. An SDK reads 404 as "this DSN is
+    // wrong" and 429 as "come back", and confusing the two either wedges a sender or
+    // loses its events.
+    let answer = post_envelope(&bed, 9999, &key, typed_envelope(&"a".repeat(32), "A")).await;
+    assert_eq!(answer.status, 404, "{}", answer.body);
+    assert_eq!(answer.header("x-sentry-error"), Some("unknown project"));
+}
+
+// ---- eviction: what goes when a project is full -----------------------------------
+
+/// The event objects a project has in the bucket.
+fn event_objects(bucket: &Path, project_id: i64) -> Vec<String> {
+    let dir = bucket.join(format!("projects/{project_id}/events"));
+    let mut names: Vec<String> = walk(&dir)
+        .into_iter()
+        .filter_map(|path| Path::new(&path).file_name().map(|name| name.to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn eviction_holds_the_cap_and_never_takes_the_evidence() {
+    let (bed, bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+
+    // A noisy issue and a quiet one. The types differ, not a number in the value.
+    let mut sent = 0;
+    for n in 0..12 {
+        post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 100 + n), "NoisyError")).await;
+        sent += 1;
+    }
+    for n in 0..3 {
+        post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 200 + n), "QuietError")).await;
+        sent += 1;
+    }
+    bed.bugs.digested(sent).await;
+
+    // Resolve the noisy issue and break it again, so it carries a regression trigger —
+    // the second of the two kinds of event eviction is never allowed to take.
+    let issues = get(&bed, "/bugs/api", &[JSON]).await.json();
+    let noisy = issues["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .find(|issue| issue["title"].as_str().is_some_and(|title| title.contains("NoisyError")))
+        .expect("the noisy issue")["id"]
+        .as_i64()
+        .expect("an id");
+    common::post_form(&bed.router, &format!("/bugs/api/issues/{noisy}/state"), &[("state", "resolved")]).await;
+    post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 300), "NoisyError")).await;
+    sent += 1;
+    bed.bugs.digested(sent).await;
+
+    let before = bed.bugs.events(noisy, 100).expect("events");
+    let kept: Vec<String> =
+        before.iter().filter(|event| event.keep).map(|event| event.event_id.clone()).collect();
+    assert_eq!(kept.len(), 2, "the first event and the regression trigger");
+    assert_eq!(event_objects(&bucket, id).len(), sent as usize, "one object per event");
+
+    // Now hold it to five.
+    let evicted = bed.bugs.evict_to(5).await;
+    assert!(evicted > 0, "sixteen events do not fit in five");
+
+    // Rows and objects went together. An object with no row would be invisible and a
+    // row with no object would be a dead link on the issue page; neither is allowed.
+    let remaining_objects = event_objects(&bucket, id);
+    let noisy_rows = bed.bugs.events(noisy, 100).expect("events");
+    let quiet = issues["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .find(|issue| issue["title"].as_str().is_some_and(|title| title.contains("QuietError")))
+        .expect("the quiet issue")["id"]
+        .as_i64()
+        .expect("an id");
+    let quiet_rows = bed.bugs.events(quiet, 100).expect("events");
+    assert_eq!(
+        remaining_objects.len(),
+        noisy_rows.len() + quiet_rows.len(),
+        "every surviving row still has its object, and nothing survived without one"
+    );
+
+    // The two protected events are still there, and so is the quiet issue's first one.
+    let survivors: Vec<String> =
+        noisy_rows.iter().map(|event| event.event_id.clone()).collect();
+    for protected in &kept {
+        assert!(survivors.contains(protected), "eviction took {protected}, which it may never");
+    }
+    assert!(!quiet_rows.is_empty(), "a quiet issue must not be emptied by a noisy neighbour");
+    assert!(
+        quiet_rows.iter().any(|event| event.keep),
+        "the quiet issue keeps its first-seen event"
+    );
+}
+
+#[tokio::test]
+async fn a_project_under_its_cap_is_left_alone() {
+    let (bed, bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+    for n in 0..3 {
+        post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 400 + n), "SmallError")).await;
+    }
+    bed.bugs.digested(3).await;
+
+    assert_eq!(bed.bugs.evict_to(10).await, 0, "under the cap is nothing to do");
+    assert_eq!(event_objects(&bucket, id).len(), 3);
+}
+
+// ---- mute rules -------------------------------------------------------------------
+
+/// Mute an issue with a rule, through the form the issue page posts.
+async fn mute(bed: &TestBed, issue_id: i64, rule: &str) {
+    let (status, _, body) = common::post_form(
+        &bed.router,
+        &format!("/bugs/api/issues/{issue_id}/state"),
+        &[("state", "muted"), ("rule", rule)],
+    )
+    .await;
+    assert_eq!(status, 303, "{body}");
+}
+
+/// The one issue of a project that has exactly one.
+async fn only_issue(bed: &TestBed) -> i64 {
+    let issues = get(bed, "/bugs/api", &[JSON]).await.json();
+    let issues = issues["issues"].as_array().expect("issues").clone();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    issues[0]["id"].as_i64().expect("an id")
+}
+
+async fn state_of(bed: &TestBed, issue_id: i64) -> String {
+    let issue = get(bed, &format!("/bugs/api/issues/{issue_id}"), &[JSON]).await.json();
+    issue["issue"]["state"].as_str().expect("a state").to_owned()
+}
+
+#[tokio::test]
+async fn muting_for_ever_is_still_there_and_still_means_for_ever() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+    post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 1), "MutedError")).await;
+    bed.bugs.digested(1).await;
+    let issue_id = only_issue(&bed).await;
+    mute(&bed, issue_id, "forever").await;
+
+    for n in 2..8 {
+        post_envelope(&bed, id, &key, typed_envelope(&format!("{n:032x}"), "MutedError")).await;
+    }
+    bed.bugs.digested(7).await;
+    assert_eq!(state_of(&bed, issue_id).await, "muted");
+
+    let shown = get(&bed, &format!("/bugs/api/issues/{issue_id}"), &[JSON]).await.json();
+    assert_eq!(shown["mute"]["kind"], "forever");
+}
+
+#[tokio::test]
+async fn a_mute_for_a_duration_lifts_itself_when_the_next_event_arrives_after_it() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+    post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 1), "TimedError")).await;
+    bed.bugs.digested(1).await;
+    let issue_id = only_issue(&bed).await;
+
+    // One second, so the deadline is a real deadline and the test is not a sleep.
+    mute(&bed, issue_id, "for:1").await;
+    post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 2), "TimedError")).await;
+    bed.bugs.digested(2).await;
+    assert_eq!(state_of(&bed, issue_id).await, "muted", "inside the hour it stays quiet");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 3), "TimedError")).await;
+    bed.bugs.digested(3).await;
+    assert_eq!(state_of(&bed, issue_id).await, "unresolved", "the deadline passed");
+
+    // The rule is spent. Nothing re-arms it, so the issue is an ordinary open issue.
+    let shown = get(&bed, &format!("/bugs/api/issues/{issue_id}"), &[JSON]).await.json();
+    assert!(shown["mute"].is_null(), "{shown:?}");
+}
+
+#[tokio::test]
+async fn a_mute_until_lifts_on_the_nth_event_inside_the_window_and_not_before() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+    post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 1), "LoudError")).await;
+    bed.bugs.digested(1).await;
+    let issue_id = only_issue(&bed).await;
+    mute(&bed, issue_id, "until:3:3600").await;
+
+    // Two is not three.
+    for n in 2..=3 {
+        post_envelope(&bed, id, &key, typed_envelope(&format!("{n:032x}"), "LoudError")).await;
+    }
+    bed.bugs.digested(3).await;
+    assert_eq!(state_of(&bed, issue_id).await, "muted");
+    let shown = get(&bed, &format!("/bugs/api/issues/{issue_id}"), &[JSON]).await.json();
+    assert_eq!(shown["mute"]["seen"], 2);
+    assert_eq!(shown["mute"]["needed"], 3);
+
+    // The third inside the window is the one that speaks up.
+    post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 4), "LoudError")).await;
+    bed.bugs.digested(4).await;
+    assert_eq!(state_of(&bed, issue_id).await, "unresolved");
+}
+
+#[tokio::test]
+async fn a_mute_rule_that_will_not_parse_is_refused_rather_than_downgraded() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+    post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 1), "PickyError")).await;
+    bed.bugs.digested(1).await;
+    let issue_id = only_issue(&bed).await;
+
+    // Somebody who asked for an hour and silently got "for ever" would not find out
+    // until the outage they missed.
+    let (status, _, _) = common::post_form(
+        &bed.router,
+        &format!("/bugs/api/issues/{issue_id}/state"),
+        &[("state", "muted"), ("rule", "for:soon")],
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(state_of(&bed, issue_id).await, "unresolved", "and nothing moved");
+}
+
+#[tokio::test]
+async fn a_reindex_never_resurrects_an_evicted_event_or_moves_the_counter() {
+    let (bed, bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+
+    let mut sent = 0;
+    for n in 0..10 {
+        post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 500 + n), "GhostError")).await;
+        sent += 1;
+    }
+    bed.bugs.digested(sent).await;
+
+    let issue_id = only_issue(&bed).await;
+    let before = get(&bed, &format!("/bugs/api/issues/{issue_id}"), &[JSON]).await.json();
+    let counter_before = before["issue"]["events"].as_i64().expect("a count");
+    assert_eq!(counter_before, 10);
+
+    let evicted = bed.bugs.evict_to(4).await;
+    assert!(evicted > 0, "ten events do not fit in four");
+    let rows_after_eviction = bed.bugs.events(issue_id, 100).expect("events").len();
+    let objects_after_eviction = event_objects(&bucket, id).len();
+    assert_eq!(rows_after_eviction, objects_after_eviction, "rows and objects went together");
+
+    // The reindex primitive re-reads every stored *envelope* — and the envelopes still
+    // hold the payloads of the events that were just evicted. Without a tombstone each
+    // one lands as an ordinary repeat: the row comes back and the issue's lifetime
+    // counter moves a second time. That counter only ever goes up and the escalation
+    // ladder reads it, so the inflation would be permanent.
+    let queued = bed.bugs.sweep(true).await;
+    assert!(queued > 0, "there are envelopes to re-read");
+    bed.bugs.digested(sent + queued as u64).await;
+
+    assert_eq!(
+        bed.bugs.events(issue_id, 100).expect("events").len(),
+        rows_after_eviction,
+        "a reindex put an evicted event back"
+    );
+    assert_eq!(
+        event_objects(&bucket, id).len(),
+        objects_after_eviction,
+        "a reindex re-wrote an evicted event's object"
+    );
+    let after = get(&bed, &format!("/bugs/api/issues/{issue_id}"), &[JSON]).await.json();
+    assert_eq!(
+        after["issue"]["events"].as_i64().expect("a count"),
+        counter_before,
+        "the lifetime counter moved, so the escalation ladder is now wrong for ever"
+    );
+}
+
+#[tokio::test]
+async fn the_project_page_says_what_is_left_of_the_ingest_quota() {
+    let (bed, _bucket) = bugs_bed();
+    let (id, key) = project(&bed, "api").await;
+    post_envelope(&bed, id, &key, typed_envelope(&format!("{:032x}", 1), "QuotaError")).await;
+    bed.bugs.digested(1).await;
+
+    let json = get(&bed, "/bugs/api", &[JSON]).await.json();
+    let windows = json["quota"].as_array().expect("the quota windows");
+    assert_eq!(windows.len(), nashcode::bugs::quota::WINDOWS.len());
+    assert_eq!(windows[0]["used"], 1);
+    assert_eq!(windows[0]["limit"], tightest_quota());
+    assert!(windows[0]["resets_at"].is_string());
+
+    // And a person sees it too, which is what makes "why am I getting 429s" answerable.
+    let page = get(&bed, "/bugs/api", &[]).await;
+    assert!(page.body.contains("Ingest quota"), "the page does not mention the quota");
+}

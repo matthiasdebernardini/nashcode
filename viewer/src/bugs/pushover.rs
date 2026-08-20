@@ -58,6 +58,10 @@ pub mod reason {
     pub const UNMUTE: &str = "unmute";
     pub const LADDER: &str = "ladder";
     pub const SUPPRESSED: &str = "suppressed";
+    /// A cron monitor started failing, went missing, or overran.
+    pub const CRON: &str = "cron";
+    /// It checked in cleanly again.
+    pub const CRON_RECOVERY: &str = "cron-recovery";
 }
 
 // ---- schema ------------------------------------------------------------------------
@@ -165,9 +169,82 @@ impl Notifier {
         }
     }
 
-    /// An issue has come off mute and is interesting again. Nothing evaluates mutes
-    /// yet — that is the crons-and-quotas slice — so this is the door standing ready
-    /// rather than a path anything walks today.
+    /// A cron monitor has opened an incident: it failed, it never checked in, or it
+    /// started and never finished.
+    ///
+    /// This and [`Self::cron_recovered`] are the one choke point for everything the
+    /// cron half of the feature says. `bugs::crons` calls them from the two places a
+    /// monitor's health actually changes and from nowhere else, so a monitor that flaps
+    /// inside one incident rings once — the incident, not the check-in, is the news.
+    pub fn cron_incident(
+        &self,
+        db: &Db,
+        project: &Project,
+        slug: &str,
+        kind: &str,
+        detail: Option<&str>,
+        incident_id: i64,
+    ) {
+        if !self.on {
+            return;
+        }
+        let lead = match kind {
+            "missed" => "Cron monitor missed a check-in.",
+            "timeout" => "Cron monitor started and never finished.",
+            _ => "Cron monitor reported a failure.",
+        };
+        let message = match detail {
+            Some(detail) if !detail.trim().is_empty() => format!("{lead}\n{detail}"),
+            _ => lead.to_owned(),
+        };
+        self.queue_cron(db, project, slug, reason::CRON, &message, format!("cron/{incident_id}/open"));
+    }
+
+    /// The monitor checked in cleanly and its incident is closed.
+    pub fn cron_recovered(&self, db: &Db, project: &Project, slug: &str, incident_id: i64) {
+        if !self.on {
+            return;
+        }
+        self.queue_cron(
+            db,
+            project,
+            slug,
+            reason::CRON_RECOVERY,
+            "Cron monitor recovered.",
+            format!("cron/{incident_id}/recovered"),
+        );
+    }
+
+    /// One row for either half of a monitor's news. The dedupe key names the incident,
+    /// so each incident opens once and closes once however many times the sweep runs.
+    fn queue_cron(
+        &self,
+        db: &Db,
+        project: &Project,
+        slug: &str,
+        reason: &'static str,
+        message: &str,
+        dedupe_key: String,
+    ) {
+        let queued = Queued {
+            project_id: project.id,
+            issue_id: None,
+            reason,
+            dedupe_key,
+            title: clip(&format!("{}: {slug}", project.name), TITLE_MAX),
+            message: clip(message, MESSAGE_MAX),
+            url: Some(format!("{}/bugs/{}/crons", self.public_url, project.name)),
+            // Priority 0, like everything that is not fatal. A cron incident is
+            // important and it is not an alarm that overrides a silenced phone.
+            priority: 0,
+        };
+        if let Err(error) = enqueue(db, &queued) {
+            tracing::warn!(%error, monitor = slug, "bugs: cannot queue a cron notification");
+        }
+    }
+
+    /// An issue has come off mute and is interesting again. `bugs::mute` calls this
+    /// when a rule expires or fires; there is no second kind of notification for it.
     pub fn unmuted(&self, db: &Db, project: &Project, issue: &Issue) {
         if !self.on {
             return;
