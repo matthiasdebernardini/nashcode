@@ -735,8 +735,11 @@ viewer-side surface; the goal doc binds protocol, grouping, and notification sem
   base so a test can point the sender at a listener it started.
   State changes only — new issue, regression, unmute, cron incident, recovery — never
   per event. The escalation ladder adds one push when an unresolved issue crosses 10,
-  100 or 1000 events; a threshold is crossed once per issue per resolve cycle, so an
-  issue that is resolved and comes back can ring the ladder again. Logs never push.
+  100 or 1000 events. **Each rung rings once in an issue's life**, because the event
+  counter only ever goes up: resolving an issue does not reset it, so a rung that has
+  been crossed cannot be crossed again. An issue that is fixed and breaks again says so
+  through its regression push, which is the state change; the ladder is about volume,
+  and the volume is cumulative. Logs never push.
   Payload: title `{project}: {issue title}` truncated to 250 characters, message =
   exception value plus a few tags, truncated to 1024 and never empty, `url` = the issue
   page under `NASHCODE_URL`, `url_title` = "Open in nashcode", priority 0 and 1 for
@@ -782,6 +785,20 @@ viewer-side surface; the goal doc binds protocol, grouping, and notification sem
   snippet inline on the log row (expandable) and the issue frame. Read on render, not
   at ingest: the mirror is local and the index stores only file/line/release. A path
   or SHA the mirror cannot answer degrades to the plain link, never an error.
+- **Crons.** `check_in` envelope items store; a monitor is upserted only when a valid
+  `monitor_config` accompanies the check-in. `next_checkin_latest` and `timeout_at`
+  persist; a 1-minute sweep computes missed and timeout server-side (client-sent ones
+  coerced). `croner` for 5-field Vixie schedules, chrono math for intervals; defaults
+  checkin_margin 1 min, max_runtime 30 min. Pushover at one choke point: incident open
+  (error/missed/timeout) and recovery. `/bugs/:project/crons` lists monitors and
+  incidents, same JSON convention.
+- **Quotas and eviction.** Pre-parse per-project quota gate → 429 + Retry-After
+  (defaults 1k/5min, 5k/hour, 1M/month). Per-project max stored events (default 10k),
+  Bugsink-shaped eviction: age- and volume-weighted; first-seen and regression trigger
+  events never evicted; eviction deletes bucket objects and index rows together. Mutes
+  evaluated on ingest: mute-for (duration) and mute-until (N events per period); unmute
+  notifies through the existing `Notifier::unmuted` hook. Reindex takes
+  `Notifier::off()` so history never re-rings.
 - **Phasing.** 1: core loop (landed). 2: logs + hardening (landed). 3: public ingester
   per `ingester.md`, pulled forward — ingestion scales from day one; the celld edge
   buffers per project, the viewer's digest stays the single writer behind it. 4:
