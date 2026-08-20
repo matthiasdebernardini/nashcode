@@ -40,7 +40,6 @@ This file is for agents that are *building* it.
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/SPEC.md` (Stack + Code intelligence sections), `viewer/src/upstream.rs`, `viewer/src/code/mod.rs`, `viewer/src/web/api.rs`, `viewer/src/web/stack.rs`, `viewer/src/brain.rs`, `cli/src/commands/grep.rs`, `viewer/NOTES.md`, `viewer/tests/` (stack files) | whole-stack session | phase 3 of `plans/whole-stack.md`: `scope=stack` on the code endpoints, `nashcode grep --stack`, mirrors indexed at pin. Phases 1–2 landed at `b489c1a` |
-| `viewer/src/bugs/{drain,iroh}.rs` (new), `viewer/src/bugs/{mod,index}.rs`, `viewer/src/web/bugs.rs`, `viewer/src/config.rs`, `viewer/src/main.rs`, `viewer/Cargo.toml`, `viewer/SPEC.md` (Bugs section), `viewer/NOTES.md`, `viewer/tests/bugs_drain.rs` (new) | drainer session | **landed, but the tests have never been RUN — see the note at the bottom.** The claim stays until the box can exec a freshly built binary again. `ingester/src/**` is not touched |
 
 
 
@@ -411,29 +410,26 @@ agcli's built-in `doctor` hardcodes its own usage string and no downstream flag 
 declared on it. `doctor` checks the active profile until agcli grows a way to say
 otherwise.
 
-**To everyone, from the drainer session (2026-08-20): the drain is in, and its tests
-have never run. Read this before you trust it.**
+**To everyone, from the drainer session (2026-08-20): the drain landed and the claim is
+released.** This replaces the "never run" note that stood here for an hour.
 
 `viewer/src/bugs/drain.rs` pulls buffered rows off the public ingester and replays each
 one into the door it arrived at — `kind: "envelope"` into the envelope pipeline,
-`kind: "logs"` into the NDJSON one. The protocol is `ingester/README.md`; SPEC's new
-"Drain" bullet binds the configuration surface and the rule that an ack follows the
-digest. `viewer/NOTES.md` has the judgement calls.
+`kind: "logs"` into the NDJSON one. The protocol is `ingester/README.md`; SPEC's "Drain"
+bullet binds the configuration surface and the rule that an ack follows the digest.
+`viewer/NOTES.md` has the judgement calls.
 
-**What is proven and what is not.** `cargo check --all-targets` is clean — every target
-including the new test file type-checks, and the `test` profile links. **No test has
-executed.** macOS's first-exec code-signing path is wedged on this box: any newly built
-binary hangs in `_dyld_start` or is SIGKILLed, so `cargo nextest run` cannot even
-enumerate the test list. Clippy has not run either. If you rebase on this, run
-`cargo nextest run --workspace` once the box is fixed and treat a failure in
-`bugs_drain` or in `bugs::drain::tests` as mine, not yours.
+Green: `cargo nextest run --workspace` is **617 passed, 1 skipped** (the skip is the
+pre-existing `#[ignore]` in `code_find.rs`). `cargo clippy --workspace --all-targets` is
+clean. `cargo check -p nashcode --features drain-iroh --all-targets` is clean too, and
+the three tests behind that feature pass. The drain's own share is 14: ten unit tests in
+`bugs::drain`, three in `bugs::iroh`, and one integration test that stands up a real
+MinIO container, a real `celld deploy` of `ingester/`, and a real celld node, then
+proves seven facts against it. Run it with `CELLD=<celld 0.2+> NASHCODE_REQUIRE_CELLD=1`;
+without the second variable a machine with no docker skips it quietly, and quiet is how
+this nearly shipped untested.
 
-That wedge is the cousin of the celld trap already written down here, and it is worth
-knowing on sight: **a process sitting in `_dyld_start` with zero CPU is the OS, never
-your code** — `sample <pid>` shows nothing else. It hits build scripts, test binaries,
-and `bash`. It needs an administrator; do not go hunting.
-
-Five things reach outside `viewer/src/bugs/`:
+Six things reach outside `viewer/src/bugs/`:
 
 - **`Config` grew one field, `bugs_drain: Option<Drain>`.** Every full `Config { .. }`
   literal needed one more line — seven files, `viewer/tests/common/mod.rs` among them.
@@ -442,9 +438,8 @@ Five things reach outside `viewer/src/bugs/`:
 - **`viewer/Cargo.toml` grew four optional dependencies** behind the new non-default
   `drain-iroh` feature: `iroh`, `hyper`, `hyper-util`, `http-body-util`. The default
   dependency graph is unchanged, but `Cargo.lock` moved a few shared versions
-  (`ndarray`, `security-framework-sys`, `futures-io`), so **your first build after this
-  commit recompiles most of the tree.** That is a one-time cost and it is already paid
-  in the shared cache.
+  (`ndarray`, `security-framework-sys`, `futures-io`), so your first build after this
+  recompiles most of the tree. One-time, and already paid in the shared cache.
 - **`bugs_projects` grew an `active` column**, default 1, added through `ADDED_COLUMNS`.
   The registry the public edge wants is `(project_id, key, active)` and nothing here
   could produce the third field — there was no way to revoke a project at all.
@@ -454,10 +449,24 @@ Five things reach outside `viewer/src/bugs/`:
 - **`main.rs` gained a startup spawn, a doctor line, and one hard exit**:
   `NASHCODE_BUGS_DRAIN` set with `NASHCODE_BUGS_BUCKET` unset exits 1. A drainer with
   nowhere durable to put a payload would ack real events off a box we do not control.
+- **`ingester/README.md` gained one paragraph** on the drainer's two transports and the
+  allow-file step. Nothing under `ingester/src/**` was touched, so the edge's own 41
+  assertions cannot have moved.
 
-The iroh transport is written and has never dialled anything. It is behind
-`--features drain-iroh` for that reason, and the reason is in `NOTES.md` along with what
-the VPS needs before it can be believed.
+Two traps this cost an evening to learn, both the OS and neither one your code:
+
+- **A process sitting in `_dyld_start` with zero CPU is macOS assessing a freshly built
+  unsigned binary**, not a hang you can debug. `sample <pid>` shows nothing else. It hits
+  build scripts, test binaries, and `bash`. A cold build in a fresh `CARGO_TARGET_DIR`
+  makes it far worse, because every build script in the tree is new again — the shared
+  cache is the fast path precisely because its binaries have already been assessed.
+- **`celld --version` prints an allocator warning before the version.** Anything that
+  parses that output must look for three dotted numbers, not for the last word.
+
+The iroh transport now compiles and its key handling is tested, but it has still never
+dialled a live `iroh-ingress` — there is not one outside the VPS and nothing here fakes
+one. That is why it is a feature and not a dependency. `NOTES.md` says what the VPS
+needs; turn it on there, watch one drain land, then make it default.
 
 **To everyone, from the agcli-migration session: the review fixes are in, `cli/**` is
 released again.**
