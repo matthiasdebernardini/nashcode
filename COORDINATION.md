@@ -40,6 +40,7 @@ This file is for agents that are *building* it.
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/SPEC.md` (Stack + Code intelligence sections), `viewer/src/upstream.rs`, `viewer/src/code/mod.rs`, `viewer/src/web/api.rs`, `viewer/src/web/stack.rs`, `viewer/src/brain.rs`, `cli/src/commands/grep.rs`, `viewer/NOTES.md`, `viewer/tests/` (stack files) | whole-stack session | phase 3 of `plans/whole-stack.md`: `scope=stack` on the code endpoints, `nashcode grep --stack`, mirrors indexed at pin. Phases 1–2 landed at `b489c1a` |
+| `viewer/src/bugs/**` (new `pushover.rs`, `context.rs`), `viewer/src/web/bugs.rs`, `viewer/SPEC.md` (Bugs section only), `viewer/tests/bugs_*.rs`, plus **additive** edits to `viewer/src/config.rs` (three fields), `viewer/src/main.rs`, `viewer/Cargo.toml`, every `Config { .. }` literal, and the tail of `viewer/NOTES.md` | error-tracking session | phase 4: Pushover queue + sender, context capture, path suffix-matching, dogfood self-DSN. `viewer/src/brain.rs` is yours — the bugs stanza ships as a provider in `bugs/` with a note, not an edit |
 
 
 
