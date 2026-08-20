@@ -70,12 +70,16 @@ Environment only. Nothing about your deployment lives in the source.
 | `NASHCODE_TRACES` | `$NASHCODE_MIRRORS/traces` | Raw agent transcripts. |
 | `ANTHROPIC_API_KEY` | *(none)* | Enables `POST /brain/ask`. Without it that route answers 404. |
 | `NASHCODE_BRAIN_MODEL` | `claude-opus-5` | Model for `/brain/ask`. |
+| `NASHCODE_URL` | `http://$NASHCODE_BIND` | Where the viewer is, from outside. Every absolute link nashcode puts in a notification hangs off it. |
+| `NASHCODE_PUSHOVER_TOKEN` | *(none)* | Pushover application token. Set both this and the user key, or neither. |
+| `NASHCODE_PUSHOVER_USER` | *(none)* | Pushover user or group key. Without both halves nothing is sent and everything else works. |
+| `NASHCODE_PUSHOVER_URL` | `https://api.pushover.net` | API origin. Overridable so tests can point at a local listener. |
+| `NASHCODE_BUGS_SELF_DSN` | *(none)* | The DSN nashcode reports its own errors to. Unset means it reports nothing about itself. |
 
-The client commands (`hook`, `trace`, `doctor`) read two more:
+The client commands (`hook`, `trace`, `doctor`) read `NASHCODE_URL` too, plus one more:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NASHCODE_URL` | `http://127.0.0.1:8090` | Where the viewer is, from the agent's machine. |
 | `NASHCODE_REPO` | *(inferred)* | Repo name, when the git remote's basename is not it. |
 
 At startup the server prints a line for each thing that is unset and what you lose by it.

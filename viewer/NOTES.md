@@ -1438,3 +1438,111 @@ holding.
   URL and takes a 404 or 405. `/{repo}/stack`, `/{repo}/stack/{dep}` and the tree route
   are not posted to. There is no handler that could accept them — the router only knows
   the pages — so this is coverage, not a hole.
+
+## Phase 4 of error tracking: Pushover, context capture, the self-DSN
+
+### The digest is the only place that knows something is news
+
+`index::record` already returned a `Landing` — new, regression, repeat, duplicate — and
+the digest already threw it away. Every notification decision hangs off that value now,
+and nothing outside the digest queues an issue notification at all. The alternative was
+a rule at each mutation site, which is how a tracker ends up pushing twice for one event
+and not at all for another.
+
+Two dedupe keys carry the whole "exactly once" property, because the queue refuses a
+repeat key:
+
+- `issue/<id>/new` — once ever. An issue is only new once.
+- `issue/<id>/regression/<events>` — the event count at the moment the issue reopened.
+  Unique per regression, so an issue fixed and broken three times rings three times, and
+  the second event on a reopened issue rings not at all. A plain `issue/<id>/regression`
+  would have silenced every regression after the first, which is the notification that
+  matters most.
+- `issue/<id>/ladder/<rung>` — once ever, because the counter only goes up.
+
+That last one is why there is no cycle counter on `bugs_issues`. A rung is crossed once
+in an issue's life whatever happens to its state in between.
+
+### The message budget belongs to the tags, not the exception
+
+The first build spent the whole 1024 characters on the exception value and clipped the
+tags off the end. A four-kilobyte Python repr is not worth `environment=prod`, so the
+fixed parts — the lead line and up to four tags, each tag value clipped to 64 — are laid
+out first and the exception value gets what is left. The test that found this posts a
+4000-character value.
+
+### 429 is not a 4xx here
+
+The goal doc says "any 4xx → never retry" and "429 → park until reset" in the same
+breath, and 429 is a 4xx. The specific rule wins: a 429 means the message was fine and
+the account is out of budget, so the message stays pending and the whole queue parks. A
+400 means Pushover read the message and judged it, and every retry gets the same answer,
+so it is marked failed and never asked about again — otherwise one malformed message
+wedges every notification behind it for ever.
+
+A 5xx defers with doubling backoff off a 5-second floor, capped at 15 minutes, and gives
+up after 12 attempts. The goal doc set the floor and said nothing about a ceiling or a
+limit; an unbounded retry is a row that is pending for ever and a `pending` count that
+means nothing.
+
+### One suppression notice, not one per message
+
+The hourly cap parks the queue until the oldest message in the window leaves it. That
+means the cap trips again the moment the queue moves, and a notice each time is exactly
+the flood the cap exists to prevent. `bugs_push_state.suppressed_at` makes the second
+trip inside the hour silent. The notice itself is sent *over* the cap on purpose: it is
+the message that tells a person the others exist.
+
+### Context capture reads at a revision, and says which one
+
+Source moves. A line number from last week's release read against today's tip points at
+whatever is there now, which is worse than showing nothing because it looks right. So
+`sentry.release` decides the revision when it is something the mirror can resolve, and
+when it is not the page prints "tip, not release" beside the commit it did use.
+
+Only something shaped like an object id is tried — hex, 7 to 40 characters. A release
+named `v2.4.1` or `main` would resolve through `rev_parse` to a tag or a branch, which
+is not what the sender meant and moves under us. `^{commit}` on the end refuses anything
+that is not a commit.
+
+### Suffix matching replaced the per-directory listing
+
+The old `resolve_in_repo` listed each parent directory with `ls-tree` and looked for the
+name. That cannot answer `/app/src/foo.py`, which is what every containerised SDK
+reports, because `/app/src` is not a directory in the repo. One `ls-tree -r` per (repo,
+revision) is now read instead and every question is answered in memory.
+
+The rule is the longest suffix, on segment boundaries, that names exactly one file. Two
+properties fall out of it and both are deliberate:
+
+- Matching stops at the *first* suffix that matches anything. Every shorter suffix
+  matches at least as many files, so there is nothing to gain by continuing.
+- That suffix matching several files is `Ambiguous`, and ambiguous renders as plain
+  text. Two files called `utils.py` in different packages are precisely the case where a
+  guess sends a person to the wrong file and they believe it.
+
+Segment boundaries matter: `src/notfoo.py` ends with the string `foo.py` and is a
+different file.
+
+### What a page is allowed to spend
+
+Reading source is one `git show` per distinct `file:line`. A page of a hundred log rows
+out of one hot loop is three distinct sites, and the per-page cache is what usually
+decides this. `SNIPPETS_PER_PAGE = 24` is the cap for the page that really does name a
+hundred different files — every link is still there, the first two dozen carry their
+source. No measurement said 24; it is the number of rows that fit on a screen, and it is
+the constant to raise first if anybody complains.
+
+### `/bugs` JSON is an object now
+
+It was a bare array of projects. Whether a notification can still get out this month is
+part of the state of the feature, and a reader that has to make a second request for it
+will not make it. `{"projects": [...], "pushover": {"on": bool, "budget": {...}}}`.
+
+### `Config` grew three fields, and `db.rs` grew two functions
+
+`pushover`, `public_url` (`NASHCODE_URL`, which until now only the CLI half read) and
+`bugs_self_dsn`. Every exhaustive `Config { .. }` literal needed three more lines —
+nine files. `db::now_offset` and `db::from_unix` are new: every deadline stored here is a
+timestamp string compared lexicographically, so it has to come out of the same formatter
+as `db::now` or the comparison quietly means nothing.
