@@ -729,10 +729,43 @@ viewer-side surface; the goal doc binds protocol, grouping, and notification sem
   SQLite, so a restart replays only the unacked tail. The registry is `PUT` whole whenever
   the project set changed since the last push, never merged; an empty set is refused and
   logged rather than pushed, since emptying it takes every project on the fleet offline.
-- **Pushover.** `NASHCODE_PUSHOVER_TOKEN` + `NASHCODE_PUSHOVER_USER`. State changes
-  only — new issue, regression, unmute, cron incident, recovery — never per event.
-  SQLite outbound queue, single sender, retry/park rules and the ~20/hour cap per the
-  goal doc.
+- **Pushover.** `NASHCODE_PUSHOVER_TOKEN` + `NASHCODE_PUSHOVER_USER`, both or neither;
+  either one alone is a configuration error, logged, and the feature stays off. Unset =
+  off, one doctor line, everything else works. `NASHCODE_PUSHOVER_URL` overrides the API
+  base so a test can point the sender at a listener it started.
+  State changes only — new issue, regression, unmute, cron incident, recovery — never
+  per event. The escalation ladder adds one push when an unresolved issue crosses 10,
+  100 or 1000 events; a threshold is crossed once per issue per resolve cycle, so an
+  issue that is resolved and comes back can ring the ladder again. Logs never push.
+  Payload: title `{project}: {issue title}` truncated to 250 characters, message =
+  exception value plus a few tags, truncated to 1024 and never empty, `url` = the issue
+  page under `NASHCODE_URL`, `url_title` = "Open in nashcode", priority 0 and 1 for
+  fatal. Emergency priority and `cancel_by_tag` are not built: they are per-project
+  opt-in and wait for the crons slice.
+  The queue is a SQLite table and the sender is one task. A 5xx retries after at least
+  5 seconds with backoff; **any** 4xx is final and never retried, because Pushover
+  answers 4xx to a message it has judged, not to one it failed to read. A 429 parks the
+  whole queue until `X-Limit-App-Reset`. A local cap of 20 sent messages per rolling
+  hour parks it too, and the trip sends exactly one "notifications suppressed, N
+  pending" message rather than the N it is holding. `X-Limit-App-Remaining` off the last
+  answer is stored and shown on `/bugs`, in that page's JSON, and in the brain stanza —
+  the monthly budget is the number that decides whether a real incident will reach a
+  phone.
+- **Path suffix-matching.** An SDK inside a container reports the path it ran from
+  (`/app/src/foo.py`) and the repo knows `src/foo.py`, so an exact match resolves
+  nothing. When the reported path does not resolve, take the longest suffix of it, on
+  path-segment boundaries, that names exactly one file in the repo tree at the relevant
+  rev. One match links and gets a snippet; no match or an ambiguous one renders as
+  plain text. Applies to log rows and to stack frames alike. The candidate set is the
+  tree listing at that rev, read once per (repo, rev) and reused for the whole page.
+- **Dogfood.** `NASHCODE_BUGS_SELF_DSN` points the viewer's own `tracing` errors at a
+  DSN — normally one of its own projects, through the normal door. Unset = off, one
+  doctor line. Two guards against a feedback loop, because an error raised inside
+  digest that is reported into the same digest is a loop that ends in a full disk: the
+  reporter is skipped for anything logged from inside the bugs pipeline (a re-entrancy
+  flag on the reporting task), and every self-report carries a `nashcode.self` tag so a
+  human can see where it came from. Grouping does the rest: a recurring internal error
+  is one issue with a count, not a queue.
 - **UI.** `/bugs` project list; `/bugs/:project` issues by state; issue detail with
   resolve/mute (Tailscale headers stamp the actor); later `/logs` and `/crons`. Same
   accept-header JSON convention as the rest of the viewer. Bugs summary joins `/brain`.
