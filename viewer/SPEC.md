@@ -672,6 +672,13 @@ viewer-side surface; the goal doc binds protocol, grouping, and notification sem
   `https://<32-hex-key>@<host>/<numeric-id>`; host from `NASHCODE_BUGS_INGEST_URL`. A
   project page shows the DSN and an SDK snippet, and may declare a nashcode repo for
   cross-links.
+- **Revocation.** A project carries `active`. Revoking one keeps every issue and log row
+  it already filed — history does not stop being true when a DSN is retired — and closes
+  both doors: the tailnet ingest routes answer 404 at once, and the public ingester
+  learns it on the next registry push, where `active:false` means the same as absent. A
+  revoked key is *absent*, not wrong, so a sender cannot tell a retired project from one
+  that never existed. There is no UI for it yet and no CLI verb: the column, the setter,
+  and the registry push are the whole of it, so revoking today means writing the column.
 - **Ingest.** One route, `POST /api/<project_id>/envelope/`. Auth from `X-Sentry-Auth`,
   `?sentry_key=`, or the envelope `dsn` header; 403 on key mismatch, 404 on unknown
   project, 429 over quota. Decompress gzip/deflate/br with streaming caps (1 MiB per
