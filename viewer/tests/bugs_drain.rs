@@ -56,35 +56,54 @@ fn missing_prerequisite() -> Option<String> {
         return Some("no esbuild on PATH: `celld deploy` bundles the Worker with it".to_owned());
     }
     let celld = celld_binary();
-    let version = Command::new(&celld).arg("--version").output().ok().map(|out| {
-        String::from_utf8_lossy(&out.stdout).trim().to_owned()
-    });
-    match version {
-        None => Some(format!(
+    let Some(spoken) = Command::new(&celld).arg("--version").output().ok().map(|out| {
+        // Both streams: `celld --version` prints an allocator warning of its own
+        // before the version, and which stream it lands on is not ours to assume.
+        format!(
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }) else {
+        return Some(format!(
             "no celld at {}: install it with `curl -fsSL https://celld.dev/install.sh | sh`, \
              or point CELLD at a binary",
             celld.display()
+        ));
+    };
+    match parse_version(&spoken) {
+        None => Some(format!(
+            "cannot read a version out of `{} --version`: {}",
+            celld.display(),
+            spoken.trim()
         )),
-        Some(line) => {
-            let number = line.split_whitespace().last().unwrap_or("");
-            let (major, minor) = {
-                let mut parts = number.split('.');
-                (
-                    parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0),
-                    parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0),
-                )
-            };
-            if major == 0 && minor < 2 {
-                Some(format!(
-                    "celld {number} at {} is too old; the ingester needs 0.2.0 or newer. \
-                     Set CELLD to a newer binary",
-                    celld.display()
-                ))
-            } else {
-                None
-            }
-        }
+        Some((0, minor)) if minor < 2 => Some(format!(
+            "celld 0.{minor} at {} is too old; the ingester needs 0.2.0 or newer. \
+             Set CELLD to a newer binary",
+            celld.display()
+        )),
+        Some(_) => None,
     }
+}
+
+/// The first `major.minor.patch` in a blob of output.
+///
+/// Taking the last whitespace-separated word is what the first version of this did, and
+/// it read `value.` out of the tail of celld's own allocator warning and called the
+/// binary too old. A version is three numbers with dots between them and nothing else,
+/// so ask for exactly that: the timestamp in a log line has colons in it and cannot be
+/// mistaken for one.
+fn parse_version(text: &str) -> Option<(u32, u32)> {
+    text.split(|c: char| !(c.is_ascii_digit() || c == '.')).find_map(|token| {
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let major = parts[0].parse::<u32>().ok()?;
+        let minor = parts[1].parse::<u32>().ok()?;
+        parts[2].parse::<u32>().ok()?;
+        Some((major, minor))
+    })
 }
 
 fn which(program: &str) -> bool {
@@ -594,4 +613,20 @@ async fn the_public_ingester_buffers_and_the_drain_brings_it_home() {
     )
     .await;
     assert_eq!(status, 404);
+}
+
+/// The prerequisite check cost a whole suite run once, so it gets a test of its own.
+#[test]
+fn a_version_is_three_numbers_and_never_the_tail_of_a_log_line() {
+    assert_eq!(parse_version("celld 0.2.1\n"), Some((0, 2)));
+    assert_eq!(parse_version("celld 1.0.3"), Some((1, 0)));
+    assert_eq!(parse_version("nothing numeric here"), None);
+
+    // What this binary really says. The last word of it is `value.`, which the first
+    // version of the check read as a version number and called 0.2.1 too old.
+    let real = "2026-08-19T22:49:46.331627Z  WARN celld::memory: the allocator will not \
+                run a background thread, so freed pages return only when a thread \
+                allocates again error=`name` or `mib` specifies an unknown/invalid \
+                value.\ncelld 0.2.1\n";
+    assert_eq!(parse_version(real), Some((0, 2)));
 }
