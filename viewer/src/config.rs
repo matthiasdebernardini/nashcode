@@ -52,7 +52,7 @@ pub struct Config {
 /// The protocol is `ingester/README.md`; nothing here knows what serves it. That is the
 /// hedge the design asks for: an EndpointId dials iroh, an `http://host:port` dials TCP,
 /// and the loop above the transport cannot tell which it got.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Drain {
     /// `NASHCODE_BUGS_DRAIN`: an iroh EndpointId, or an `http://host:port` base URL.
     pub target: String,
@@ -64,6 +64,19 @@ pub struct Drain {
     pub key_path: PathBuf,
     /// `NASHCODE_BUGS_DRAIN_INTERVAL`, seconds. The design says 15 to 30.
     pub interval: Duration,
+}
+
+/// Hand-written: `Config` derives `Debug`, and a derived one here would print the drain
+/// token in every `?config` and every panic message that carries one.
+impl std::fmt::Debug for Drain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Drain")
+            .field("target", &self.target)
+            .field("token", &"<redacted>")
+            .field("key_path", &self.key_path)
+            .field("interval", &self.interval)
+            .finish()
+    }
 }
 
 impl Drain {

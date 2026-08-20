@@ -1,0 +1,14 @@
+# nextest settings for the whole workspace.
+#
+# The one rule here is a deadline. Several tests in this suite drive real
+# subprocesses — git, celld, docker — and a subprocess that hangs takes its nextest
+# slot with it and never gives it back. That has happened: a `docker info` with no
+# timeout of its own pinned a slot indefinitely, and the run looked busy rather than
+# stuck. A test that has not finished in a minute is not slow, it is wedged.
+#
+# Raise `period` before you raise `terminate-after`. The point is to fail, not to wait
+# longer; a test that legitimately needs more than a minute should say so with its own
+# per-test override rather than by moving everyone's deadline.
+
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }

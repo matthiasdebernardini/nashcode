@@ -202,7 +202,18 @@ async fn serve() {
                     interval = drain.interval.as_secs(),
                     "bugs: draining the public ingester"
                 );
-                tokio::spawn(drainer.run(drain.interval));
+                // Supervised, because a panicked drainer is indistinguishable from a
+                // quiet one: the viewer serves every page exactly as before and the
+                // buffer on the edge fills until it starts refusing envelopes. The
+                // watcher costs one task and turns a silence into a line.
+                let task = tokio::spawn(drainer.run(drain.interval));
+                tokio::spawn(async move {
+                    match task.await {
+                        Ok(()) => tracing::error!("bugs: the drain task ended; nothing is being pulled from the ingester"),
+                        Err(error) if error.is_cancelled() => {}
+                        Err(error) => tracing::error!(%error, "bugs: the drain task panicked; nothing is being pulled from the ingester"),
+                    }
+                });
             }
             Err(error) => {
                 eprintln!("cannot dial NASHCODE_BUGS_DRAIN: {error}");

@@ -1030,6 +1030,61 @@ derived from the persistent secret key at `NASHCODE_BUGS_DRAIN_KEY` — has to b
 `iroh-ingress --allow` before the first dial. Until that has been done once and watched,
 the TCP path is the proven one.
 
+### What the peer review found
+
+Three of the findings were the kind that only a second reader catches.
+
+**A drained log batch had no stable name, so every redelivery duplicated every line.**
+A log row's `dedupe_key` is built from the batch's *origin*, and `accept_logs` passed
+`None`, which falls back to the archive key — freshly minted on every call. Envelopes
+were fine because they dedupe on `event_id`, which travels in the payload; logs have no
+such thing. `accept_logs_with_origin` now takes it, the direct NDJSON door still passes
+`None` (each POST really is its own event), and the drainer passes
+`drain/<project>/<seq>`, the one name the edge promises never repeats and never rewinds.
+Acceptance fact 3 was false for half the traffic until this.
+
+**The test that should have caught it was asserting nothing.** It posted the log batch,
+drained it, acked it, and only then opened the no-ack redelivery window — so the rows it
+checked for duplication had left the edge before the window began. Both kinds now go in
+before the window opens. The lesson generalises: a redelivery test has to prove the row
+was *in* the window, not merely that a count did not change.
+
+**An unreadable line could wedge a project for ever.** If the lowest unacked line will
+not parse, nothing parses, nothing is acked, the cursor never moves, and the next cycle
+asks for the same line again. `Answer::last_seq` was parsed and never read; it is the way
+out, because it names the highest seq the edge just served whether or not we could read
+it. A 200 that yields no usable row now acks to it and counts the lines as poison.
+
+**`Bugs::store` swallowed an index-write failure.** It logged and returned `Ok` on the
+reasoning that the object was safe in the bucket. It is not safe: an object with no
+`bugs_envelopes` row is invisible to the sweep, which is the only thing that would ever
+look at it again. Under the drainer that is data loss with extra steps — the caller acks,
+the edge deletes its copy, and a crash before the in-memory digest finishes takes the
+only remaining one. It returns an error now, so the drainer defers.
+
+**Cursor starvation has a belt.** A replacement edge whose cell was rebuilt from an older
+bucket snapshot hands out sequence numbers the cursor has already passed, and a strictly
+monotone cursor then starves in silence for ever. An answer with no rows and a
+`X-Ingest-Remaining` above zero is the unambiguous shape of it: logged on the first
+occurrence, and on the second in a row the cursor is rewound to what the edge says it
+last served. Rewinding is safe by construction — at-least-once is the whole contract —
+and starving is not.
+
+Smaller ones, same batch: the drain token is redacted from every `Debug` (the trait is
+required and all three holders carried it in a `String`); `Reach::Down` compares on kind
+rather than on message text, because two unreachable ticks whose error strings differ by
+a port number are one state and comparing the text put a Down/Up pair in the log every
+thirty seconds; `note_up` waits for the registry push as well as the drains; the iroh
+transport keeps one QUIC session instead of handshaking up to sixty-four times a cycle,
+and its connection driver is aborted by a `Drop` guard rather than on the happy path
+only; and `key_at` mints a key only when the file is *absent* — any other read error
+used to mint a new identity over the old one, which is permanent exile from the ingress
+allow-file.
+
+**Revocation is database-only.** `active` has no UI and no CLI verb; the column, the
+setter, and the registry push are the whole of it, so revoking a project today means
+writing the column by hand. SPEC says so too.
+
 **The tests are split, and the split is deliberate.** `viewer/tests/bugs_drain.rs` drives
 the real edge: MinIO, `celld deploy`, a real node, real envelopes over real HTTP. It is
 one test function because nextest gives every function its own process, and a node per

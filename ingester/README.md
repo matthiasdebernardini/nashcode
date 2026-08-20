@@ -216,6 +216,10 @@ Ack only what digest has finished with. Everything acked is gone from the edge.
 {"projects":[{"project_id":"1","key":"0123456789abcdef0123456789abcdef","active":true}]}
 ```
 
+Nashcode's side of this is database-only for now: a project carries an `active` column
+with no UI and no CLI verb behind it, so revoking one means writing that column and
+waiting for the next push.
+
 `PUT` **replaces** the whole set; it does not merge. A project nashcode deleted
 has to stop authenticating here, and a merge would leave it working for ever.
 `project_id` is the numeric id, `key` is the 32-hex DSN public key, and

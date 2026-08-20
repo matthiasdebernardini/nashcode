@@ -89,11 +89,23 @@ pub trait Transport: Send + Sync + std::fmt::Debug {
 /// Not a test fixture. A drainer and an ingester on the same private network have no
 /// use for a hole-punched QUIC session, and the tests reach the real celld node this
 /// way, which is what makes the contract testable at all.
-#[derive(Debug)]
 pub struct HttpTransport {
     base: String,
     token: String,
     client: reqwest::Client,
+}
+
+/// Hand-written, because [`Transport`] requires `Debug` and the struct holds the one
+/// secret in the system. A derived `Debug` puts the drain token in the first
+/// `?transport` anybody ever writes, and a token in a log line is a token that has
+/// leaked.
+impl std::fmt::Debug for HttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpTransport")
+            .field("base", &self.base)
+            .field("token", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 impl HttpTransport {
@@ -231,14 +243,41 @@ pub struct Drainer {
     /// The last reachability we logged. A dead ingester is one line per state change,
     /// not one line every thirty seconds for a week.
     reach: std::sync::Mutex<Reach>,
+    /// The last complaint logged about each project, and how many cycles running it has
+    /// been starved. Both are per process: they decide what gets logged and when to
+    /// reach for the cursor rewind, and neither is worth a table.
+    gripes: std::sync::Mutex<std::collections::HashMap<i64, (Gripe, u32)>>,
     poison: AtomicU64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why the ingester is not answering. The *kind* is what a state change is measured
+/// on, never the message: two unreachable ticks whose `std::io` strings differ by a
+/// port number are one state, and comparing the text made every tick a change and put
+/// a Down/Up pair in the log every thirty seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reach {
     Unknown,
     Up,
-    Down(String),
+    Down(Down),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Down {
+    Token,
+    Unreachable,
+}
+
+/// The last thing worth saying about one project. Same discipline as [`Reach`]: a
+/// complaint is logged when it starts, not once per cycle for as long as it lasts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gripe {
+    Fine,
+    /// The edge answered something other than 200 or 404.
+    Refused(u16),
+    /// The edge answered with lines that will not parse.
+    Unreadable,
+    /// The edge says rows are waiting and hands back none of them.
+    Starved,
 }
 
 /// A failure that ends the whole cycle rather than one project's share of it.
@@ -259,6 +298,7 @@ impl Drainer {
             transport,
             max_bytes: DRAIN_MAX_BYTES,
             reach: std::sync::Mutex::new(Reach::Unknown),
+            gripes: std::sync::Mutex::new(std::collections::HashMap::new()),
             poison: AtomicU64::new(0),
         }
     }
@@ -271,7 +311,7 @@ impl Drainer {
     /// Push the registry if it moved, then drain every active project.
     pub async fn cycle(&self) -> Cycle {
         let mut report = Cycle::default();
-        self.push_registry(&mut report).await;
+        let registry_ok = self.push_registry(&mut report).await;
 
         let projects = match index::registry(&self.db) {
             Ok(projects) => projects,
@@ -294,7 +334,13 @@ impl Drainer {
                 }
             }
         }
-        self.note_up();
+        // `note_up` is the other half of the once-per-state-change rule, so it has to
+        // be as strict as `note`. It used to fire whenever the projects drained, which
+        // for a registry PUT that fails every cycle meant a Down line and an Up line
+        // every thirty seconds for ever — the noise the latch exists to prevent.
+        if registry_ok && report.errors == 0 {
+            self.note_up();
+        }
         report
     }
 
@@ -326,19 +372,19 @@ impl Drainer {
     /// authenticating there, and a merge would leave it working for ever. The hash of
     /// the last accepted push lives in SQLite, so a restart does not re-push a set
     /// nothing changed about.
-    async fn push_registry(&self, report: &mut Cycle) {
+    async fn push_registry(&self, report: &mut Cycle) -> bool {
         let projects = match index::registry(&self.db) {
             Ok(projects) => projects,
             Err(error) => {
                 tracing::warn!(%error, "drain: cannot read the project set");
                 report.errors += 1;
-                return;
+                return false;
             }
         };
         let payload = registry_payload(&projects);
         let hash = format!("{:x}", Sha256::digest(payload.as_bytes()));
         match self.state("registry_hash") {
-            Ok(Some(seen)) if seen == hash => return,
+            Ok(Some(seen)) if seen == hash => return true,
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "drain: cannot read the registry push state"),
         }
@@ -353,7 +399,7 @@ impl Drainer {
                 "drain: nashcode has no projects; refusing to empty the ingester's registry. \
                  PUT it by hand with ?allow_empty=1 if that is really the intent"
             );
-            return;
+            return true;
         }
 
         match self
@@ -367,10 +413,12 @@ impl Drainer {
                 }
                 report.registry_pushed = true;
                 tracing::info!(projects = projects.len(), "drain: pushed the project registry");
+                true
             }
             Ok(answer) if answer.status == 404 => {
                 report.errors += 1;
                 self.note(Fatal::Token);
+                false
             }
             Ok(answer) => {
                 report.errors += 1;
@@ -379,10 +427,12 @@ impl Drainer {
                     detail = %String::from_utf8_lossy(&answer.body),
                     "drain: the ingester refused the registry"
                 );
+                false
             }
             Err(error) => {
                 report.errors += 1;
                 self.note(Fatal::Unreachable(error));
+                false
             }
         }
     }
@@ -404,20 +454,43 @@ impl Drainer {
                 200 => {}
                 404 => return Err(Fatal::Token),
                 status => {
-                    tracing::warn!(
-                        status,
-                        project_id,
-                        detail = %String::from_utf8_lossy(&answer.body),
-                        "drain: the ingester refused a drain"
-                    );
+                    self.gripe(project_id, Gripe::Refused(status), || {
+                        format!(
+                            "drain: project {project_id} is answering {status}: {}",
+                            String::from_utf8_lossy(&answer.body)
+                        )
+                    });
                     report.errors += 1;
                     return Ok(());
                 }
             }
 
-            let rows = parse_rows(&answer.body);
-            if rows.is_empty() {
-                return Ok(());
+            let batch = parse_rows(&answer.body);
+            let remaining = answer.remaining.unwrap_or_else(|| {
+                // The header is how the loop knows to come back inside one cycle.
+                // Without it every drain is one batch per interval, which turns a
+                // backlog into an afternoon. Worth saying out loud once.
+                self.gripe(project_id, Gripe::Unreadable, || {
+                    format!(
+                        "drain: project {project_id} answered without X-Ingest-Remaining; \
+                         draining one batch per cycle until it comes back"
+                    )
+                });
+                0
+            });
+
+            if batch.rows.is_empty() {
+                return self
+                    .nothing_usable(project_id, &batch, &answer, remaining, cursor, report)
+                    .await;
+            }
+            if batch.dropped > 0 {
+                self.gripe(project_id, Gripe::Unreadable, || {
+                    format!(
+                        "drain: dropped {} unreadable line(s) from project {project_id}",
+                        batch.dropped
+                    )
+                });
             }
 
             // `acked_to` walks up only over rows the digest is finished with. The
@@ -426,7 +499,7 @@ impl Drainer {
             let mut acked_to: Option<i64> = None;
             let mut taken = 0usize;
             let mut deferred = false;
-            for row in &rows {
+            for row in &batch.rows {
                 match self.replay(project_id, row).await {
                     Outcome::Accepted => {
                         report.replayed += 1;
@@ -466,6 +539,10 @@ impl Drainer {
                         self.set_cursor(project_id, up_to);
                         cursor = up_to;
                         report.acked += taken;
+                        // Rows moved, so whatever we were complaining about is over.
+                        if batch.dropped == 0 {
+                            self.gripe(project_id, Gripe::Fine, String::new);
+                        }
                     }
                     // A failed ack is not a lost row. The cursor stays where it was,
                     // the same rows come back next cycle, and the digest throws the
@@ -475,11 +552,91 @@ impl Drainer {
                 }
             }
 
-            if deferred || answer.remaining.unwrap_or(0) <= 0 {
+            if deferred || remaining <= 0 {
                 return Ok(());
             }
         }
         tracing::warn!(project_id, "drain: stopped at the batch limit; more is waiting");
+        Ok(())
+    }
+
+    /// A 200 that yielded no row this loop can act on. Two very different things.
+    ///
+    /// **Bytes but no rows** is a batch of lines none of which parse. Left alone that
+    /// wedges the project for ever: the lowest unacked line is unreadable, so nothing is
+    /// acked, so the cursor never moves, so the next cycle fetches the same line again.
+    /// `X-Ingest-Last-Seq` is the way out — it names the highest seq the edge just
+    /// served, whether or not we could read it, so acking to it steps over the whole
+    /// bad batch. The lines are counted as poison, because that is what they are.
+    ///
+    /// **No bytes, and yet rows are said to be waiting** is the shape of a cursor that
+    /// is ahead of the buffer: a replacement VPS whose cell was rebuilt from an older
+    /// snapshot hands out sequence numbers we have already passed, and a strictly
+    /// monotone cursor then starves for ever in silence. One occurrence is logged; a
+    /// second in a row rewinds the cursor to what the edge says it last served and lets
+    /// the dedupe absorb the replay. Rewinding is safe by construction — that is the
+    /// whole point of at-least-once — and starving is not.
+    async fn nothing_usable(
+        &self,
+        project_id: i64,
+        batch: &Batch,
+        answer: &Answer,
+        remaining: i64,
+        cursor: i64,
+        report: &mut Cycle,
+    ) -> Result<(), Fatal> {
+        if batch.dropped > 0 {
+            let last = answer.last_seq.unwrap_or(cursor);
+            self.gripe(project_id, Gripe::Unreadable, || {
+                format!(
+                    "drain: every line project {project_id} served after {cursor} is \
+                     unreadable ({} of them); acking past them to {last} rather than \
+                     asking for them again for ever",
+                    batch.dropped
+                )
+            });
+            if last <= cursor {
+                // No cursor to move to. Nothing to do but say so and come back.
+                report.errors += 1;
+                return Ok(());
+            }
+            self.poison.fetch_add(batch.dropped as u64, Ordering::Relaxed);
+            report.poison += batch.dropped;
+            return match self.ack(project_id, last).await {
+                Ok(true) => {
+                    self.set_cursor(project_id, last);
+                    report.acked += batch.dropped;
+                    Ok(())
+                }
+                Ok(false) => Ok(()),
+                Err(fatal) => Err(fatal),
+            };
+        }
+
+        if remaining > 0 {
+            let strikes = self.strike(project_id);
+            self.gripe(project_id, Gripe::Starved, || {
+                format!(
+                    "drain: project {project_id} says {remaining} row(s) are waiting \
+                     after {cursor} and serves none of them. A cursor ahead of the \
+                     buffer is what a rebuilt edge looks like"
+                )
+            });
+            if strikes >= 2
+                && let Some(last) = answer.last_seq
+                && last < cursor
+            {
+                tracing::warn!(
+                    project_id,
+                    from = cursor,
+                    to = last,
+                    "drain: rewinding the ack cursor; dedupe absorbs whatever comes back twice"
+                );
+                self.rewind_cursor(project_id, last);
+                self.clear_strikes(project_id);
+            }
+            report.errors += 1;
+        }
         Ok(())
     }
 
@@ -528,7 +685,7 @@ impl Drainer {
 
         match row.kind.as_str() {
             "envelope" => self.replay_envelope(project_id, body).await,
-            "logs" => self.replay_logs(project_id, body).await,
+            "logs" => self.replay_logs(project_id, row.seq, body).await,
             other => Outcome::Poison(format!("no door takes a row of kind {other}")),
         }
     }
@@ -547,7 +704,7 @@ impl Drainer {
         }
     }
 
-    async fn replay_logs(&self, project_id: i64, body: Vec<u8>) -> Outcome {
+    async fn replay_logs(&self, project_id: i64, seq: i64, body: Vec<u8>) -> Outcome {
         let parsed = logs::parse_ndjson(&body, envelope::MAX_ITEM, logs::MAX_BATCH);
         if parsed.too_many {
             return Outcome::Poison(format!(
@@ -558,7 +715,23 @@ impl Drainer {
         // The same source the direct NDJSON door records, so a drained batch and a
         // posted one are the same row. Anything else would make the edge visible in
         // the data, and the edge is a delivery detail.
-        match self.bugs.accept_logs(project_id, &parsed.records, logs::source::NDJSON).await {
+        //
+        // The origin is not cosmetic. A log row's dedupe key is built from it, and the
+        // default — a freshly minted archive key — is different on every delivery, so
+        // an at-least-once redelivery filed every line a second time and acceptance
+        // fact 3 was false for the log door. `drain/<project>/<seq>` is the one name
+        // the edge promises never repeats and never rewinds.
+        let origin = drain_origin(project_id, seq);
+        match self
+            .bugs
+            .accept_logs_with_origin(
+                project_id,
+                &parsed.records,
+                logs::source::NDJSON,
+                Some(&origin),
+            )
+            .await
+        {
             Ok(_) => Outcome::Accepted,
             Err(detail) => Outcome::Defer(detail),
         }
@@ -579,6 +752,61 @@ impl Drainer {
             })
             .unwrap_or_default()
             .unwrap_or(0)
+    }
+
+    /// Move the cursor backwards, which nothing else here is allowed to do.
+    ///
+    /// Only [`Self::nothing_usable`] calls it, and only when the edge has said twice in
+    /// a row that it is holding rows we are asking past. Replaying is free — dedupe
+    /// eats it — and starving is not.
+    fn rewind_cursor(&self, project_id: i64, seq: i64) {
+        let written = self.db.with(|conn| {
+            conn.execute(
+                "INSERT INTO bugs_drain_cursor (project_id, acked_seq, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(project_id) DO UPDATE SET acked_seq = ?2, updated_at = ?3",
+                params![project_id, seq, now()],
+            )
+        });
+        if let Err(error) = written {
+            tracing::warn!(%error, project_id, seq, "drain: cannot rewind the ack cursor");
+        }
+    }
+
+    /// One more consecutive starved cycle for this project; the running total.
+    fn strike(&self, project_id: i64) -> u32 {
+        let mut gripes = self.gripes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = gripes.entry(project_id).or_insert((Gripe::Fine, 0));
+        entry.1 = entry.1.saturating_add(1);
+        entry.1
+    }
+
+    fn clear_strikes(&self, project_id: i64) {
+        let mut gripes = self.gripes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = gripes.get_mut(&project_id) {
+            entry.1 = 0;
+        }
+    }
+
+    /// Say something about a project, but only when it is news.
+    ///
+    /// The message closure is not called unless the complaint has changed, so building
+    /// it is free on the thousandth identical cycle.
+    fn gripe(&self, project_id: i64, next: Gripe, message: impl FnOnce() -> String) {
+        let changed = {
+            let mut gripes =
+                self.gripes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = gripes.entry(project_id).or_insert((Gripe::Fine, 0));
+            let changed = entry.0 != next;
+            entry.0 = next;
+            if next != Gripe::Starved {
+                entry.1 = 0;
+            }
+            changed
+        };
+        if changed && next != Gripe::Fine {
+            tracing::warn!("{}", message());
+        }
     }
 
     fn set_cursor(&self, project_id: i64, seq: i64) {
@@ -626,7 +854,7 @@ impl Drainer {
     fn note(&self, fatal: Fatal) {
         let (next, message) = match &fatal {
             Fatal::Token => (
-                Reach::Down("token".to_owned()),
+                Reach::Down(Down::Token),
                 format!(
                     "drain: {} answers 404 on every control route. That is what it says \
                      to a stranger, so this is almost certainly the drain token and \
@@ -635,7 +863,7 @@ impl Drainer {
                 ),
             ),
             Fatal::Unreachable(detail) => (
-                Reach::Down(detail.clone()),
+                Reach::Down(Down::Unreachable),
                 format!("drain: cannot reach {}: {detail}", self.transport.describe()),
             ),
         };
@@ -655,6 +883,13 @@ impl Drainer {
     }
 }
 
+/// The stable identity of a drained log batch, which its rows' dedupe keys are built
+/// from. `seq` rises for ever within a project and is never reused, so the same batch
+/// delivered twice lands on the same key both times.
+pub fn drain_origin(project_id: i64, seq: i64) -> String {
+    format!("drain/{project_id}/{seq}")
+}
+
 /// The registry body, canonical so the same set always hashes the same way.
 ///
 /// `project_id` is a string because the edge stores it as one — it is the cell name,
@@ -669,20 +904,35 @@ fn registry_payload(projects: &[(i64, String, bool)]) -> String {
     serde_json::json!({ "projects": entries }).to_string()
 }
 
-/// NDJSON in, rows out. A line that will not parse is dropped with a warning rather
-/// than taking the batch with it: the rows around it are real events, and refusing all
-/// of them over one would lose more than it protected.
-pub fn parse_rows(body: &[u8]) -> Vec<Row> {
-    body.split(|byte| *byte == b'\n')
-        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-        .filter_map(|line| match serde_json::from_slice::<Row>(line) {
-            Ok(row) => Some(row),
-            Err(error) => {
-                tracing::warn!(%error, "drain: a drain line will not parse");
-                None
-            }
-        })
-        .collect()
+/// What one drain answer contained.
+#[derive(Debug, Default, Clone)]
+pub struct Batch {
+    pub rows: Vec<Row>,
+    /// Lines that were there and would not parse. The count matters as much as the
+    /// rows: a batch of nothing but these is what wedges a project, and the caller
+    /// needs to know the difference between that and an empty answer.
+    pub dropped: usize,
+}
+
+/// NDJSON in, rows out. A line that will not parse is dropped rather than taking the
+/// batch with it: the rows around it are real events, and refusing all of them over one
+/// would lose more than it protected.
+///
+/// The dropping is silent here on purpose. This runs once per batch per cycle, and a
+/// warning inside it is a warning every thirty seconds for as long as the bad line
+/// sits there. The caller owns the complaint, and complains once.
+pub fn parse_rows(body: &[u8]) -> Batch {
+    let mut batch = Batch::default();
+    for line in body.split(|byte| *byte == b'\n') {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice::<Row>(line) {
+            Ok(row) => batch.rows.push(row),
+            Err(_) => batch.dropped += 1,
+        }
+    }
+    batch
 }
 
 /// The drainer's own tables. Owned here rather than in `index.rs` for the same reason
@@ -730,6 +980,9 @@ mod tests {
         ack_status: Mutex<u16>,
         /// Status every route answers, when set. 404 is the wrong-token case.
         force: Mutex<Option<u16>>,
+        /// A drain answer served verbatim: body, `X-Ingest-Last-Seq`,
+        /// `X-Ingest-Remaining`. For the two shapes of "nothing this loop can use".
+        raw: Mutex<Option<(Vec<u8>, i64, i64)>>,
     }
 
     impl Fake {
@@ -778,6 +1031,14 @@ mod tests {
                         self.rows.lock().unwrap().retain(|row| row.seq > up_to);
                     }
                     return Ok(Answer { status, ..Answer::default() });
+                }
+                if let Some((body, last, remaining)) = self.raw.lock().unwrap().clone() {
+                    return Ok(Answer {
+                        status: 200,
+                        last_seq: Some(last),
+                        remaining: Some(remaining),
+                        body,
+                    });
                 }
                 let after: i64 = path
                     .split("after=")
@@ -949,13 +1210,125 @@ mod tests {
         assert!(report.errors > 0);
     }
 
+    fn log_query() -> logs::Query {
+        logs::Query { text: None, level: None, file: None, limit: 100, offset: 0 }
+    }
+
+    /// Blocker 1, without a celld node. A drained log batch delivered twice must file
+    /// each line once. It did not: `accept_logs` named the batch by a freshly minted
+    /// archive key, so the dedupe key was different on every delivery.
+    #[tokio::test]
+    async fn a_redelivered_log_batch_files_each_line_once() {
+        let batch = b"{\"level\":\"error\",\"message\":\"one\"}\n{\"level\":\"info\",\"message\":\"two\"}\n";
+        let (drainer, fake, bugs, _dir) = drainer(vec![row(1, "logs", batch)]);
+        // Refuse the ack, which is exactly the redelivery window the protocol promises
+        // is safe: the rows stay on the edge and come back next cycle.
+        *fake.ack_status.lock().unwrap() = 500;
+
+        assert_eq!(drainer.cycle().await.replayed, 1);
+        assert_eq!(bugs.logs(1, &log_query()).unwrap().len(), 2, "two lines, filed once");
+
+        assert_eq!(drainer.cycle().await.replayed, 1, "the same batch again");
+        assert_eq!(
+            bugs.logs(1, &log_query()).unwrap().len(),
+            2,
+            "still two: a drained batch dedupes on its seq, not on a fresh archive key"
+        );
+    }
+
+    #[test]
+    fn a_drained_batch_is_named_by_something_that_never_repeats() {
+        assert_eq!(drain_origin(7, 42), "drain/7/42");
+        assert_ne!(drain_origin(7, 42), drain_origin(7, 43));
+        assert_ne!(drain_origin(7, 42), drain_origin(8, 42));
+    }
+
+    /// Blocker 4. The lowest unacked line is unreadable, so nothing parses, so nothing
+    /// is acked, so the cursor never moves and the next cycle asks for it again — for
+    /// ever. `X-Ingest-Last-Seq` is the way past it.
+    #[tokio::test]
+    async fn a_batch_of_unreadable_lines_is_acked_past_rather_than_asked_for_for_ever() {
+        let (drainer, fake, _bugs, _dir) = drainer(Vec::new());
+        *fake.raw.lock().unwrap() =
+            Some((b"{ this is not json\n{ nor is this\n".to_vec(), 9, 0));
+
+        let report = drainer.cycle().await;
+        assert_eq!(report.poison, 2, "both lines counted, not silently dropped");
+        assert_eq!(report.acked, 2);
+        assert_eq!(drainer.cursor(1), 9, "the cursor stepped over the whole bad batch");
+        assert_eq!(drainer.poison_count(), 2);
+    }
+
+    /// And it does not ack into thin air when the header gives it nowhere to go.
+    #[tokio::test]
+    async fn an_unreadable_batch_with_no_cursor_to_move_to_acks_nothing() {
+        let (drainer, fake, _bugs, _dir) = drainer(Vec::new());
+        *fake.raw.lock().unwrap() = Some((b"{ this is not json\n".to_vec(), 0, 0));
+
+        let report = drainer.cycle().await;
+        assert_eq!(report.acked, 0);
+        assert_eq!(drainer.cursor(1), 0);
+        assert!(report.errors > 0, "and it is reported rather than passed over");
+    }
+
+    /// Blocker 6. A replacement edge rebuilt from an older snapshot hands out sequence
+    /// numbers we have already passed. A strictly monotone cursor then starves in
+    /// silence for ever. Two consecutive cycles of it rewind the cursor.
+    #[tokio::test]
+    async fn an_edge_that_serves_none_of_the_rows_it_says_it_has_rewinds_the_cursor() {
+        let (drainer, fake, _bugs, _dir) = drainer(Vec::new());
+        drainer.set_cursor(1, 500);
+        // Nothing in the body, and yet seven rows are said to be waiting.
+        *fake.raw.lock().unwrap() = Some((Vec::new(), 12, 7));
+
+        drainer.cycle().await;
+        assert_eq!(drainer.cursor(1), 500, "one occurrence is a complaint, not an action");
+
+        drainer.cycle().await;
+        assert_eq!(drainer.cursor(1), 12, "the second in a row rewinds; dedupe absorbs the replay");
+    }
+
+    #[tokio::test]
+    async fn an_idle_edge_is_not_mistaken_for_a_starved_one() {
+        let (drainer, fake, _bugs, _dir) = drainer(Vec::new());
+        drainer.set_cursor(1, 500);
+        *fake.raw.lock().unwrap() = Some((Vec::new(), 500, 0));
+
+        for _ in 0..4 {
+            let report = drainer.cycle().await;
+            assert_eq!(report.errors, 0, "an empty buffer is the normal case");
+        }
+        assert_eq!(drainer.cursor(1), 500);
+    }
+
+    /// The drain token is the one secret in the system, and `Transport` requires
+    /// `Debug`. One `?transport` in a future log line must not leak it.
+    #[test]
+    fn no_debug_output_anywhere_carries_the_drain_token() {
+        let secret = "swordfishswordfishswordfishswor";
+        let transport = HttpTransport::new("http://127.0.0.1:1", secret).unwrap();
+        let printed = format!("{transport:?}");
+        assert!(!printed.contains(secret), "{printed}");
+        assert!(printed.contains("<redacted>"));
+
+        let config = crate::config::Drain {
+            target: "http://127.0.0.1:1".to_owned(),
+            token: secret.to_owned(),
+            key_path: std::path::PathBuf::from("/tmp/k"),
+            interval: Duration::from_secs(30),
+        };
+        let printed = format!("{config:?}");
+        assert!(!printed.contains(secret), "{printed}");
+    }
+
     #[test]
     fn a_drain_line_that_will_not_parse_does_not_take_the_batch_with_it() {
         let body = b"{\"seq\":1,\"kind\":\"envelope\",\"body\":\"e30=\"}\n{ this is not json\n\n{\"seq\":3,\"kind\":\"logs\",\"body\":\"e30=\"}\n";
-        let rows = parse_rows(body);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].seq, 1);
-        assert_eq!(rows[1].seq, 3);
+        let batch = parse_rows(body);
+        assert_eq!(batch.rows.len(), 2);
+        assert_eq!(batch.dropped, 1, "and the bad one is counted, not forgotten");
+        assert_eq!(batch.rows[0].seq, 1);
+        assert_eq!(batch.rows[1].seq, 3);
     }
 
     #[test]

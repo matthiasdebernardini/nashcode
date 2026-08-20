@@ -260,7 +260,13 @@ impl Bugs {
             return Err(AcceptError::Busy);
         };
         let (envelope_id, envelope_key, body) = self.store(project_id, body).await?;
-        slot.send(digest::Job { project_id, envelope_id, envelope_key, body, _bytes: Some(bytes) });
+        slot.send(digest::Job {
+            project_id,
+            envelope_id: Some(envelope_id),
+            envelope_key,
+            body,
+            _bytes: Some(bytes),
+        });
         Ok(())
     }
 
@@ -275,12 +281,20 @@ impl Bugs {
     ///
     /// A live request always wants `accept`. This is for the paths that mean to leave
     /// the digest to the sweep — an imported backlog, and the crash a sweep exists to
-    /// repair. Hands back the row id (`None` if only the row failed) and the body.
+    /// repair. Hands back the row id and the body.
+    ///
+    /// **The index write is part of durability, not bookkeeping.** It used to be
+    /// logged and swallowed, on the reasoning that the object was safe. It is not: the
+    /// object with no `bugs_envelopes` row is invisible to the sweep, which is the only
+    /// thing that would ever look at it again, so a crash before the in-memory digest
+    /// finishes loses the event outright. Under the drainer that is worse still — the
+    /// caller would ack, and the edge would delete the only other copy. Failing here
+    /// makes the drainer defer instead, and the row comes back next cycle.
     pub async fn store(
         &self,
         project_id: i64,
         body: Vec<u8>,
-    ) -> Result<(Option<i64>, String, Vec<u8>), AcceptError> {
+    ) -> Result<(i64, String, Vec<u8>), AcceptError> {
         let store = self
             .inner
             .store
@@ -292,12 +306,10 @@ impl Bugs {
             .await
             .map_err(|error| AcceptError::Store(format!("cannot write {key}: {error}")))?;
         match index::record_envelope(self.db(), project_id, key.as_ref()) {
-            Ok(id) => Ok((Some(id), key.to_string(), body)),
-            Err(error) => {
-                // The object is safe; only the sweep's handle on it is lost.
-                tracing::warn!(%error, "bugs: cannot record the envelope object");
-                Ok((None, key.to_string(), body))
-            }
+            Ok(id) => Ok((id, key.to_string(), body)),
+            Err(error) => Err(AcceptError::Store(format!(
+                "wrote {key} but cannot record it, so nothing would ever digest it: {error}"
+            ))),
         }
     }
 
@@ -376,8 +388,27 @@ impl Bugs {
         records: &[logs::Record],
         from: &str,
     ) -> Result<usize, String> {
+        self.accept_logs_with_origin(project_id, records, from, None).await
+    }
+
+    /// The same, with the batch's dedupe identity named by the caller.
+    ///
+    /// `origin` is what a log row's `dedupe_key` is built from. `None` falls back to the
+    /// freshly minted archive key, which is right for the direct NDJSON door — each POST
+    /// is its own event and there is nothing stable to name it by — and catastrophic for
+    /// anything that can be replayed. The drainer passes `drain/<project>/<seq>`, which
+    /// the edge guarantees never repeats and never rewinds, so a redelivered batch lands
+    /// on the same key and `INSERT OR IGNORE` throws it away. Without it every
+    /// at-least-once redelivery duplicated every line.
+    pub async fn accept_logs_with_origin(
+        &self,
+        project_id: i64,
+        records: &[logs::Record],
+        from: &str,
+        origin: Option<&str>,
+    ) -> Result<usize, String> {
         let store = self.inner.store.as_ref().ok_or("error tracking is off")?;
-        logs::store_batch(self.db(), store, project_id, records, from, None).await
+        logs::store_batch(self.db(), store, project_id, records, from, origin).await
     }
 
     pub fn logs(&self, project_id: i64, query: &logs::Query) -> DbResult<Vec<logs::LogRow>> {

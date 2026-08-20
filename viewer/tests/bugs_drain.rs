@@ -42,15 +42,16 @@ fn missing_prerequisite() -> Option<String> {
                      filesystem or in-memory bucket mode"
             .to_owned());
     }
-    if !Command::new("docker")
-        .arg("info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-    {
-        return Some("docker is installed but not running".to_owned());
+    match responds(Command::new("docker").arg("info"), Duration::from_secs(5)) {
+        Some(true) => {}
+        Some(false) => return Some("docker is installed but not running".to_owned()),
+        None => {
+            return Some(
+                "docker is installed but not responding; `docker info` did not return \
+                 within five seconds"
+                    .to_owned(),
+            );
+        }
     }
     if !which("esbuild") {
         return Some("no esbuild on PATH: `celld deploy` bundles the Worker with it".to_owned());
@@ -104,6 +105,33 @@ fn parse_version(text: &str) -> Option<(u32, u32)> {
         parts[2].parse::<u32>().ok()?;
         Some((major, minor))
     })
+}
+
+/// Run a probe with a deadline. `Some(ok)` if it finished, `None` if it did not.
+///
+/// The deadline is the whole point. `docker info` against a wedged daemon never returns
+/// — and this box has had a wedged daemon — so the version of this that just called
+/// `status()` held its nextest slot until the run was killed by hand. A prerequisite
+/// check that can hang is worse than no prerequisite check: it turns "this machine
+/// cannot run the test" into "the suite never finishes".
+fn responds(command: &mut Command, within: Duration) -> Option<bool> {
+    let Ok(mut child) = command.stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
+        return Some(false);
+    };
+    let deadline = Instant::now() + within;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) => {}
+            Err(_) => return Some(false),
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn which(program: &str) -> bool {
@@ -526,6 +554,12 @@ async fn the_public_ingester_buffers_and_the_drain_brings_it_home() {
     assert!(rows.iter().any(|row| row.message.contains("the drain carried this")));
 
     // ---- fact: draining twice without an ack duplicates nothing -----------------------
+    //
+    // Both kinds have to be inside the redelivery window. The first version of this
+    // posted the log batch, drained it, acked it, and only then opened the window — so
+    // the log rows were long gone from the edge and the assertion that they had not
+    // doubled was asserting nothing. It passed for a build in which every redelivered
+    // log line was filed a second time.
     let again = client
         .post(&public_url)
         .header("x-sentry-auth", &auth)
@@ -535,6 +569,17 @@ async fn the_public_ingester_buffers_and_the_drain_brings_it_home() {
         .expect("post");
     assert_eq!(again.status().as_u16(), 200);
 
+    let second_batch = "{\"level\":\"warn\",\"message\":\"redelivered once\"}\n\
+                        {\"level\":\"warn\",\"message\":\"redelivered twice\"}\n";
+    let logged_again = client
+        .post(format!("{}/api/{}/logs", node.url, public.id))
+        .header("x-sentry-auth", &auth)
+        .body(second_batch)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(logged_again.status().as_u16(), 200);
+
     let cursor_before = drainer.cursor(public.id);
     let deaf = Drainer::new(
         bugs.clone(),
@@ -543,13 +588,16 @@ async fn the_public_ingester_buffers_and_the_drain_brings_it_home() {
             as Arc<dyn Transport>,
     );
     let report = deaf.cycle().await;
-    assert_eq!(report.replayed, 1, "the digest took it");
-    assert_eq!(report.acked, 0, "the ack never landed");
+    assert_eq!(report.replayed, 2, "the envelope and the log batch both went through");
+    assert_eq!(report.acked, 0, "and neither ack landed");
     assert_eq!(drainer.cursor(public.id), cursor_before, "so the cursor did not move");
 
+    let landed = bugs.logs(public.id, &log_query()).expect("logs");
+    assert_eq!(landed.len(), 4, "two from the first batch, two from the second");
+
     let report = drainer.cycle().await;
-    assert_eq!(report.replayed, 1, "the same row again, which is what at-least-once means");
-    assert_eq!(report.acked, 1);
+    assert_eq!(report.replayed, 2, "the same rows again, which is what at-least-once means");
+    assert_eq!(report.acked, 2);
     bugs.digested(4).await;
 
     let drained = bugs.issues(public.id, None).expect("issues");
@@ -560,7 +608,17 @@ async fn the_public_ingester_buffers_and_the_drain_brings_it_home() {
         "and still one event: the same event_id twice is one occurrence"
     );
     let rows = bugs.logs(public.id, &log_query()).expect("logs");
-    assert_eq!(rows.len(), 2, "and the log rows did not double either");
+    assert_eq!(
+        rows.len(),
+        4,
+        "and the log rows did not double: a drained batch dedupes on its seq, not on a \
+         fresh archive key"
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row.message.starts_with("redelivered")).count(),
+        2,
+        "one row per line, however many times the line was delivered"
+    );
 
     // ---- fact: a poison row is acked rather than left to wedge the queue --------------
     let garbage = client
