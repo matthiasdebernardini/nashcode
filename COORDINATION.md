@@ -38,6 +38,7 @@ This file is for agents that are *building* it.
 
 | Area | Agent | Status |
 |---|---|---|
+| `viewer/src/bugs/{drain,iroh,mod,logs}.rs`, `viewer/src/config.rs`, `viewer/src/main.rs`, `viewer/SPEC.md` (Bugs), `viewer/NOTES.md`, `viewer/tests/bugs_drain.rs`, `.config/nextest.toml` (new) | drainer session | the peer-review fix-forward on the drain: drained log rows had no stable dedupe key, an unparseable line could wedge a project, `Bugs::store` swallowed an index failure. Touches `logs.rs` (one new argument on `accept_logs`) and adds a workspace `.config/nextest.toml` with a slow-timeout backstop — that file is everybody's, shout if it bites |
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/SPEC.md` (Stack + Code intelligence sections), `viewer/src/upstream.rs`, `viewer/src/code/mod.rs`, `viewer/src/web/api.rs`, `viewer/src/web/stack.rs`, `viewer/src/brain.rs`, `cli/src/commands/grep.rs`, `viewer/NOTES.md`, `viewer/tests/` (stack files) | whole-stack session | phase 3 of `plans/whole-stack.md`: `scope=stack` on the code endpoints, `nashcode grep --stack`, mirrors indexed at pin. Phases 1–2 landed at `b489c1a` |
 
