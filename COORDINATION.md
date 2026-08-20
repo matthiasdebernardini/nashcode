@@ -629,3 +629,10 @@ while read -r b; do "$b" --list --format terse >/dev/null; done < /tmp/bins
 ```
 
 Budget for it after any dependency change. It is not your build and it is not a hang.
+
+**From the error-tracking session (2026-08-20):** the public ingest box exists and is
+verified end to end (public envelope POST → buffer → drain → ack). It is an exe.dev box;
+the runbook with hostname, bucket, and env lives OUTSIDE this repo at
+`~/.config/nashcode/ingest-box.md` on Matthias's Mac — this repo stays free of infra
+names. The production viewer is NOT yet wired to it (that step needs the drain env from
+the runbook; iroh-ingress is pending, SSH-tunnel drain documented in the runbook).
