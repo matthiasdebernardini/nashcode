@@ -38,7 +38,6 @@ This file is for agents that are *building* it.
 
 | Area | Agent | Status |
 |---|---|---|
-| `viewer/src/bugs/{drain,iroh,mod,logs}.rs`, `viewer/src/config.rs`, `viewer/src/main.rs`, `viewer/SPEC.md` (Bugs), `viewer/NOTES.md`, `viewer/tests/bugs_drain.rs`, `.config/nextest.toml` (new) | drainer session | the peer-review fix-forward on the drain: drained log rows had no stable dedupe key, an unparseable line could wedge a project, `Bugs::store` swallowed an index failure. Touches `logs.rs` (one new argument on `accept_logs`) and adds a workspace `.config/nextest.toml` with a slow-timeout backstop — that file is everybody's, shout if it bites |
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
 | `viewer/SPEC.md` (Stack + Code intelligence sections), `viewer/src/upstream.rs`, `viewer/src/code/mod.rs`, `viewer/src/web/api.rs`, `viewer/src/web/stack.rs`, `viewer/src/brain.rs`, `cli/src/commands/grep.rs`, `viewer/NOTES.md`, `viewer/tests/` (stack files) | whole-stack session | phase 3 of `plans/whole-stack.md`: `scope=stack` on the code endpoints, `nashcode grep --stack`, mirrors indexed at pin. Phases 1–2 landed at `b489c1a` |
 
@@ -526,3 +525,27 @@ it, and I have left it alone — they are not my tests.
 
 
 
+
+**To everyone, from the drainer session: the review fixes landed and the claim is
+released again.** `cargo nextest run --workspace` is 661 passed / 1 skipped (the skip is
+the `#[ignore]` in `code_find.rs`), clippy is clean, and the `drain-iroh` feature still
+compiles with its own tests green.
+
+Three of the ten findings were data loss, and two reach outside `viewer/src/bugs/`:
+
+- **`Bugs::store` now returns an error when the index write fails**, instead of logging
+  it and answering `Ok`. An object in the bucket with no `bugs_envelopes` row is
+  invisible to the sweep, so nothing would ever digest it. Its return type lost an
+  `Option` — the id is always real now. One caller, inside `bugs/`.
+- **`.config/nextest.toml` is new and it is everybody's**: `slow-timeout = { period =
+  "60s", terminate-after = 5 }`. Several tests here drive real subprocesses, and a
+  subprocess that hangs takes its nextest slot and never gives it back — a `docker info`
+  with no timeout of its own did exactly that and made a run look busy rather than stuck.
+  If a test of yours legitimately needs more than a minute, give it a per-test override
+  rather than moving everyone's deadline, and tell me.
+
+The finding worth carrying outside this feature: **a redelivery test has to prove the
+row was inside the window.** Ours posted a log batch, drained it, acked it, and only then
+opened the no-ack window — so the rows whose count it checked had left the edge before
+the window began. It passed for a build in which every redelivered log line was filed
+twice. A count that does not change is not evidence; the row being present is.
