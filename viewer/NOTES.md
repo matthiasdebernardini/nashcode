@@ -1906,13 +1906,6 @@ doc no longer contradicts the handler that refuses an unparseable rule with a 40
 
 ## Repo discovery
 
-SPEC's "Repo discovery" bullet says the repo list is `$NASHCODE_REPOS`, and adds "(dgit
-has no list API we rely on.)" It has no JSON list API. It does have an index page, and
-`nashcode ls` has parsed it since the CLI existed, so the viewer parses the same page on
-every mirror poll and adds what it finds. `NASHCODE_REPOS` is now a seed. **This is
-wider than the bullet, and the bullet has not been amended** — that edit belongs to
-whoever owns SPEC.md.
-
 **The parser lives in its own crate, `dgit-index/`.** `cli` already builds as a lib, so
 the viewer could have depended on it, but that would invert the layering and pull agcli,
 ureq, and a second tokio configuration into the server for one regex pass. The new crate
@@ -1934,8 +1927,10 @@ Two consequences of a set rather than a `Vec`:
   `..(*bed.config).clone()`, override `repos` unless sharing is what you meant.
 
 **The index fetch is authed** with the same basic auth `x:$GIT_TOKEN` the clones use.
-Anonymous would list the same public repos today, but the token is already in hand and a
-private repo is the case where it matters.
+Anonymous would list exactly the same repos — dgit hides a `private: true` repo from its
+index with or without credentials, which is the known gap SPEC records — so this buys
+nothing today. It is sent anyway because the clone that follows sends it, and a git
+server that starts caring who is asking should not be a two-line surprise.
 
 **A filesystem `DGIT_URL` lists `*.git` directories** instead. That is what the tests
 point at, and what a local setup with no dgit in front of it uses; `remote_url` already
