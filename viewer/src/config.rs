@@ -87,7 +87,14 @@ impl Repos {
     }
 
     /// Learn a name. True when it was new.
+    ///
+    /// `is_plain_name` is enforced here rather than at each caller, so the set can
+    /// never hold a name [`Config::knows_repo`] would refuse: whatever put it there —
+    /// `NASHCODE_REPOS`, discovery, a caller not written yet — the invariant holds.
     pub fn insert(&self, name: &str) -> bool {
+        if !is_plain_name(name) {
+            return false;
+        }
         let mut set = self.0.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         set.insert(name.to_owned())
     }
@@ -101,7 +108,11 @@ impl Repos {
 
 impl<S: Into<String>> FromIterator<S> for Repos {
     fn from_iter<I: IntoIterator<Item = S>>(names: I) -> Self {
-        Self(Arc::new(RwLock::new(names.into_iter().map(Into::into).collect())))
+        let repos = Self::default();
+        for name in names {
+            repos.insert(&name.into());
+        }
+        repos
     }
 }
 
@@ -199,12 +210,19 @@ impl Config {
         ));
 
         // A seed, not the whole list: discovery adds to it on every mirror poll.
-        let repos: Repos = env_or("NASHCODE_REPOS", "")
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-            .collect();
+        // `Repos::insert` refuses anything that is not a plain name; a typo in the
+        // variable is worth a word, because a silently dropped repo looks like a
+        // viewer that lost it. stderr, not `tracing`: configuration is read before
+        // the subscriber exists.
+        let repos = Repos::default();
+        for name in
+            env_or("NASHCODE_REPOS", "").split(',').map(str::trim).filter(|name| !name.is_empty())
+        {
+            if !is_plain_name(name) {
+                eprintln!("NASHCODE_REPOS lists {name:?}, which is not a repo name; ignoring it");
+            }
+            repos.insert(name);
+        }
 
         let db_path = PathBuf::from(env_or(
             "NASHCODE_DB",
@@ -326,7 +344,7 @@ impl Config {
 /// A name with no path in it: no separator, no traversal, no leading dash that a git
 /// subcommand would read as a flag. dgit's own rule is narrower still, but this is the
 /// property that matters here.
-pub(crate) fn is_plain_name(repo: &str) -> bool {
+fn is_plain_name(repo: &str) -> bool {
     !repo.is_empty()
         && repo != "."
         && repo != ".."

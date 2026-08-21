@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::config::{Config, is_plain_name};
+use crate::config::Config;
 use crate::db::Db;
 use crate::git::{Auth, Repo, clone_mirror};
 
@@ -388,7 +388,7 @@ impl Mirrors {
             listed_bare_repos(Path::new(url))
         };
         for name in found {
-            if is_plain_name(&name) && self.config.repos.insert(&name) {
+            if self.config.repos.insert(&name) {
                 tracing::info!(repo = %name, "discovered a repo on the git server");
             }
         }
