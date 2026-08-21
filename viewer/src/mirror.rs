@@ -43,6 +43,12 @@ const POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// cycle open, and the next one is a minute away.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Top-level paths the router owns outright. `/{repo}` is matched after these, so a
+/// repo with one of these names would be shadowed on every page it has — half-served,
+/// and confusingly. Discovery refuses the name and says so; `NASHCODE_REPOS` is the
+/// override for an operator who knows what they are asking for.
+const RESERVED_ROUTES: &[&str] = &["api", "assets", "brain", "bugs", "favicon.svg"];
+
 /// What the UI needs to know about a mirror's health.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MirrorStatus {
@@ -371,8 +377,9 @@ impl Mirrors {
     /// is a directory of bare repos with no index page to fetch, so the `*.git`
     /// directories in it are the list instead.
     ///
-    /// Names are only ever added. A fetch that fails is one `warn!` and no change:
-    /// a git server that is down or a page whose markup moved must not empty the index.
+    /// Names are only ever added, and [`RESERVED_ROUTES`] are not added at all. A fetch
+    /// that fails is one `warn!` and no change: a git server that is down or a page whose
+    /// markup moved must not empty the index.
     ///
     /// ponytail: discovery sees the repos dgit lists, which are its public ones. A
     /// private repo needs the operator to say so, and the endpoint for that
@@ -388,6 +395,10 @@ impl Mirrors {
             listed_bare_repos(Path::new(url))
         };
         for name in found {
+            if RESERVED_ROUTES.contains(&name.as_str()) {
+                tracing::warn!(repo = %name, "the git server lists a repo whose name is a viewer route; not mirroring it");
+                continue;
+            }
             if self.config.repos.insert(&name) {
                 tracing::info!(repo = %name, "discovered a repo on the git server");
             }

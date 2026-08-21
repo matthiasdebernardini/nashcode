@@ -88,7 +88,7 @@ async fn a_url_dgit_is_read_from_its_index_page() {
         // What makes a bare repo clonable without a git server.
         git(&bare, &["update-server-info"]);
     }
-    let dgit = FakeDgit::start(remotes).await;
+    let dgit = FakeDgit::start(remotes, Index::Served).await;
 
     let bed = testbed_with(root, &[], BTreeMap::new());
     let config = Arc::new(Config {
@@ -105,8 +105,42 @@ async fn a_url_dgit_is_read_from_its_index_page() {
     assert!(served.config.knows_repo("alpha"));
     assert!(served.config.knows_repo("beta"));
     assert!(!served.config.knows_repo("cgit.css"), "navigation links are not repos");
+    assert!(!served.config.knows_repo("brain"), "a name the router owns is refused");
     assert!(served.config.mirror_path("alpha").exists(), "and the mirror cloned over HTTP");
     assert_eq!(dgit.index_auth(), Some("x:sekrit".to_owned()), "the index fetch is authed");
+}
+
+/// A git server that answers the index page with a 500 leaves the set exactly as it
+/// was. Degrade, never lose: the alternative is an outage that 404s every repo.
+#[tokio::test]
+async fn a_broken_index_page_changes_nothing() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let remotes = root.path().join("remotes");
+    std::fs::create_dir_all(&remotes).expect("mkdir");
+    stacked_fixture(&remotes, "kept");
+    let dgit = FakeDgit::start(remotes, Index::Broken).await;
+
+    let bed = testbed_with(root, &["kept"], BTreeMap::new());
+    let config = Arc::new(Config {
+        dgit_url: dgit.url.clone(),
+        repos: ["kept"].into_iter().collect(),
+        db_path: bed.root.path().join("broken.db"),
+        ..(*bed.config).clone()
+    });
+    let served = testbed_from_config(tempfile::tempdir().expect("tempdir"), config);
+
+    served.mirrors.refresh_all().await;
+
+    assert_eq!(served.config.repos.names(), vec!["kept".to_owned()], "the set stands");
+    let (status, _) = get(&served.router, "/").await;
+    assert_eq!(status, 200, "and the index page still renders");
+}
+
+/// Whether [`FakeDgit`] serves an index page or fails the way a broken server does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Index {
+    Served,
+    Broken,
 }
 
 /// A dgit-shaped HTTP server: the index page at `/`, and the bare repos under it for
@@ -121,11 +155,12 @@ struct FakeDgit {
 const INDEX_HTML: &str = "<html><body><table class='list nowrap'>\
     <tr><td><a href='/alpha/'>alpha</a></td><td>first</td><td>me</td><td>2 days</td></tr>\
     <tr><td><a href='/beta/'>beta</a></td><td>[no description]</td><td>me</td><td></td></tr>\
+    <tr><td><a href='/brain/'>brain</a></td><td>a route, not a repo</td></tr>\
     <tr><td><a href='/cgit.css'>css</a></td></tr>\
     </table></body></html>";
 
 impl FakeDgit {
-    async fn start(root: PathBuf) -> Self {
+    async fn start(root: PathBuf, index: Index) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let url = format!("http://{}", listener.local_addr().expect("addr"));
         let auth = Arc::new(Mutex::new(None));
@@ -144,7 +179,19 @@ impl FakeDgit {
 
                     let (kind, body) = if path == "/" {
                         *seen.lock().expect("lock") = basic_auth(&head);
-                        ("text/html", Some(INDEX_HTML.as_bytes().to_vec()))
+                        match index {
+                            Index::Served => ("text/html", Some(INDEX_HTML.as_bytes().to_vec())),
+                            Index::Broken => {
+                                let _ = socket
+                                    .write_all(
+                                        b"HTTP/1.1 500 Internal Server Error\r\n\
+                                          content-length: 0\r\nconnection: close\r\n\r\n",
+                                    )
+                                    .await;
+                                let _ = socket.shutdown().await;
+                                return;
+                            }
+                        }
                     } else {
                         let file = path.trim_start_matches('/');
                         let safe = !file.is_empty()
