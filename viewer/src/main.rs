@@ -331,8 +331,8 @@ async fn serve() {
 fn doctor(config: &Config) {
     if config.repos.is_empty() {
         eprintln!(
-            "doctor: no repos yet; discovery has found none at DGIT_URL and the index \
-             page will show nothing until a push creates one"
+            "doctor: no repos seeded from NASHCODE_REPOS; discovery runs a cycle after \
+             startup and the index page fills in from DGIT_URL"
         );
     }
     if config.dgit_url.is_empty() {

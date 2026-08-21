@@ -1932,6 +1932,16 @@ index with or without credentials, which is the known gap SPEC records — so th
 nothing today. It is sent anyway because the clone that follows sends it, and a git
 server that starts caring who is asking should not be a two-line surprise.
 
+**A repo named after a route is refused**, with a warning. `/{repo}` is matched after
+the literal top-level paths, so a repo called `brain`, `bugs`, `api`, `assets` or
+`favicon.svg` would be shadowed on every page it has. `RESERVED_ROUTES` in `mirror.rs`
+is the list, and it sits next to `discover` so the two move together. `NASHCODE_REPOS`
+does not consult it: an operator naming one of those has asked for it on purpose.
+
+**The doctor line is about the seed, not about discovery.** It runs before the first
+cycle, so it can only report what `NASHCODE_REPOS` gave it; saying "discovery found
+nothing" there would fire on every healthy discovery-only start.
+
 **A filesystem `DGIT_URL` lists `*.git` directories** instead. That is what the tests
 point at, and what a local setup with no dgit in front of it uses; `remote_url` already
 treats it as a directory of bare repos, so discovery has to agree.
