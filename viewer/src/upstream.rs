@@ -627,8 +627,8 @@ impl Upstreams {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            for name in &self.config.repos {
-                self.sync(&self.own_mirror(name)).await;
+            for name in self.config.repos.names() {
+                self.sync(&self.own_mirror(&name)).await;
             }
         }
     }

@@ -54,7 +54,7 @@ async fn ci_for(cx: &Cx, repo: &str, tip: &str) -> Option<String> {
 async fn home(cx: &Cx) -> Result {
     let app = app(cx);
     let mut sections: Vec<View> = Vec::new();
-    for name in app.config.repos.clone() {
+    for name in app.config.repos.names() {
         let status = app.mirrors.refresh(&name).await;
         let section = if status.available {
             let graph = StackGraph::infer(&app.mirrors.repo(&name)).await?;
@@ -112,7 +112,7 @@ async fn home(cx: &Cx) -> Result {
             <h2 class="mb-3">"Repositories"</h2>
             if empty {
                 <div class="Box"><div class="Box-body color-fg-muted">
-                    "No repos configured. Set NASHCODE_REPOS."
+                    "No repos yet. Discovery has not found one on the git server; push a repo and it appears here."
                 </div></div>
             }
             for (i, section) in sections.into_iter().enumerate() {

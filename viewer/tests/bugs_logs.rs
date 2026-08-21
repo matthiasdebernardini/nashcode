@@ -24,7 +24,7 @@ fn bugs_bed() -> (TestBed, PathBuf) {
     let config = Arc::new(Config {
         dgit_url: remotes.to_string_lossy().into_owned(),
         git_token: String::new(),
-        repos: vec!["demo".to_owned()],
+        repos: ["demo"].into_iter().collect(),
         mirrors: root.path().join("mirrors"),
         bind: "127.0.0.1:0".to_owned(),
         db_path: root.path().join("nashcode.db"),

@@ -880,16 +880,16 @@ async fn brain_ask(cx: &Cx, Json(input): Json<AskIn>) -> Result<Response> {
 
     // The full text of every plan and card under the repo filter.
     let mut documents: BTreeMap<String, String> = BTreeMap::new();
-    for name in &app.config.repos {
+    for name in app.config.repos.names() {
         if let Some(filter) = &input.repo
-            && filter != name
+            && filter != &name
         {
             continue;
         }
-        let repo = app.mirrors.repo(name);
+        let repo = app.mirrors.repo(&name);
         let Ok(default_branch) = repo.default_branch().await else { continue };
         let Ok(tip) = repo.tip(&default_branch).await else { continue };
-        let index = app.docs.get(name, &repo, &tip).await;
+        let index = app.docs.get(&name, &repo, &tip).await;
         for document in index.documents.values() {
             documents.insert(format!("{name}/{}", document.path), document.body.clone());
         }
@@ -903,7 +903,7 @@ async fn brain_ask(cx: &Cx, Json(input): Json<AskIn>) -> Result<Response> {
         embeddings: app.embeddings.clone(),
         repos: match &input.repo {
             Some(only) => vec![only.clone()],
-            None => app.config.repos.clone(),
+            None => app.config.repos.names(),
         },
     };
 

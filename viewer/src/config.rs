@@ -1,7 +1,8 @@
 //! Configuration. Environment only — nothing about a deployment lives in source.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// Everything the viewer needs to know about the world around it.
@@ -11,8 +12,8 @@ pub struct Config {
     pub dgit_url: String,
     /// Push token. Sent as basic auth `x:<token>`. Empty means anonymous.
     pub git_token: String,
-    /// Repo names to mirror, in the order they should be listed.
-    pub repos: Vec<String>,
+    /// The repos to mirror. Discovered, not declared — see [`Repos`].
+    pub repos: Repos,
     /// Where `git clone --mirror` copies live.
     pub mirrors: PathBuf,
     /// Listen address.
@@ -55,6 +56,53 @@ pub struct Config {
     /// `NASHCODE_BUGS_SELF_DSN`: the DSN nashcode reports its own errors to. Unset means
     /// it reports nothing about itself.
     pub bugs_self_dsn: Option<String>,
+}
+
+/// The set of repos the viewer serves.
+///
+/// Shared and mutable, because the set is discovered rather than declared: every
+/// mirror poll reads dgit's index page and inserts the names it has not seen, so a
+/// `git push` to a new name is visible within one cycle with no restart.
+/// `NASHCODE_REPOS` only seeds it, and nothing ever removes a name — a repo that
+/// drops off dgit's index still has a mirror on disk and pages that render from it.
+///
+/// The lock is `std::sync::RwLock` and every method returns owned data, so no guard
+/// can survive into an `.await`. Reads are the hot path: [`Config::knows_repo`] takes
+/// one per request.
+#[derive(Debug, Clone, Default)]
+pub struct Repos(Arc<RwLock<BTreeSet<String>>>);
+
+impl Repos {
+    /// Every known name, alphabetically. A snapshot the caller owns.
+    pub fn names(&self) -> Vec<String> {
+        self.read().iter().cloned().collect()
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.read().contains(name)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.read().is_empty()
+    }
+
+    /// Learn a name. True when it was new.
+    pub fn insert(&self, name: &str) -> bool {
+        let mut set = self.0.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        set.insert(name.to_owned())
+    }
+
+    /// A poisoned lock is recovered rather than propagated: a panic somewhere else
+    /// must not turn every repo into a 404.
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, BTreeSet<String>> {
+        self.0.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl<S: Into<String>> FromIterator<S> for Repos {
+    fn from_iter<I: IntoIterator<Item = S>>(names: I) -> Self {
+        Self(Arc::new(RwLock::new(names.into_iter().map(Into::into).collect())))
+    }
 }
 
 /// The Pushover application credentials and where to send them.
@@ -150,7 +198,8 @@ impl Config {
             &home().join("mirrors").to_string_lossy(),
         ));
 
-        let repos = env_or("NASHCODE_REPOS", "")
+        // A seed, not the whole list: discovery adds to it on every mirror poll.
+        let repos: Repos = env_or("NASHCODE_REPOS", "")
             .split(',')
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -268,16 +317,16 @@ impl Config {
         self.mirrors.join(format!("{repo}.git"))
     }
 
-    /// True when `repo` is one of the configured repos. Guards every path parameter.
+    /// True when `repo` is one of the known repos. Guards every path parameter.
     pub fn knows_repo(&self, repo: &str) -> bool {
-        is_plain_name(repo) && self.repos.iter().any(|known| known == repo)
+        is_plain_name(repo) && self.repos.contains(repo)
     }
 }
 
 /// A name with no path in it: no separator, no traversal, no leading dash that a git
 /// subcommand would read as a flag. dgit's own rule is narrower still, but this is the
 /// property that matters here.
-fn is_plain_name(repo: &str) -> bool {
+pub(crate) fn is_plain_name(repo: &str) -> bool {
     !repo.is_empty()
         && repo != "."
         && repo != ".."
@@ -353,7 +402,7 @@ mod tests {
     #[test]
     fn a_repo_name_carrying_a_path_is_never_known_and_never_becomes_one() {
         let config = Config {
-            repos: vec!["demo".to_owned()],
+            repos: ["demo"].into_iter().collect(),
             mirrors: PathBuf::from("/srv/mirrors"),
             ..Config::from_env()
         };

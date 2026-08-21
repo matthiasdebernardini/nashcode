@@ -47,13 +47,13 @@ impl Brain {
         since: Option<&str>,
     ) -> serde_json::Value {
         let mut repos = Vec::new();
-        for name in &config.repos {
+        for name in config.repos.names() {
             if let Some(filter) = repo_filter
                 && filter != name
             {
                 continue;
             }
-            repos.push(self.repo_json(config, db, mirrors, docs, name, since).await);
+            repos.push(self.repo_json(config, db, mirrors, docs, &name, since).await);
         }
         serde_json::json!({
             "generated_at": crate::db::now(),

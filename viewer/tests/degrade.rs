@@ -29,7 +29,7 @@ async fn every_page_survives_a_dead_git_server_on_an_existing_mirror() {
     let dead_config = Arc::new(Config {
         dgit_url: "http://127.0.0.1:9/dead".to_owned(),
         git_token: String::new(),
-        repos: vec!["demo".to_owned()],
+        repos: ["demo"].into_iter().collect(),
         mirrors: live.config.mirrors.clone(),
         bind: "127.0.0.1:0".to_owned(),
         db_path: live.root.path().join("nashcode-dead.db"),
@@ -83,7 +83,7 @@ async fn every_page_survives_a_dead_git_server_on_an_existing_mirror() {
 
     // A repo that never cloned shows the error card, still not a 500.
     let missing_config = Arc::new(Config {
-        repos: vec!["ghost".to_owned()],
+        repos: ["ghost"].into_iter().collect(),
         mirrors: live.root.path().join("empty-mirrors"),
         db_path: live.root.path().join("nashcode-ghost.db"),
         ..(*dead.config).clone()

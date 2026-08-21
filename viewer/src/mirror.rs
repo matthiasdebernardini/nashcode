@@ -318,8 +318,9 @@ impl Mirrors {
     /// mirrors before the first request arrives.
     pub async fn refresh_all(&self) -> HashMap<String, MirrorStatus> {
         let mut all = HashMap::new();
-        for repo in &self.config.repos {
-            all.insert(repo.clone(), self.refresh_inline(repo).await);
+        for repo in self.config.repos.names() {
+            let status = self.refresh_inline(&repo).await;
+            all.insert(repo, status);
         }
         all
     }
@@ -348,7 +349,7 @@ mod tests {
         let config = Config {
             dgit_url: "http://127.0.0.1:1/nope".to_owned(),
             git_token: String::new(),
-            repos: vec!["demo".to_owned()],
+            repos: ["demo"].into_iter().collect(),
             mirrors: dir.path().to_path_buf(),
             bind: "127.0.0.1:0".to_owned(),
             db_path: dir.path().join("db.sqlite"),

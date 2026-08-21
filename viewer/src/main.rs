@@ -334,7 +334,10 @@ async fn serve() {
 /// One line per thing an operator would otherwise discover the hard way.
 fn doctor(config: &Config) {
     if config.repos.is_empty() {
-        eprintln!("doctor: NASHCODE_REPOS is empty; the index page will show nothing");
+        eprintln!(
+            "doctor: no repos yet; discovery has found none at DGIT_URL and the index \
+             page will show nothing until a push creates one"
+        );
     }
     if config.dgit_url.is_empty() {
         eprintln!("doctor: DGIT_URL is unset; mirrors cannot clone or fetch");
