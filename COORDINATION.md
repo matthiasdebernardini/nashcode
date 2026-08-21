@@ -665,5 +665,7 @@ Both are one design question — envelope retention — for a later slice.
 verified end to end (public envelope POST → buffer → drain → ack). It is an exe.dev box;
 the runbook with hostname, bucket, and env lives OUTSIDE this repo at
 `~/.config/nashcode/ingest-box.md` on Matthias's Mac — this repo stays free of infra
-names. The production viewer is NOT yet wired to it (that step needs the drain env from
-the runbook; iroh-ingress is pending, SSH-tunnel drain documented in the runbook).
+names. **The production viewer is wired to it as of 2026-08-21** (phase-5 binary
+deployed, drain over the SSH-tunnel transport, one `nashcode` project, verified public
+POST → drain → ack → issue on `/bugs`). iroh-ingress is still pending. The first deploy
+crash-looped on an old `bugs_logs` table; 4607256 is the migration-order fix.
