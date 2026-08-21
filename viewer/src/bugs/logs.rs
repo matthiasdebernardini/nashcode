@@ -90,6 +90,10 @@ pub struct LogRow {
 /// Apply the log schema. Idempotent, run on every open.
 pub fn migrate(db: &Db) -> DbResult<()> {
     db.with(|conn| {
+        // Before and after the batch; see `index::migrate` for why both runs matter.
+        // Here the before-run is the load-bearing one: the batch indexes
+        // `dedupe_key`, which a `bugs_logs` older than that column does not have.
+        crate::bugs::index::add_columns(conn, ADDED_COLUMNS)?;
         conn.execute_batch(SCHEMA)?;
         crate::bugs::index::add_columns(conn, ADDED_COLUMNS)
     })
@@ -717,6 +721,48 @@ mod tests {
         let project =
             crate::bugs::index::create_project(&db, "demo", &"a".repeat(32), None).unwrap();
         (db, project.id)
+    }
+
+    /// The production incident of 2026-08-20: a database whose `bugs_logs` predates
+    /// `dedupe_key` must still migrate, because SCHEMA's unique index names that
+    /// column and `CREATE TABLE IF NOT EXISTS` will not add it.
+    #[test]
+    fn migrate_adds_dedupe_key_to_an_old_table() {
+        let db = Db::in_memory().unwrap();
+        crate::bugs::index::migrate(&db).unwrap();
+        db.with(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE bugs_logs (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id      INTEGER NOT NULL REFERENCES bugs_projects(id),
+                    ts              TEXT NOT NULL,
+                    severity_text   TEXT NOT NULL,
+                    severity_number INTEGER NOT NULL,
+                    message         TEXT NOT NULL,
+                    attributes      TEXT NOT NULL DEFAULT '{}',
+                    code_file       TEXT,
+                    code_line       INTEGER,
+                    code_function   TEXT,
+                    trace_id        TEXT,
+                    source          TEXT NOT NULL,
+                    archive_key     TEXT,
+                    received_at     TEXT NOT NULL
+                );",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        migrate(&db).unwrap();
+        let has_column = db
+            .with(|conn| {
+                let mut statement = conn.prepare("PRAGMA table_info(bugs_logs)")?;
+                let names = statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(names.contains(&"dedupe_key".to_owned()))
+            })
+            .unwrap();
+        assert!(has_column);
     }
 
     fn record(message: &str, ts: &str) -> Record {

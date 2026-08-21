@@ -139,6 +139,12 @@ const RETENTION_COLUMN: &str = "INTEGER NOT NULL DEFAULT 30";
 /// Apply the bugs schema. Idempotent, run on every open.
 pub fn migrate(db: &Db) -> DbResult<()> {
     db.with(|conn| {
+        // Twice, and both matter. Before: an index in the SCHEMA may name a column
+        // that only `add_columns` gives an old database, so the column has to land
+        // before the batch (a table that does not exist yet is skipped). After: the
+        // CREATE TABLEs here do not carry the added columns, so a fresh table still
+        // needs them altered in.
+        add_columns(conn, ADDED_COLUMNS)?;
         conn.execute_batch(SCHEMA)?;
         add_columns(conn, ADDED_COLUMNS)
     })
@@ -671,14 +677,18 @@ pub fn add_columns(conn: &Connection, wanted: &[(&str, &str, &str)]) -> DbResult
     for (table, column, definition) in wanted {
         let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
         let mut present = false;
+        let mut exists = false;
         let names = statement.query_map([], |row| row.get::<_, String>(1))?;
         for name in names {
+            exists = true;
             if name? == *column {
                 present = true;
             }
         }
         drop(statement);
-        if !present {
+        // A table with no rows in table_info does not exist yet; its CREATE TABLE
+        // in the caller's SCHEMA carries the column, so there is nothing to alter.
+        if exists && !present {
             conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
         }
     }
