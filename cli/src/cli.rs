@@ -615,7 +615,6 @@ fn misuse(message: impl Into<String>, fix: impl Into<String>) -> CommandError {
 pub fn build() -> AgentCli {
     AgentCli::new("nashcode", LONG_ABOUT)
         .version(env!("CARGO_PKG_VERSION"))
-        .root_field("doctor", serde_json::json!({ "description": DOCTOR_DOC }))
         .command(setup_command())
         .command(use_command())
         .command(profiles_command())
@@ -635,7 +634,11 @@ pub fn build() -> AgentCli {
         .command(comments_command())
         .command(brain_command())
         .command(grep_command())
-        .doctor(doctor::checks())
+        .skill()
+        .doctor_with(
+            Command::new("doctor", DOCTOR_DOC).usage("nashcode doctor [--profile <name>]"),
+            doctor::checks(),
+        )
 }
 
 fn setup_command() -> Command {

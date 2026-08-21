@@ -125,10 +125,11 @@ pub fn checks() -> Vec<agcli::Check> {
         .map(|(id, code)| {
             let sweep = Arc::clone(&sweep);
             let id = *id;
-            agcli::Check::new(id, move || {
+            agcli::Check::with_request(id, move |req| {
                 let sweep = Arc::clone(&sweep);
+                let profile = req.flag("profile").map(str::to_string);
                 Box::pin(async move {
-                    let all = sweep.get_or_init(sweep_all);
+                    let all = sweep.get_or_init(|| sweep_all(profile.as_deref()));
                     match all.iter().find(|c| c.id == id) {
                         Some(c) => c.to_result(),
                         // The profile check failed, so nothing after it ran.
@@ -143,10 +144,10 @@ pub fn checks() -> Vec<agcli::Check> {
 
 /// Run every check once, in order, and stop where a failure makes the rest
 /// meaningless: with no profile there is no server to ask about.
-fn sweep_all() -> Vec<Check> {
+fn sweep_all(profile: Option<&str>) -> Vec<Check> {
     let mut checks = Vec::new();
     let p = match Store::load().and_then(|store| {
-        let (n, p) = store.resolve(None)?;
+        let (n, p) = store.resolve(profile)?;
         Ok((n, p.clone()))
     }) {
         Ok((n, p)) => {
