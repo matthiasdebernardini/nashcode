@@ -38,7 +38,7 @@ usage error naming the flag.
 ### `nashcode use <profile>` / `nashcode profiles`
 Profile store at `~/.config/nashcode/config.toml`: named servers (`url`, `ssh`, `token`),
 one marked active. `use` selects the active one; all other commands honor
-`--profile <name>` to override (`doctor` excepted — see "Agent envelope"). This is the "select it" surface — multiple deployments
+`--profile <name>` to override. This is the "select it" surface — multiple deployments
 (personal, team, client) coexist.
 
 ### Repo commands (against the active profile, dgit's HTTP API)
@@ -100,7 +100,7 @@ vars, `celld deploy`, restart the service.
   jj-only); jj is shelled out behind a shim seam (`NASHCODE_JJ_BIN`,
   `NASHCODE_JJ_AVAILABLE`) so no test needs jj installed.
 
-### `nashcode doctor`
+### `nashcode doctor [--profile <name>]`
 Checks, one entry each, pass/fail/skip: profile exists, server reachable, TLS cert valid, token
 accepted (auth probe), tailscale identity headers present, celld service active (via
 SSH if configured), bucket reachable from host, viewer up (if configured).
@@ -179,8 +179,13 @@ contract per command.
   plannotator path (null when absent), viewer URL.
 - **`ls` and `comments` emit bounded lists** (`{items, count, total, truncated,
   fields}`), which advertises `--select` for free.
-- **`doctor`** is agcli's built-in doctor wrapping the existing checks; a
+- **`doctor`** is agcli's doctor handler (`doctor_with`) under a command
+  nashcode owns, so it declares `--profile <name>` like every other command; a
   failing check carries its typed exit code (e.g. auth). Skipped never passes.
+- **`skill`** is agcli's built-in (`AgentCli::skill`): `nashcode skill` prints
+  the CLI as a `SKILL.md` generated from the live command tree;
+  `nashcode skill --install=<dir>` writes `<dir>/nashcode/SKILL.md` and answers
+  `{path, bytes, skill_name}`. Honors `--dry-run`.
 - **`grep` bypasses the envelope.** Raw rg-format `path:line:content` stdout
   and rg exit codes ARE its contract (see its section above); it keeps its own
   flag surface, including its own `--json`, unchanged. agcli must support a
