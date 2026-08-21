@@ -159,13 +159,9 @@ async fn serve() {
         .run(ci_rx),
     );
 
-    // Warm every mirror once so the first page load is instant.
-    {
-        let mirrors = mirrors.clone();
-        tokio::spawn(async move {
-            mirrors.refresh_all().await;
-        });
-    }
+    // The mirror poll. Its first cycle is immediate, so the first page load is instant;
+    // every later cycle is what discovers a repo pushed to a name nobody configured.
+    tokio::spawn(mirrors.clone().watch());
 
     // The upstream column has a clock of its own: a `track` dep moves in a repo nobody
     // here pushes to, so no tip observer and no page load would ever notice.

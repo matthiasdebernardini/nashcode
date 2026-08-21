@@ -1,5 +1,11 @@
-//! Mirror management: `git clone --mirror` copies of every configured repo, refreshed
-//! behind the page load rather than in front of it.
+//! Mirror management: `git clone --mirror` copies of every known repo, refreshed behind
+//! the page load rather than in front of it.
+//!
+//! Which repos are known is decided here too. [`Mirrors::watch`] runs a cycle a minute,
+//! and each cycle first asks dgit what it is serving — [`Mirrors::discover`] — then
+//! refreshes everything. So a `git push` to a name nobody configured produces a mirror,
+//! an index row, and a browsable repo within one cycle. `NASHCODE_REPOS` is a seed for
+//! that set, not the whole of it, and nothing here ever drops a name.
 //!
 //! The rule this module exists to enforce is that **a page never fails because dgit is
 //! down**. A fetch that cannot reach the server leaves the existing mirror in place and
@@ -16,17 +22,26 @@
 //! must see its own write.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::config::Config;
+use crate::config::{Config, is_plain_name};
 use crate::db::Db;
 use crate::git::{Auth, Repo, clone_mirror};
 
 /// How long a fetch stays fresh. A burst of page loads costs one fetch.
 const DEBOUNCE: Duration = Duration::from_secs(10);
+
+/// How often [`Mirrors::watch`] runs a cycle. Discovery rides on that cycle, so this
+/// is also the longest a repo can exist on dgit without appearing in the viewer.
+const POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long the index-page fetch may take. Short: a slow git server must not hold a
+/// cycle open, and the next one is a minute away.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the UI needs to know about a mirror's health.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -75,6 +90,9 @@ pub struct Mirrors {
     /// One lock per repo so two concurrent page loads never fetch the same repo twice.
     locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     observer: Option<TipObserver>,
+    /// Reads dgit's index page, once a cycle. Built here rather than per call so a
+    /// rustls configuration is not assembled every minute.
+    client: reqwest::Client,
 }
 
 impl std::fmt::Debug for Mirrors {
@@ -91,6 +109,10 @@ impl Mirrors {
             state: Arc::new(Mutex::new(HashMap::new())),
             locks: Arc::new(Mutex::new(HashMap::new())),
             observer: None,
+            client: reqwest::Client::builder()
+                .timeout(DISCOVERY_TIMEOUT)
+                .build()
+                .expect("reqwest client builds"),
         }
     }
 
@@ -314,15 +336,85 @@ impl Mirrors {
         }
     }
 
-    /// Refresh every configured repo and wait for each. Startup calls this to warm the
-    /// mirrors before the first request arrives.
+    /// The poll clock. One cycle immediately, then one every [`POLL_INTERVAL`].
+    ///
+    /// This is the whole of repo discovery's schedule: a repo pushed to dgit under a
+    /// name nobody configured is mirrored, listed, and browsable one cycle later, with
+    /// no environment change and no restart.
+    pub async fn watch(self) {
+        let mut ticker = tokio::time::interval(POLL_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            self.refresh_all().await;
+        }
+    }
+
+    /// Learn what dgit is serving, then refresh every repo we know and wait for each.
+    ///
+    /// One cycle of [`watch`](Self::watch). A repo seen for the first time has no
+    /// mirror, so its refresh is the clone.
     pub async fn refresh_all(&self) -> HashMap<String, MirrorStatus> {
+        self.discover().await;
         let mut all = HashMap::new();
         for repo in self.config.repos.names() {
             let status = self.refresh_inline(&repo).await;
             all.insert(repo, status);
         }
         all
+    }
+
+    /// Add every repo dgit is serving that we do not already know.
+    ///
+    /// dgit has no list API, so its list is the HTML index page and `dgit_index` is the
+    /// parser — the same one `nashcode ls` uses. A `DGIT_URL` that is a filesystem path
+    /// is a directory of bare repos with no index page to fetch, so the `*.git`
+    /// directories in it are the list instead.
+    ///
+    /// Names are only ever added. A fetch that fails is one `warn!` and no change:
+    /// a git server that is down or a page whose markup moved must not empty the index.
+    ///
+    /// ponytail: discovery sees the repos dgit lists, which are its public ones. A
+    /// private repo needs the operator to say so, and the endpoint for that
+    /// (`PUT /:repo/track`) is not built.
+    async fn discover(&self) {
+        let url = self.config.dgit_url.trim();
+        if url.is_empty() {
+            return;
+        }
+        let found = if url.starts_with("http://") || url.starts_with("https://") {
+            self.index_page(url).await
+        } else {
+            listed_bare_repos(Path::new(url))
+        };
+        for name in found {
+            if is_plain_name(&name) && self.config.repos.insert(&name) {
+                tracing::info!(repo = %name, "discovered a repo on the git server");
+            }
+        }
+    }
+
+    /// The repo names on dgit's index page. Empty on any failure.
+    async fn index_page(&self, url: &str) -> Vec<String> {
+        let mut request = self.client.get(format!("{url}/"));
+        // The same credentials the clones use. dgit ignores the username.
+        if !self.config.git_token.is_empty() {
+            request = request.basic_auth("x", Some(&self.config.git_token));
+        }
+        let html = match request.send().await.and_then(|reply| reply.error_for_status()) {
+            Ok(reply) => match reply.text().await {
+                Ok(html) => html,
+                Err(error) => {
+                    tracing::warn!(%error, "cannot read the git server's index page");
+                    return Vec::new();
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, "cannot fetch the git server's index page");
+                return Vec::new();
+            }
+        };
+        dgit_index::parse(&html).into_iter().map(|repo| repo.name).collect()
     }
 
     /// Force a refresh, ignoring the debounce, and wait for it. A write path calls this
@@ -337,6 +429,29 @@ impl Mirrors {
         self.state.lock().await.entry(repo.to_owned()).or_default().last_attempt = None;
         self.fetch(repo).await
     }
+}
+
+/// The repo names in a directory of bare repos: every `<name>.git` directory in it.
+///
+/// This is what a `DGIT_URL` that is a filesystem path means — the tests use one, and
+/// so does a local setup with no dgit in front of it. An unreadable directory yields
+/// nothing, the same way an unreachable server does.
+fn listed_bare_repos(dir: &Path) -> Vec<String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(?dir, %error, "cannot list the git server's directory");
+            return Vec::new();
+        }
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            entry.file_name().to_str()?.strip_suffix(".git").map(str::to_owned)
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
