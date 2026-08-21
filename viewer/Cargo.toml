@@ -26,6 +26,8 @@ drain-iroh = ["dep:iroh", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "
 
 [dependencies]
 topcoat = "0.6"
+# dgit's index page is the repo list. One parser, shared with the CLI's `nashcode ls`.
+dgit-index = { path = "../dgit-index" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -952,6 +952,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dgit-index"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+]
+
+[[package]]
 name = "diatomic-waker"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2641,6 +2649,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
+ "dgit-index",
  "fastembed",
  "flate2",
  "futures-core",
@@ -2687,6 +2696,7 @@ dependencies = [
  "agcli",
  "anyhow",
  "base64 0.23.1",
+ "dgit-index",
  "dirs",
  "globset",
  "rand 0.10.2",

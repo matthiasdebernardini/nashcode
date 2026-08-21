@@ -2,7 +2,7 @@
 //! way dgit's `indexPage()` renders it (sections, entities, an idle-less row),
 //! saved so the parser is tested against the real markup, not a sketch of it.
 
-use nashcode_cli::index_page::parse;
+use dgit_index::parse;
 
 const FIXTURE: &str = include_str!("fixtures/index.html");
 

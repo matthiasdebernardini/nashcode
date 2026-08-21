@@ -6,17 +6,17 @@
 //!
 //! Endpoints used here (the whole admin API):
 //!
-//! | request                    | effect                                        |
-//! |----------------------------|-----------------------------------------------|
-//! | `GET /`                    | the index page, HTML (see `index_page`)       |
-//! | `PUT /<repo>/config`       | create or re-describe a repository            |
-//! | `POST /<repo>/gc`          | prune unreachable objects                     |
-//! | `DELETE /<repo>`           | delete a repository                           |
+//! | request                    | effect                                          |
+//! |----------------------------|-------------------------------------------------|
+//! | `GET /`                    | the index page, HTML (see the `dgit-index` crate) |
+//! | `PUT /<repo>/config`       | create or re-describe a repository              |
+//! | `POST /<repo>/gc`          | prune unreachable objects                       |
+//! | `DELETE /<repo>`           | delete a repository                             |
 
-use crate::index_page::Repo;
 use crate::exit::{Class, Classify, classed};
 use anyhow::{Context, Result};
 use base64::Engine;
+use dgit_index::Repo;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -212,7 +212,7 @@ impl Client {
                 format!("{} returned HTTP {}", self.base, reply.status),
             ));
         }
-        Ok(crate::index_page::parse(&reply.body))
+        Ok(dgit_index::parse(&reply.body))
     }
 
     /// `PUT /<repo>/config`. Creates the repository when it does not exist.

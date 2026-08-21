@@ -218,7 +218,7 @@ fn server_checks(p: &Profile) -> Vec<Check> {
     } else {
         // Probe against a repository that already exists when there is one, so
         // the request cannot even instantiate a new cell.
-        let existing = crate::index_page::parse(&reply.body)
+        let existing = dgit_index::parse(&reply.body)
             .into_iter()
             .next()
             .map(|r| r.name)

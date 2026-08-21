@@ -1,9 +1,11 @@
 //! Parse the repository list off dgit's index page.
 //!
-//! dgit has no JSON list endpoint — the index is HTML, so `nashcode ls` reads
-//! the HTML. The parse is deliberately loose so that a cosmetic change upstream
-//! (a class rename, an extra column, single quotes becoming double) does not
-//! break the command:
+//! dgit has no JSON list endpoint — the index is HTML, so everything that wants
+//! the repository list reads the HTML: `nashcode ls` in the CLI, and the
+//! viewer's repo discovery on every mirror poll. Both live here so there is one
+//! parse and not two. The parse is deliberately loose so that a cosmetic change
+//! upstream (a class rename, an extra column, single quotes becoming double)
+//! does not break either caller:
 //!
 //!   * scope to the listing table when one is found, otherwise the whole page;
 //!   * take each `<tr>`, and treat it as a repository row when its first cell
