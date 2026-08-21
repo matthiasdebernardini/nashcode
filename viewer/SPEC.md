@@ -21,8 +21,16 @@ Two pieces:
   its first request blocks on the clone, because there is nothing to render. All git
   questions are answered by shelling out to `git` against the mirror. Auth to dgit: basic
   auth `x:$GIT_TOKEN`.
-- **Repo discovery:** `$NASHCODE_REPOS` env var, comma-separated repo names, matching dgit
-  repo names at `$DGIT_URL/<name>.git`. (dgit has no list API we rely on.)
+- **Repo discovery:** the viewer finds repos itself. On every mirror poll cycle it
+  fetches dgit's index page (`GET $DGIT_URL/`), parses the repo names with the same
+  parser `nashcode ls` uses, and unions every plain name into its repo set; a name seen
+  for the first time gets its mirror cloned like any other repo. `$NASHCODE_REPOS`
+  (comma-separated) seeds the set and is optional; a name listed there is never dropped,
+  even when dgit stops listing it. No name is ever removed from the set. A failed index
+  fetch logs one warning and changes nothing. When `$DGIT_URL` is a filesystem path (the
+  test setup), the `*.git` directories in it are the index. Known gap: dgit hides
+  `private: true` repos from its index with or without credentials, so a private repo
+  appears only through `$NASHCODE_REPOS`.
 - **Diff rendering: `@pierre/diffs`** (npm, vanilla-JS build, Shiki-based). The Rust app
   serves unified-diff text (`git diff parent...branch` per file); the browser renders it
   with `FileDiff` from `@pierre/diffs`. Bundle the JS once at build time with esbuild;
