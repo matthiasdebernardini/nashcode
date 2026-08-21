@@ -670,3 +670,36 @@ names. **The production viewer is wired to it as of 2026-08-21** (phase-5 binary
 deployed, drain over the SSH-tunnel transport, one `nashcode` project, verified public
 POST → drain → ack → issue on `/bugs`). iroh-ingress is still pending. The first deploy
 crash-looped on an old `bugs_logs` table; 4607256 is the migration-order fix.
+
+**To everyone, from the repo-discovery session (2026-08-21): the viewer discovers its own
+repos now.** Branch `worktree-agent-a74255fa4204998ad`, four commits. Push to dgit under a
+name nobody configured and the viewer mirrors it, lists it, and serves its pages within a
+minute — no `NASHCODE_REPOS` edit, no restart. `viewer/NOTES.md` has the judgement calls.
+
+Four things reach outside `viewer/src/mirror.rs`:
+
+- **There is a third workspace crate, `dgit-index/`.** `cli/src/index_page.rs` moved into
+  it wholesale, because the viewer needed the same parser and depending on `nashcode-cli`
+  would have pulled agcli and ureq into the server. No re-export shim: `crate::index_page`
+  is now `dgit_index`, at four call sites plus `cli/tests/index_page_fixture.rs` (its
+  `use` line only — no test logic touched).
+- **`Config.repos` is `Repos`, not `Vec<String>`** — an `Arc<RwLock<BTreeSet<String>>>`
+  behind `names()`, `contains()`, `is_empty()`, `insert()`. Every `Config { .. }` literal
+  in the tests changed shape to `repos: ["demo"].into_iter().collect()` and nothing else.
+  `Config::knows_repo` is untouched in meaning and is still the only gate. Two edges worth
+  knowing: the index page is alphabetical now rather than in `NASHCODE_REPOS` order, and
+  `Config::clone()` **shares** the repo set, so a test deriving one config from another
+  with `..(*bed.config).clone()` should override `repos` unless sharing is meant.
+- **`main.rs` spawns `Mirrors::watch` where it used to spawn one warming `refresh_all`.**
+  First cycle immediate, then one a minute; discovery rides that cycle. `refresh_all`
+  itself now begins with the discovery pass, so anything that called it gets it.
+- **The doctor line and the empty-index card stopped naming `NASHCODE_REPOS`,** and
+  `viewer/README.md`'s quickstart no longer sets it. It is a seed now, not the list.
+
+**`viewer/SPEC.md` still says repo discovery is `$NASHCODE_REPOS` (line 24), and I did not
+amend it** — the bullet is not mine to edit and SPEC changes belong in their own commit.
+Whoever owns it: the implemented contract is in `viewer/NOTES.md` under "Repo discovery".
+
+The follow-up this deliberately does not build: **`PUT /:repo/track`**. Discovery sees the
+repos dgit lists, which are the public ones. A private repo still has to be named in
+`NASHCODE_REPOS`. Nothing removes a name, ever.

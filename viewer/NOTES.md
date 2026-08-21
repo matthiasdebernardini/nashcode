@@ -1903,3 +1903,53 @@ objects. Envelope retention is open.
 Errors in the digest's mute path are logged rather than swallowed, `mute::Rule::parse`'s
 doc no longer contradicts the handler that refuses an unparseable rule with a 400, and
 `crons::seconds_of` says so when it substitutes now for a stamp that will not parse.
+
+## Repo discovery
+
+SPEC's "Repo discovery" bullet says the repo list is `$NASHCODE_REPOS`, and adds "(dgit
+has no list API we rely on.)" It has no JSON list API. It does have an index page, and
+`nashcode ls` has parsed it since the CLI existed, so the viewer parses the same page on
+every mirror poll and adds what it finds. `NASHCODE_REPOS` is now a seed. **This is
+wider than the bullet, and the bullet has not been amended** — that edit belongs to
+whoever owns SPEC.md.
+
+**The parser lives in its own crate, `dgit-index/`.** `cli` already builds as a lib, so
+the viewer could have depended on it, but that would invert the layering and pull agcli,
+ureq, and a second tokio configuration into the server for one regex pass. The new crate
+carries regex and serde and nothing else. No re-export shim was left behind in `cli`: the
+four call sites and one fixture test name `dgit_index` directly.
+
+**`Config.repos` is `Arc<RwLock<BTreeSet<String>>>`,** `std::sync` and not `tokio::sync`.
+Every method on `Repos` returns owned data, so a guard cannot survive into an `.await` —
+the compiler enforces that for us, which a tokio lock would not. A poisoned lock is
+recovered rather than propagated: a panic somewhere else must not turn every repo into a
+404. `Config::knows_repo` is unchanged in meaning and is still the only gate.
+
+Two consequences of a set rather than a `Vec`:
+
+- **The index page is alphabetical now**, not in `NASHCODE_REPOS` order. Nothing asserted
+  the old order, and a discovered repo has no declared position to keep.
+- **`Config::clone()` shares the repo set**, because the `Arc` is what is cloned. In
+  production `Config` is built once; in a test that derives one config from another with
+  `..(*bed.config).clone()`, override `repos` unless sharing is what you meant.
+
+**The index fetch is authed** with the same basic auth `x:$GIT_TOKEN` the clones use.
+Anonymous would list the same public repos today, but the token is already in hand and a
+private repo is the case where it matters.
+
+**A filesystem `DGIT_URL` lists `*.git` directories** instead. That is what the tests
+point at, and what a local setup with no dgit in front of it uses; `remote_url` already
+treats it as a directory of bare repos, so discovery has to agree.
+
+**A failed index read changes nothing** — one `warn!` and the set stands. Nothing removes
+a name, ever: a repo that drops off dgit's index still has a mirror on disk and pages that
+render from it, and a server that answers a truncated list must not be able to 404 a repo
+that was working a minute ago.
+
+The cycle is `Mirrors::watch`: one pass immediately, then one a minute. It replaces the
+single warming `refresh_all` that `main.rs` used to spawn, so the poll interval is also
+the longest a pushed repo can stay invisible.
+
+**Out of scope, and wanted: `PUT /:repo/track`.** Discovery sees what dgit lists, which
+is its public repos. A private repo needs the operator to say so by name, and there is no
+door for that yet — `NASHCODE_REPOS` is the only way in. Not built here.

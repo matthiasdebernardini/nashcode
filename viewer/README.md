@@ -37,9 +37,11 @@ against `git clone --mirror` copies on local disk.
 git clone <this repo> && cd nashcode
 DGIT_URL=https://git.your-tailnet.example \
 GIT_TOKEN=your-dgit-token \
-NASHCODE_REPOS=alpha,beta \
 cargo run
 ```
+
+There is no repo list to write. The viewer reads the git server's index page every
+minute and mirrors what it finds, so a `git push` to a new name shows up within a minute.
 
 `cargo build` on a fresh clone produces a runnable server. The build script runs `npm ci`
 and esbuild, then embeds both bundles in the binary, so there is no separate asset step and
@@ -48,10 +50,10 @@ nothing to copy at deploy time.
 To try it without a dgit server, point `DGIT_URL` at a directory of bare repos:
 
 ```sh
-DGIT_URL=/srv/git NASHCODE_REPOS=demo cargo run
+DGIT_URL=/srv/git cargo run
 ```
 
-That reads `/srv/git/demo.git`.
+That lists the `*.git` directories in `/srv/git` and mirrors each one.
 
 ## Configuration
 
@@ -61,7 +63,7 @@ Environment only. Nothing about your deployment lives in the source.
 |---|---|---|
 | `DGIT_URL` | *(none)* | Base URL of the dgit server. Repo `x` is `$DGIT_URL/x.git`. A filesystem path works too. |
 | `GIT_TOKEN` | empty | Push token, sent as basic auth `x:$GIT_TOKEN`. Reads are anonymous. Empty means pushes are anonymous. |
-| `NASHCODE_REPOS` | empty | Comma-separated repo names. dgit has no list API, so you name them. |
+| `NASHCODE_REPOS` | empty | Comma-separated repo names to start with. Optional: the viewer discovers the rest from the git server. A name here is never dropped. |
 | `NASHCODE_MIRRORS` | `~/mirrors` | Where the mirror clones live. |
 | `NASHCODE_BIND` | `127.0.0.1:8090` | Listen address. Keep it on loopback. |
 | `NASHCODE_DB` | `$NASHCODE_MIRRORS/nashcode.db` | SQLite file: comments, CI runs, audit trail. |
@@ -317,7 +319,6 @@ After=network-online.target
 [Service]
 ExecStart=/usr/local/bin/nashcode-viewer
 Environment=DGIT_URL=https://git.your-tailnet.example
-Environment=NASHCODE_REPOS=alpha,beta
 Environment=NASHCODE_MIRRORS=/var/lib/nashcode/mirrors
 Environment=NASHCODE_BIND=127.0.0.1:8090
 EnvironmentFile=/etc/nashcode.env
