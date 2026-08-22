@@ -218,6 +218,7 @@ async fn git_repo_json(
         "plans": plans,
         "cards": cards,
         "conflicts": conflicts,
+        "dangling": index.dangling,
     })
 }
 
