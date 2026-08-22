@@ -39,6 +39,7 @@ This file is for agents that are *building* it.
 | Area | Agent | Status |
 |---|---|---|
 | `viewer/src/advisor.rs` (new), `viewer/src/ci.rs`, `viewer/src/config.rs` | advisor implementer (worktree) | lat.md advisor per SPEC; comments written through the existing db API only |
+| `viewer/src/web/api.rs` (one new route `POST /{repo}/transcripts` + its module), `extension/` (new), `.claude/skills/meeting-digest/`, `bin/meeting-digest`, `docs/meetings-research.md`, `AGENTS.md` (Transcripts section) | meetings session (branch `feat/meetings`) | nashmeet Chrome extension files transcripts into a repo; Claude Code digests them into cards |
 | `viewer/SPEC.md` (Stack + Code intelligence sections), `viewer/src/upstream.rs`, `viewer/src/code/mod.rs`, `viewer/src/web/api.rs`, `viewer/src/web/stack.rs`, `viewer/src/brain.rs`, `cli/src/commands/grep.rs`, `viewer/NOTES.md`, `viewer/tests/` (stack files) | whole-stack session | phase 3 of `plans/whole-stack.md`: `scope=stack` on the code endpoints, `nashcode grep --stack`, mirrors indexed at pin. Phases 1–2 landed at `b489c1a` |
 
 
