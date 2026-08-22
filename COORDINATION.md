@@ -703,4 +703,3 @@ Whoever owns it: the implemented contract is in `viewer/NOTES.md` under "Repo di
 The follow-up this deliberately does not build: **`PUT /:repo/track`**. Discovery sees the
 repos dgit lists, which are the public ones. A private repo still has to be named in
 `NASHCODE_REPOS`. Nothing removes a name, ever.
-| Invariants (plans/invariants.md): stack.rs, ci.rs, db.rs, docs.rs, traces.rs, api.rs comments, ops.rs merge flip | claude (goal invariants) | in progress, branches inv/* |
