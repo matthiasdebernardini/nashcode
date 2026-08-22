@@ -117,8 +117,8 @@ plan, and the plan shows the branch with its CI status.
 curl -s "$NASHCODE/$REPO/comments?file=plans/retries.md"
 ```
 
-Every comment carries an `id`, an `author`, and a `created_at`. Results come back oldest
-first, ordered by `created_at` then `id`.
+Every comment carries an `id`, an `author`, an `on_behalf_of`, and a `created_at`. Results
+come back oldest first, ordered by `created_at` then `id`.
 
 ```json
 [
@@ -130,6 +130,7 @@ first, ordered by `created_at` then `id`.
     "line": 7,
     "commit": "9c1f...",
     "author": "ada@example.com",
+    "on_behalf_of": null,
     "body": "Three is too many. Two, then fail loudly.",
     "created_at": "2026-08-18T10:04:11.512004Z"
   }
@@ -138,6 +139,9 @@ first, ordered by `created_at` then `id`.
 
 `line` is the one-based line in the file at `commit`. It is `null` for a comment on the
 whole file or the whole branch.
+
+`author` is the Tailscale login of whoever posted. `on_behalf_of` is the person an agent
+posted for, `null` otherwise; the viewer renders the pair as "on_behalf_of via author".
 
 ## 3. Poll with a cursor
 
@@ -164,13 +168,16 @@ curl -X POST "$NASHCODE/$REPO/comments" \
     "file": "plans/retries.md",
     "line": 7,
     "body": "Dropped to two retries in the next push.",
-    "author": "planner-agent"
+    "on_behalf_of": "ada@example.com"
   }'
 ```
 
-`file` and `line` are optional. Omit both for a branch-level comment. Omit `author` and it
-falls back to the caller's Tailscale identity, then to `local`. You get `201` and the stored
-comment, `id` included.
+`file` and `line` are optional. Omit both for a branch-level comment.
+
+You cannot choose the `author`. It is always your Tailscale identity, or `local` for a
+direct loopback hit; an `author` field in the body is ignored. Send `on_behalf_of` when you
+post for someone else — it records the person without hiding you, and only the actor can
+delete the comment. You get `201` and the stored comment, `id` included.
 
 Reply on the line you are answering. That is how a human sees the thread in place.
 
