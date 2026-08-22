@@ -48,6 +48,9 @@ pub struct Refs {
     pub plan: Option<String>,
     /// `tasks: [tasks/a.md, ...]` — the cards this plan is broken into.
     pub tasks: Vec<String>,
+    /// `blocks: [tasks/b.md, ...]` — the cards this one blocks. The edge points the
+    /// way the work waits: `b.md` cannot start until this document is `done`.
+    pub blocks: Vec<String>,
 }
 
 /// A declared ref whose target is not there: a `branch:` naming no branch, or a
@@ -59,7 +62,7 @@ pub struct Refs {
 pub struct Dangling {
     /// The document that declares the ref.
     pub from: String,
-    /// Which front-matter key it came from: `branch`, `plan`, or `tasks`.
+    /// Which front-matter key it came from: `branch`, `plan`, `tasks`, or `blocks`.
     pub key: String,
     /// The branch name or path that resolves to nothing.
     pub target: String,
@@ -115,9 +118,11 @@ struct FrontMatter {
     plan: Option<String>,
     #[serde(default)]
     tasks: Option<Tasks>,
+    #[serde(default)]
+    blocks: Option<Tasks>,
 }
 
-/// `tasks:` accepts one path or a list of them.
+/// `tasks:` and `blocks:` accept one path or a list of them.
 #[derive(Debug, serde::Deserialize)]
 #[serde(untagged)]
 enum Tasks {
@@ -237,6 +242,7 @@ pub fn parse_document(path: &str, source: &str) -> Document {
             branch: matter.branch.clone().filter(|b| !b.trim().is_empty()),
             plan: matter.plan.clone().filter(|p| !p.trim().is_empty()),
             tasks: matter.tasks.map(Tasks::into_vec).unwrap_or_default(),
+            blocks: matter.blocks.map(Tasks::into_vec).unwrap_or_default(),
         },
         summary: first_paragraph(body),
         body: body.to_owned(),
@@ -447,6 +453,27 @@ impl DocIndex {
             })
     }
 
+    /// The documents that block `path`: the ones naming it in `blocks:`.
+    pub fn blockers_of(&self, path: &str) -> Vec<&Document> {
+        self.documents
+            .values()
+            .filter(|d| d.refs.blocks.iter().any(|target| target == path))
+            .collect()
+    }
+
+    /// The cards an agent may start: `todo`, with every blocker `done`.
+    ///
+    /// A quarantined blocker is not `done`, so a card behind a broken one stays
+    /// unready — the same rule the merge flip follows, and the reason a `blocks:`
+    /// cycle quarantines every card on it.
+    pub fn ready(&self) -> Vec<&Document> {
+        self.cards()
+            .into_iter()
+            .filter(|card| card.column() == "todo")
+            .filter(|card| self.blockers_of(&card.path).iter().all(|b| b.column() == "done"))
+            .collect()
+    }
+
     /// Cards and plans that point at this plan, in either direction.
     pub fn backlinks_to(&self, path: &str) -> Vec<&Document> {
         self.referencing_plan
@@ -523,6 +550,70 @@ pub fn conflict_kind(paths: &[String]) -> &'static str {
     }
 }
 
+/// Every document that sits on a `blocks:` cycle, mapped to the cycle it sits on.
+///
+/// Depth-first with a colour per node, the way Bugzilla checks its dependency closure
+/// before it accepts a write: an edge back into the path being walked is a cycle, and
+/// every document from that node to the current one is on it. Edges to a path no
+/// document has are left out — that is the `dangling` mechanism's report, not this one.
+fn blocks_cycles(documents: &BTreeMap<String, Document>) -> BTreeMap<String, String> {
+    const WHITE: u8 = 0;
+    const GREY: u8 = 1;
+    const BLACK: u8 = 2;
+
+    let edges = |path: &str| -> Vec<&str> {
+        documents
+            .get(path)
+            .map(|d| {
+                d.refs
+                    .blocks
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|target| documents.contains_key(*target))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut colour: HashMap<&str, u8> = HashMap::new();
+    let mut cycles: BTreeMap<String, String> = BTreeMap::new();
+    for root in documents.keys() {
+        if colour.get(root.as_str()).copied().unwrap_or(WHITE) != WHITE {
+            continue;
+        }
+        colour.insert(root.as_str(), GREY);
+        // An explicit stack, so a long chain of cards cannot overflow the real one.
+        let mut stack: Vec<(&str, usize)> = vec![(root.as_str(), 0)];
+        while let Some(&(node, next_edge)) = stack.last() {
+            let outgoing = edges(node);
+            let Some(&target) = outgoing.get(next_edge) else {
+                colour.insert(node, BLACK);
+                stack.pop();
+                continue;
+            };
+            stack.last_mut().expect("the stack has the node we just read").1 += 1;
+            match colour.get(target).copied().unwrap_or(WHITE) {
+                WHITE => {
+                    colour.insert(target, GREY);
+                    stack.push((target, 0));
+                }
+                GREY => {
+                    let start = stack.iter().position(|(n, _)| *n == target).unwrap_or(0);
+                    let loop_: Vec<&str> = stack[start..].iter().map(|(n, _)| *n).collect();
+                    let spelled: Vec<&str> =
+                        loop_.iter().copied().chain(std::iter::once(target)).collect();
+                    let message = format!("blocks cycle: {}", spelled.join(" -> "));
+                    for member in loop_ {
+                        cycles.entry(member.to_owned()).or_insert_with(|| message.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    cycles
+}
+
 /// Read every plan and card in the tree at `commit` and derive the back-links.
 pub async fn scan(repo: &Repo, commit: &str) -> GitResult<DocIndex> {
     let all_paths: BTreeSet<String> = repo.list_files(commit, "").await?.into_iter().collect();
@@ -540,6 +631,17 @@ pub async fn scan(repo: &Repo, commit: &str) -> GitResult<DocIndex> {
         let Some(bytes) = repo.show_file(commit, path).await? else { continue };
         let source = String::from_utf8_lossy(&bytes);
         documents.insert(path.clone(), parse_document(path, &source));
+    }
+
+    // A `blocks:` cycle makes "ready" unanswerable for every card on it, so each one is
+    // quarantined into `needs-attention` with the loop written out. A card already
+    // quarantined keeps the reason it had: the parse failure is the first thing to fix.
+    for (path, message) in blocks_cycles(&documents) {
+        if let Some(document) = documents.get_mut(&path)
+            && document.front_matter_error.is_none()
+        {
+            document.front_matter_error = Some(message);
+        }
     }
 
     let mut by_branch: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -608,6 +710,11 @@ pub async fn scan(repo: &Repo, commit: &str) -> GitResult<DocIndex> {
         for task in &document.refs.tasks {
             if !all_paths.contains(task) {
                 note("tasks", task);
+            }
+        }
+        for blocked in &document.refs.blocks {
+            if !all_paths.contains(blocked) {
+                note("blocks", blocked);
             }
         }
     }

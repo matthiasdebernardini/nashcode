@@ -220,6 +220,21 @@ Implement the two-retry policy from the plan.
   becomes its own column.
 - `title` defaults to the first heading, then to the filename.
 - `branch` and `plan` build the links.
+- `blocks: [tasks/b.md, ...]` says this card blocks those: `b.md` cannot start until this
+  one is `done`. One path or a list.
+
+A `todo` card is **ready** when every card that blocks it is `done`. `GET /brain` lists
+the ready paths per repo, `/{repo}/board?ready=1` narrows the todo column to them, and
+`nashcode ready [<repo>]` prints them one row apiece.
+
+A `blocks:` cycle is quarantined at ingest: every card on the loop lands in
+`needs-attention` with `blocks cycle: tasks/a.md -> tasks/b.md -> tasks/a.md`, because
+none of them can ever be ready. A `blocks:` path no file answers to is a dangling ref,
+reported with the others.
+
+Take a ready card with `nashcode claim tasks/x.md`: it writes `status: doing` and
+`assignee: <your user.name>`, commits that one file, and pushes. Two agents reading the
+same ready list then race on the push, not on the file.
 
 Move a card by rewriting its `status` and pushing:
 

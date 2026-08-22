@@ -11,7 +11,7 @@
 //! has never heard of celld, so the root tree explains the architecture before
 //! it lists commands.
 
-use crate::commands::{Ctx, brain, code, doctor, grep, invite, plan, profiles, repo, setup};
+use crate::commands::{Ctx, brain, card, code, doctor, grep, invite, plan, profiles, repo, setup};
 use crate::exit::{Class, class_of};
 use crate::output::Out;
 use agcli::{AgentCli, Command, CommandError, CommandOutput, CommandRequest, ExitCode, NextAction};
@@ -535,6 +535,16 @@ pub struct BrainArgs {
 }
 
 #[derive(Debug, Default)]
+pub struct ReadyArgs {
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct ClaimArgs {
+    pub file: String,
+}
+
+#[derive(Debug, Default)]
 pub struct CommentsArgs {
     pub file: String,
     pub branch: Option<String>,
@@ -633,6 +643,8 @@ pub fn build() -> AgentCli {
         .command(index_command())
         .command(comments_command())
         .command(brain_command())
+        .command(ready_command())
+        .command(claim_command())
         .command(grep_command())
         .skill()
         .doctor_with(
@@ -1176,6 +1188,68 @@ fn brain_command() -> Command {
                 Ok(CommandOutput::new(brain::run(&ctx, &args)))
             })
         })
+}
+
+fn ready_command() -> Command {
+    Command::new(
+        "ready",
+        "List the cards you may start now.\n\n\
+         A card under `tasks/` is ready when it is `todo` and every card that names it \
+         in `blocks:` is `done`. The viewer derives that from the tree it mirrors, so \
+         this reads `/brain` rather than your working copy: a blocker somebody else \
+         finished and pushed counts the moment it lands.\n\n\
+         With no argument it asks about the repository `origin` points at, or about \
+         every repository when you are not in one.",
+    )
+    .usage("nashcode ready [<repo>] [--profile <name>]")
+    .handler(|req, _ctx| {
+        let ctx = context(req);
+        let args = ReadyArgs {
+            repo: req.arg(0).map(str::to_string),
+        };
+        Box::pin(async move {
+            let rows = card::ready(&ctx, &args)
+                .map_err(|e| oops(e, "nashcode setup --viewer   # ready lives in the viewer"))?;
+            let first = rows
+                .first()
+                .and_then(|row| row["path"].as_str())
+                .unwrap_or("tasks/<card>.md")
+                .to_string();
+            Ok(CommandOutput::list(rows).next_action(NextAction::new(
+                format!("nashcode claim {first}"),
+                "Take the card: assignee and `doing` in one commit",
+            )))
+        })
+    })
+}
+
+fn claim_command() -> Command {
+    Command::new(
+        "claim",
+        "Take a card: `assignee: <you>` and `status: doing`, committed and pushed.\n\n\
+         One write, one commit of that one file, one push, so two agents reading the \
+         same ready list race on the push instead of on the file. The assignee is \
+         whatever this working copy commits as (`user.name`, then $USER). Nothing else \
+         in the card is touched.",
+    )
+    .usage("nashcode claim <tasks/x.md> [--profile <name>]")
+    .handler(|req, _ctx| {
+        let ctx = context(req);
+        let file = req.arg(0).map(str::to_string);
+        let args = ClaimArgs {
+            file: file.clone().unwrap_or_default(),
+        };
+        Box::pin(async move {
+            let Some(file) = file else {
+                return Err(misuse("no card named", "nashcode claim tasks/<card>.md"));
+            };
+            let value = card::claim(&ctx, &args).map_err(|e| oops(e, "nashcode ready"))?;
+            Ok(CommandOutput::new(value).next_action(NextAction::new(
+                format!("nashcode comments {file}"),
+                "Read anything left on the card",
+            )))
+        })
+    })
 }
 
 fn grep_command() -> Command {
