@@ -1839,7 +1839,10 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
                 let stale_anchor = comment.line.is_some()
                     && comment.commit != node.tip
                     && repo.path_changed(&comment.commit, &node.tip, file).await.unwrap_or(false);
-                if stale_anchor {
+                // The file itself is gone: there is no line and no diff to sit in, so
+                // the comment degrades to the outdated group rather than to nothing.
+                let file_gone = repo.show_file(&node.tip, file).await.ok().flatten().is_none();
+                if stale_anchor || file_gone {
                     outdated.push(comment);
                 } else {
                     by_file.entry(file.clone()).or_default().push(comment);
@@ -1853,6 +1856,17 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
             other_files.push((file.clone(), list.clone()));
         }
     }
+
+    // Comments whose branch was deleted. No branch page of their own is left, so the
+    // default branch — the one everything merges into — is where they land.
+    let orphaned: Vec<Comment> = if is_default {
+        app(cx)
+            .db
+            .comments(&CommentFilter { repo: name.clone(), orphaned: true, ..Default::default() })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     // Diff payloads for @pierre/diffs, annotations included.
     let mut diff_blobs: Vec<(String, String, String, String)> = Vec::new(); // (mount, path, status, json)
@@ -2076,6 +2090,24 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
                         let n2 = &name;
                         for comment in outdated {
                             comment_block(key: comment.id, repo: n2.clone(), comment: comment, outdated: true)
+                        }
+                    </div>
+                </details>
+            }
+
+            if !orphaned.is_empty() {
+                <details class="mt-3">
+                    <summary class="color-fg-muted">(format!("{} orphaned comment(s)", orphaned.len()))</summary>
+                    <div class="Box mt-2">
+                        let n3 = &name;
+                        for comment in orphaned {
+                            <div key=(format!("orphan-{}", comment.id)) class="Box-row color-fg-muted text-small">
+                                (format!("deleted branch {}", comment.branch))
+                                if let Some(file) = &comment.file {
+                                    " · " (file.clone())
+                                }
+                            </div>
+                            comment_block(key: format!("o-{}", comment.id), repo: n3.clone(), comment: comment)
                         }
                     </div>
                 </details>

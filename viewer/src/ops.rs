@@ -352,6 +352,9 @@ impl Ops {
         }
         scratch.push(&self.remote(repo_name), &leases, &refspecs).await?;
         self.mirrors.refresh_now(repo_name).await;
+        if delete_branch && branch != default_branch {
+            self.orphan_comments(repo_name, branch);
+        }
 
         let mut detail = if ff {
             format!("fast-forwarded {parent} to {branch}")
@@ -560,6 +563,15 @@ impl Ops {
         Ok(RestackOutcome { branch: branch.to_owned(), rebased })
     }
 
+    /// The branch is gone; its comments are not. Marking them orphaned keeps every row
+    /// and moves them to the default branch page, where they stay readable. The push
+    /// already happened, so a failure here is loud rather than fatal.
+    fn orphan_comments(&self, repo_name: &str, branch: &str) {
+        if let Err(error) = self.db.orphan_comments(repo_name, branch) {
+            tracing::error!(repo_name, branch, %error, "branch deleted but its comments were not orphaned");
+        }
+    }
+
     /// Delete a branch on dgit (the post-merge offer). The default branch is refused.
     pub async fn delete_branch(&self, repo_name: &str, branch: &str, actor: &Actor) -> OpResult<()> {
         let mirror = self.mirrors.repo(repo_name);
@@ -587,6 +599,7 @@ impl Ops {
             return Err(OpError::Git(format!("delete rejected: {}", out.stderr.trim())));
         }
         self.mirrors.refresh_now(repo_name).await;
+        self.orphan_comments(repo_name, branch);
         if let Err(error) = self.db.record_audit(NewAudit {
             repo: repo_name.to_owned(),
             actor: actor.login.clone(),

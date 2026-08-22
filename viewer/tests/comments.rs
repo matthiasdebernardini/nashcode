@@ -384,3 +384,142 @@ async fn the_comment_author_is_the_actor_not_the_payload() {
         "byline missing from the page: {page}"
     );
 }
+
+#[tokio::test]
+async fn a_comment_anchor_must_exist_in_the_commit_it_names() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+
+    // A file that is in no commit on this branch.
+    let (status, body) = post_json(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({ "branch": "part-1", "file": "src/ghost.txt", "body": "nowhere" }),
+    )
+    .await;
+    assert_eq!(status, 400, "a missing file must be a client error: {body}");
+    assert!(body.contains("src/ghost.txt"), "the error must name the file: {body}");
+
+    // A file that exists, but on another branch only.
+    let (status, body) = post_json(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({ "branch": "part-1", "file": "src/extra.txt", "body": "wrong branch" }),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+
+    // `src/app.txt` is two lines on part-1; 9999 is past the end.
+    let (status, body) = post_json(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({
+            "branch": "part-1",
+            "file": "src/app.txt",
+            "line": 9999,
+            "body": "past the end",
+        }),
+    )
+    .await;
+    assert_eq!(status, 400, "a line past EOF must be a client error: {body}");
+    assert!(body.contains("9999"), "the error must name the line: {body}");
+
+    // The last real line is in bounds and stores.
+    let (status, body) = post_json(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({
+            "branch": "part-1",
+            "file": "src/app.txt",
+            "line": 2,
+            "body": "the last line",
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    // Nothing out of bounds reached storage.
+    let (_, list) = get(&bed.router, "/demo/comments").await;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&list).expect("json list");
+    assert_eq!(rows.len(), 1, "only the in-bounds comment was kept: {list}");
+    assert_eq!(rows[0]["body"], "the last line");
+}
+
+#[tokio::test]
+async fn deleting_a_branch_orphans_its_comments_instead_of_stranding_them() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    let (status, body) = post_json(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({
+            "branch": "part-2",
+            "file": "src/extra.txt",
+            "line": 1,
+            "body": "keep me after the branch goes",
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    bed.app
+        .ops
+        .merge("demo", "part-2", &bed.actor(), false, true)
+        .await
+        .expect("merge and delete");
+
+    // The row survived, marked with when its branch went.
+    let (_, list) = get(&bed.router, "/demo/comments").await;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&list).expect("json list");
+    assert_eq!(rows.len(), 1, "the comment must outlive its branch: {list}");
+    assert!(
+        rows[0]["orphaned_at"].as_str().is_some_and(|when| !when.is_empty()),
+        "orphaned_at was never set: {list}"
+    );
+
+    // And it is readable again, in a collapsed group on the default branch.
+    let (status, page) = get(&bed.router, "/demo/main").await;
+    assert_eq!(status, 200);
+    assert!(page.contains("orphaned comment(s)"), "no orphaned group: {page}");
+    assert!(page.contains("keep me after the branch goes"), "the body is gone: {page}");
+    assert!(page.contains("deleted branch part-2"), "the old branch is not named: {page}");
+}
+
+#[tokio::test]
+async fn a_comment_on_a_file_that_is_gone_degrades_to_outdated() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    for comment in [
+        serde_json::json!({
+            "branch": "part-1",
+            "file": "src/app.txt",
+            "line": 2,
+            "body": "anchored to a line",
+        }),
+        serde_json::json!({
+            "branch": "part-1",
+            "file": "src/app.txt",
+            "body": "about the whole file",
+        }),
+    ] {
+        let (status, body) = post_json(&bed.router, "/demo/comments", comment).await;
+        assert_eq!(status, 201, "{body}");
+    }
+
+    // The branch drops the file both comments hang off.
+    let work = Work::clone_from(&bed.remote_root().join("demo.git"));
+    common::git(&work.dir, &["checkout", "part-1"]);
+    common::git(&work.dir, &["rm", "src/app.txt"]);
+    work.commit_all("drop the file");
+    work.push("part-1");
+    bed.mirrors.refresh_now("demo").await;
+
+    let (status, page) = get(&bed.router, "/demo/part-1").await;
+    assert_eq!(status, 200);
+    assert!(page.contains("anchored to a line"), "the line comment vanished: {page}");
+    assert!(page.contains("about the whole file"), "the file comment vanished: {page}");
+    // Both degrade to the same rung: file-level, labelled outdated.
+    assert!(page.contains("2 outdated comment(s)"), "a gone file must outdate both: {page}");
+    assert!(
+        !page.contains("Comments on other files"),
+        "a comment on a deleted file must not render as current: {page}"
+    );
+    assert!(!page.contains("\"lineNumber\":2"), "a gone file keeps no line anchor: {page}");
+}

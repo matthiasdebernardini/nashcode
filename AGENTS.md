@@ -132,10 +132,13 @@ come back oldest first, ordered by `created_at` then `id`.
     "author": "ada@example.com",
     "on_behalf_of": null,
     "body": "Three is too many. Two, then fail loudly.",
-    "created_at": "2026-08-18T10:04:11.512004Z"
+    "created_at": "2026-08-18T10:04:11.512004Z",
+    "orphaned_at": null
   }
 ]
 ```
+
+`orphaned_at` is when the comment's branch was deleted, `null` while the branch is alive.
 
 `line` is the one-based line in the file at `commit`. It is `null` for a comment on the
 whole file or the whole branch.
@@ -174,6 +177,11 @@ curl -X POST "$NASHCODE/$REPO/comments" \
 
 `file` and `line` are optional. Omit both for a branch-level comment.
 
+An anchor has to point at something real, or you get a `400`: `file` must be in the branch
+at its current tip, and `line` must be a line that file has. A `line` without a `file`, a
+`line` below 1, an unknown `branch`, and an empty `body` are `400` too. The check keeps a
+comment from being stored where it can never render.
+
 You cannot choose the `author`. It is always your Tailscale identity, or `local` for a
 direct loopback hit; an `author` field in the body is ignored. Send `on_behalf_of` when you
 post for someone else — it records the person without hiding you, and only the actor can
@@ -197,7 +205,12 @@ being lost, and the `next_action` is the `comments --since=<now>` call to poll w
 
 Edit the plan, commit, push. The comments stay put. Ones anchored to a line whose file has
 since changed move to an "outdated" section, so a human can tell what you have already
-addressed.
+addressed. So do comments on a file the branch has deleted: they degrade to file-level and
+outdated, they are never dropped.
+
+Deleting a branch does not delete its comments either. Each one gets an `orphaned_at`
+timestamp and moves to an "orphaned comments" group on the default branch page, named with
+the branch it came from.
 
 ## Cards
 

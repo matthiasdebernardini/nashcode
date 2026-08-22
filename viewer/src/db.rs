@@ -84,6 +84,10 @@ pub struct Comment {
     pub on_behalf_of: Option<String>,
     pub body: String,
     pub created_at: String,
+    /// When the branch this comment hangs off was deleted. A deleted branch takes
+    /// its comments out of reach, so they degrade to orphaned rather than vanish.
+    #[serde(default)]
+    pub orphaned_at: Option<String>,
 }
 
 impl Comment {
@@ -278,6 +282,7 @@ impl Db {
                 on_behalf_of: new.on_behalf_of.clone(),
                 body: new.body.clone(),
                 created_at: created_at.clone(),
+                orphaned_at: None,
             })
         })
     }
@@ -290,7 +295,7 @@ impl Db {
         self.with(|conn| {
             let mut sql = String::from(
                 "SELECT id, repo, branch, file, line, commit_id, author, on_behalf_of,
-                        body, created_at
+                        body, created_at, orphaned_at
                  FROM comments WHERE repo = ?1",
             );
             let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(filter.repo.clone())];
@@ -306,6 +311,9 @@ impl Db {
             if let Some(since) = &filter.since {
                 args.push(Box::new(since.clone()));
                 sql.push_str(&format!(" AND created_at > ?{}", args.len()));
+            }
+            if filter.orphaned {
+                sql.push_str(" AND orphaned_at IS NOT NULL");
             }
             sql.push_str(" ORDER BY created_at, id");
 
@@ -324,6 +332,7 @@ impl Db {
                         on_behalf_of: row.get(7)?,
                         body: row.get(8)?,
                         created_at: row.get(9)?,
+                        orphaned_at: row.get(10)?,
                     })
                 })?
                 .collect::<DbResult<Vec<_>>>()?;
@@ -339,6 +348,19 @@ impl Db {
                 params![id, repo, author],
             )?;
             Ok(changed > 0)
+        })
+    }
+
+    /// Mark a deleted branch's comments orphaned. Deleting the branch would otherwise
+    /// leave them on a page nobody can reach; this keeps every row and lets the
+    /// default branch show them. Returns how many rows changed.
+    pub fn orphan_comments(&self, repo: &str, branch: &str) -> DbResult<usize> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE comments SET orphaned_at = ?3
+                 WHERE repo = ?1 AND branch = ?2 AND orphaned_at IS NULL",
+                params![repo, branch, now()],
+            )
         })
     }
 
@@ -1227,6 +1249,8 @@ pub struct CommentFilter {
     pub file: Option<String>,
     /// Canonical timestamp; only strictly later comments come back.
     pub since: Option<String>,
+    /// Only comments whose branch was deleted.
+    pub orphaned: bool,
 }
 
 /// A trace event on its way in.
@@ -1468,6 +1492,7 @@ pub fn add_columns(conn: &Connection, wanted: &[(&str, &str, &str)]) -> DbResult
 /// what an abandoned run is.
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("comments", "on_behalf_of", "TEXT"),
+    ("comments", "orphaned_at", "TEXT"),
     ("ci_runs", "updated_at", "TEXT NOT NULL DEFAULT ''"),
     ("ci_runs", "note", "TEXT NOT NULL DEFAULT ''"),
 ];
@@ -1483,7 +1508,9 @@ CREATE TABLE IF NOT EXISTS comments (
     author     TEXT NOT NULL,
     on_behalf_of TEXT,
     body       TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- Set when the branch is deleted; the row stays, out of reach but not lost.
+    orphaned_at TEXT
 );
 CREATE INDEX IF NOT EXISTS comments_lookup ON comments (repo, branch, file, created_at);
 CREATE INDEX IF NOT EXISTS comments_cursor ON comments (repo, created_at, id);

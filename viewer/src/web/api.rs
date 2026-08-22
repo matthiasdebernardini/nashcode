@@ -85,6 +85,7 @@ async fn comments_get(cx: &Cx) -> Result<Response> {
         branch: query.branch.clone(),
         file: query.file.clone(),
         since,
+        ..Default::default()
     };
     let comments = app(cx).db.comments(&filter)?;
     let body = serde_json::to_string(&comments)?;
@@ -151,7 +152,8 @@ async fn comments_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result
     let Some(text) = input.body.clone().filter(|b| !b.trim().is_empty()) else {
         return Err(bad_request("body is required").into());
     };
-    if input.line.is_some() && input.file.is_none() {
+    let file = input.file.clone().map(|f| f.trim().to_owned()).filter(|f| !f.is_empty());
+    if input.line.is_some() && file.is_none() {
         return Err(bad_request("line needs a file").into());
     }
     if input.line.is_some_and(|line| line < 1) {
@@ -167,6 +169,25 @@ async fn comments_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result
         Err(_) => return Err(bad_request(format!("unknown branch {branch}")).into()),
     };
 
+    // An anchor has to point at something that is there. A file the anchor commit does
+    // not have, or a line past its end, would store a comment that can never render
+    // where it claims to be. With no anchor commit (mirror down) there is nothing to
+    // check against, so the comment is taken as-is.
+    if let Some(path) = file.as_deref().filter(|_| !commit.is_empty()) {
+        let Some(bytes) = app(cx).mirrors.repo(&name).show_file(&commit, path).await? else {
+            return Err(bad_request(format!("{path} is not in {branch} at {commit}")).into());
+        };
+        if let Some(line) = input.line {
+            let lines = String::from_utf8_lossy(&bytes).lines().count() as i64;
+            if line > lines {
+                return Err(bad_request(format!(
+                    "line {line} is past the end of {path} ({lines} line(s)) at {commit}"
+                ))
+                .into());
+            }
+        }
+    }
+
     let author = actor(cx).login;
     let on_behalf_of = input
         .on_behalf_of
@@ -180,7 +201,7 @@ async fn comments_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result
         .add_comment(NewComment {
             repo: name.clone(),
             branch,
-            file: input.file.clone().filter(|f| !f.trim().is_empty()),
+            file,
             line: input.line,
             commit,
             author,
