@@ -29,6 +29,16 @@ pub const NEEDS_ATTENTION: &str = "needs-attention";
 /// The canonical columns, in order. Anything else sorts after them alphabetically.
 pub const CANONICAL_STATUSES: [&str; 3] = ["todo", "doing", "done"];
 
+/// The status alphabet, one rule for both doors: a git push (via [`parse_document`])
+/// and the board's move endpoint. The caller trims and lowercases first;
+/// [`NEEDS_ATTENTION`] is reserved for the parser, so a card can never claim it.
+pub fn valid_status(status: &str) -> bool {
+    !status.is_empty()
+        && status.len() <= 40
+        && status != NEEDS_ATTENTION
+        && status.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// The refs a document declares about itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Refs {
@@ -192,9 +202,14 @@ pub fn parse_document(path: &str, source: &str) -> Document {
         None
     };
 
+    // A status outside the alphabet is as broken as unreadable front matter: quarantine
+    // it rather than let a pushed file invent a column or squat on `needs-attention`.
     let error = match (&error, is_card, &matter.status) {
         (Some(_), _, _) => error,
         (None, true, None) => Some("card has no `status` in its front matter".to_owned()),
+        (None, true, Some(_)) if !status.as_deref().is_some_and(valid_status) => {
+            Some("invalid status".to_owned())
+        }
         _ => None,
     };
 

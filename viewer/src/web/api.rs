@@ -280,10 +280,7 @@ async fn board_move(cx: &Cx, Json(input): Json<MoveIn>) -> Result<Response> {
         return Err(bad_request("file must live under tasks/").into());
     }
     let status = input.status.trim().to_lowercase();
-    let ok_status = !status.is_empty()
-        && status.len() <= 40
-        && status.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if !ok_status || status == crate::docs::NEEDS_ATTENTION {
+    if !crate::docs::valid_status(&status) {
         return Err(bad_request("not a valid status").into());
     }
 
