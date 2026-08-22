@@ -189,7 +189,7 @@ pub async fn comment_block(
         <div class="Box-row" id=(format!("comment-{}", comment.id))>
             <div class="d-flex flex-items-center gap-2 mb-1">
                 <i class="ph ph-chat-circle color-fg-muted"></i>
-                <strong class="nashcode-display">(comment.author.clone())</strong>
+                <strong class="nashcode-display">(comment.display_author())</strong>
                 <span class="color-fg-muted text-small">(comment.created_at.clone())</span>
                 if let Some(line) = comment.line {
                     <span class="Label Label--secondary">(format!("line {line}"))</span>

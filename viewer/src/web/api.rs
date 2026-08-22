@@ -104,7 +104,9 @@ struct CommentIn {
     #[serde(default, deserialize_with = "lenient_i64")]
     line: Option<i64>,
     body: Option<String>,
-    author: Option<String>,
+    /// Who an agent is posting for. The actor stays the authenticated login; this
+    /// only adds the person behind it. A client `author` field is ignored.
+    on_behalf_of: Option<String>,
 }
 
 /// Accept `12`, `"12"`, and `""` (an empty form field) for the line number.
@@ -127,8 +129,10 @@ where
 }
 
 /// `POST /{repo}/comments` — the public write side. `file`/`line` optional (omit both
-/// for a PR-level comment); `author` falls back to `Tailscale-User-Login`, then
-/// `local`. Responds 201 with the stored comment.
+/// for a PR-level comment). The author is always the authenticated actor
+/// (`Tailscale-User-Login`, else `local`); a client-supplied `author` is ignored. An
+/// agent posting for a person sends `on_behalf_of`, which renders "X via Y".
+/// Responds 201 with the stored comment.
 #[route(POST "/{repo}/comments")]
 async fn comments_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result<Response> {
     let name = path_param::<Repo>(cx).to_owned();
@@ -163,11 +167,13 @@ async fn comments_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result
         Err(_) => return Err(bad_request(format!("unknown branch {branch}")).into()),
     };
 
-    let author = input
-        .author
-        .clone()
-        .filter(|a| !a.trim().is_empty())
-        .unwrap_or_else(|| actor(cx).login);
+    let author = actor(cx).login;
+    let on_behalf_of = input
+        .on_behalf_of
+        .as_deref()
+        .map(str::trim)
+        .filter(|behalf| !behalf.is_empty())
+        .map(str::to_owned);
 
     let stored = app(cx)
         .db
@@ -178,6 +184,7 @@ async fn comments_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result
             line: input.line,
             commit,
             author,
+            on_behalf_of,
             body: text,
         })
         ?;

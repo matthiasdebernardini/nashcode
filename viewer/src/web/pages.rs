@@ -2053,7 +2053,7 @@ fn annotation_payload(repo: &str, comments: &[Comment]) -> Vec<serde_json::Value
             "<div class=\"nashcode-annotation-comment\">\
              <strong>{}</strong> <span class=\"color-fg-muted\">{}</span>\
              <div class=\"markdown-body\">{}</div></div>",
-            render::escape_text(&comment.author),
+            render::escape_text(&comment.display_author()),
             render::escape_text(&comment.created_at),
             body,
         );

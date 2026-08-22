@@ -420,6 +420,27 @@ pub async fn post_json(router: &Router, path: &str, payload: serde_json::Value) 
     request(router, Method::POST, path, Some(("application/json", payload.to_string()))).await
 }
 
+/// The same, with extra request headers — the Tailscale identity, say.
+pub async fn post_json_from(
+    router: &Router,
+    path: &str,
+    payload: serde_json::Value,
+    headers: &[(&str, &str)],
+) -> (u16, String) {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder.body(Body::from(payload.to_string())).expect("request builds");
+    let response = router.handle(request).await;
+    let status = response.status().as_u16();
+    let bytes = to_bytes(response.into_body(), 64 * 1024 * 1024).await.expect("body reads");
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// POST a browser form, without following the redirect: the status and where it points.
 pub async fn post_form(
     router: &Router,

@@ -144,9 +144,9 @@ pub fn migrate(db: &Db) -> DbResult<()> {
         // before the batch (a table that does not exist yet is skipped). After: the
         // CREATE TABLEs here do not carry the added columns, so a fresh table still
         // needs them altered in.
-        add_columns(conn, ADDED_COLUMNS)?;
+        crate::db::add_columns(conn, ADDED_COLUMNS)?;
         conn.execute_batch(SCHEMA)?;
-        add_columns(conn, ADDED_COLUMNS)
+        crate::db::add_columns(conn, ADDED_COLUMNS)
     })
 }
 
@@ -669,31 +669,6 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("bugs_issues", "mute_from", "TEXT"),
     ("bugs_issues", "mute_events", "INTEGER NOT NULL DEFAULT 0"),
 ];
-
-/// Add a column if the table does not have it yet.
-///
-/// Shared with [`crate::bugs::logs`], which owns its own table and so its own list.
-pub fn add_columns(conn: &Connection, wanted: &[(&str, &str, &str)]) -> DbResult<()> {
-    for (table, column, definition) in wanted {
-        let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-        let mut present = false;
-        let mut exists = false;
-        let names = statement.query_map([], |row| row.get::<_, String>(1))?;
-        for name in names {
-            exists = true;
-            if name? == *column {
-                present = true;
-            }
-        }
-        drop(statement);
-        // A table with no rows in table_info does not exist yet; its CREATE TABLE
-        // in the caller's SCHEMA carries the column, so there is nothing to alter.
-        if exists && !present {
-            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
-        }
-    }
-    Ok(())
-}
 
 /// Record that a raw envelope object landed in the bucket, and hand back the row id.
 /// The digest reads events out of it and stamps `digested_at`; the startup sweep

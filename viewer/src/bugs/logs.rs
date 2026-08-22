@@ -93,9 +93,9 @@ pub fn migrate(db: &Db) -> DbResult<()> {
         // Before and after the batch; see `index::migrate` for why both runs matter.
         // Here the before-run is the load-bearing one: the batch indexes
         // `dedupe_key`, which a `bugs_logs` older than that column does not have.
-        crate::bugs::index::add_columns(conn, ADDED_COLUMNS)?;
+        crate::db::add_columns(conn, ADDED_COLUMNS)?;
         conn.execute_batch(SCHEMA)?;
-        crate::bugs::index::add_columns(conn, ADDED_COLUMNS)
+        crate::db::add_columns(conn, ADDED_COLUMNS)
     })
 }
 

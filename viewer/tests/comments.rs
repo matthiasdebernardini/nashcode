@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Work, get, post_form_from, post_json, simple_bed, stacked_fixture};
+use common::{Work, get, post_form_from, post_json, post_json_from, simple_bed, stacked_fixture};
 
 #[tokio::test]
 async fn comment_round_trip_renders_inline_then_goes_outdated() {
@@ -19,13 +19,12 @@ async fn comment_round_trip_renders_inline_then_goes_outdated() {
             "file": "src/app.txt",
             "line": 2,
             "body": "why two?",
-            "author": "ada@example.invalid",
         }),
     )
     .await;
     assert_eq!(status, 201, "{body}");
     let stored: serde_json::Value = serde_json::from_str(&body).expect("json body");
-    assert_eq!(stored["author"], "ada@example.invalid");
+    assert_eq!(stored["author"], "local");
     assert!(stored["id"].as_i64().is_some());
     assert!(!stored["commit"].as_str().unwrap_or_default().is_empty());
 
@@ -311,10 +310,11 @@ async fn only_the_author_can_delete_through_the_ui_route() {
     let id = stored["id"].as_i64().expect("id");
 
     // A different author's comment survives the local user's delete.
-    let (_, other) = post_json(
+    let (_, other) = post_json_from(
         &bed.router,
         "/demo/comments",
-        serde_json::json!({ "branch": "main", "body": "theirs", "author": "ada@example.invalid" }),
+        serde_json::json!({ "branch": "main", "body": "theirs" }),
+        &[("tailscale-user-login", "ada@example.invalid")],
     )
     .await;
     let other: serde_json::Value = serde_json::from_str(&other).expect("json");
@@ -334,4 +334,53 @@ async fn only_the_author_can_delete_through_the_ui_route() {
     let remaining: Vec<serde_json::Value> = serde_json::from_str(&list).expect("json");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0]["body"], "theirs");
+}
+
+#[tokio::test]
+async fn the_comment_author_is_the_actor_not_the_payload() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+
+    // Alice posts and claims to be mallory. The claim is dropped.
+    let (status, body) = post_json_from(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({ "branch": "main", "body": "first", "author": "mallory" }),
+        &[("tailscale-user-login", "alice@example.invalid")],
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let stored: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(stored["author"], "alice@example.invalid", "client author must be ignored");
+    assert!(stored["on_behalf_of"].is_null());
+
+    // Alice's agent posts for bob: both identities are kept, alice stays the actor.
+    let (status, body) = post_json_from(
+        &bed.router,
+        "/demo/comments",
+        serde_json::json!({
+            "branch": "main",
+            "body": "relayed",
+            "author": "mallory",
+            "on_behalf_of": "bob@example.invalid",
+        }),
+        &[("tailscale-user-login", "alice@example.invalid")],
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let relayed: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(relayed["author"], "alice@example.invalid");
+    assert_eq!(relayed["on_behalf_of"], "bob@example.invalid");
+
+    // The list carries both fields, never "mallory".
+    let (_, list) = get(&bed.router, "/demo/comments").await;
+    assert!(!list.contains("mallory"), "an impersonated author reached storage: {list}");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&list).expect("json");
+    assert_eq!(rows.len(), 2);
+
+    // The page renders the byline as "principal via actor".
+    let (_, page) = get(&bed.router, "/demo/main").await;
+    assert!(
+        page.contains("bob@example.invalid via alice@example.invalid"),
+        "byline missing from the page: {page}"
+    );
 }

@@ -75,9 +75,24 @@ pub struct Comment {
     pub line: Option<i64>,
     /// The commit the anchor was made against.
     pub commit: String,
+    /// The authenticated actor who posted. Never client-supplied.
     pub author: String,
+    /// Who the actor posted for, when an agent comments for a person.
+    #[serde(default)]
+    pub on_behalf_of: Option<String>,
     pub body: String,
     pub created_at: String,
+}
+
+impl Comment {
+    /// The byline: "principal via actor" when an agent posted for someone, else the
+    /// actor alone. The actor is always the second half, so it cannot be faked away.
+    pub fn display_author(&self) -> String {
+        match &self.on_behalf_of {
+            Some(behalf) => format!("{behalf} via {}", self.author),
+            None => self.author.clone(),
+        }
+    }
 }
 
 /// A recorded CI run.
@@ -161,6 +176,8 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.pragma_update(None, "busy_timeout", 5_000)?;
         conn.execute_batch(SCHEMA)?;
+        // `SCHEMA` carries these for a fresh database; an old one gets them altered in.
+        add_columns(&conn, ADDED_COLUMNS)?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -178,8 +195,9 @@ impl Db {
         let created_at = now();
         self.with(|conn| {
             conn.execute(
-                "INSERT INTO comments (repo, branch, file, line, commit_id, author, body, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO comments
+                 (repo, branch, file, line, commit_id, author, on_behalf_of, body, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     new.repo,
                     new.branch,
@@ -187,6 +205,7 @@ impl Db {
                     new.line,
                     new.commit,
                     new.author,
+                    new.on_behalf_of,
                     new.body,
                     created_at
                 ],
@@ -199,6 +218,7 @@ impl Db {
                 line: new.line,
                 commit: new.commit.clone(),
                 author: new.author.clone(),
+                on_behalf_of: new.on_behalf_of.clone(),
                 body: new.body.clone(),
                 created_at: created_at.clone(),
             })
@@ -212,7 +232,8 @@ impl Db {
     pub fn comments(&self, filter: &CommentFilter) -> DbResult<Vec<Comment>> {
         self.with(|conn| {
             let mut sql = String::from(
-                "SELECT id, repo, branch, file, line, commit_id, author, body, created_at
+                "SELECT id, repo, branch, file, line, commit_id, author, on_behalf_of,
+                        body, created_at
                  FROM comments WHERE repo = ?1",
             );
             let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(filter.repo.clone())];
@@ -243,8 +264,9 @@ impl Db {
                         line: row.get(4)?,
                         commit: row.get(5)?,
                         author: row.get(6)?,
-                        body: row.get(7)?,
-                        created_at: row.get(8)?,
+                        on_behalf_of: row.get(7)?,
+                        body: row.get(8)?,
+                        created_at: row.get(9)?,
                     })
                 })?
                 .collect::<DbResult<Vec<_>>>()?;
@@ -1075,7 +1097,10 @@ pub struct NewComment {
     pub file: Option<String>,
     pub line: Option<i64>,
     pub commit: String,
+    /// The authenticated actor. The API fills this from the Tailscale headers.
     pub author: String,
+    /// Who the actor is posting for, when an agent comments for a person.
+    pub on_behalf_of: Option<String>,
     pub body: String,
 }
 
@@ -1298,6 +1323,34 @@ pub struct NewAudit {
     pub detail: String,
 }
 
+/// Add a column if the table does not have it yet.
+///
+/// Every schema owner keeps its own list and calls this after its `CREATE TABLE`s.
+pub fn add_columns(conn: &Connection, wanted: &[(&str, &str, &str)]) -> DbResult<()> {
+    for (table, column, definition) in wanted {
+        let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut present = false;
+        let mut exists = false;
+        let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for name in names {
+            exists = true;
+            if name? == *column {
+                present = true;
+            }
+        }
+        drop(statement);
+        // A table with no rows in table_info does not exist yet; its CREATE TABLE
+        // in the caller's SCHEMA carries the column, so there is nothing to alter.
+        if exists && !present {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Columns added after a table shipped, applied on every open.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[("comments", "on_behalf_of", "TEXT")];
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS comments (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1307,6 +1360,7 @@ CREATE TABLE IF NOT EXISTS comments (
     line       INTEGER,
     commit_id  TEXT NOT NULL,
     author     TEXT NOT NULL,
+    on_behalf_of TEXT,
     body       TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -1592,6 +1646,7 @@ mod tests {
             line: file.map(|_| 3),
             commit: "abc123".into(),
             author: "ada@example.invalid".into(),
+            on_behalf_of: None,
             body: body.into(),
         })
         .unwrap()
