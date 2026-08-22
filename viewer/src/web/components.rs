@@ -159,7 +159,7 @@ pub async fn ci_icon(#[default] run_status: Option<String>) -> Result {
         Some(status::TIMEOUT) => ("ph-x-circle", "color-fg-danger", "timed out"),
         Some(status::RUNNING) => ("ph-hourglass", "color-fg-attention", "running"),
         Some(status::QUEUED) => ("ph-clock", "color-fg-attention", "queued"),
-        Some(status::SKIPPED) => ("ph-minus-circle", "color-fg-muted", "no ci script"),
+        Some(status::SKIPPED) => ("ph-minus-circle", "color-fg-muted", "skipped"),
         _ => ("ph-minus-circle", "color-fg-subtle", "never ran"),
     };
     view! {

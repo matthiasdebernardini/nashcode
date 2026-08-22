@@ -103,25 +103,42 @@ the port can claim any identity.
 
 ## CI
 
-Put an executable `.nashcode/ci` in a repo. When nashcode sees a branch tip it has not seen
-before, it checks that commit out into a scratch directory and runs the script. No script
-means no job.
+Put an executable `.nashcode/ci` in a repo, and opt the repo in from its **default branch**
+with `.nashcode/ci.toml`:
 
-Jobs run one at a time. The script gets `GIT_TOKEN`, `NASHCODE_REPO`, `NASHCODE_BRANCH`, and
-`NASHCODE_COMMIT`, and nothing else. Non-zero exit is red. Timeout is 30 minutes. Combined
-output goes to a log file and the status lands next to the branch everywhere it appears.
+```toml
+enabled = true      # without this, nothing runs
+git_token = true    # optional: put GIT_TOKEN in the job's environment
+```
+
+When nashcode sees a branch tip it has not seen before, it reads that file from the default
+branch tip. `enabled = true` there, and only there, lets the job check the commit out into a
+scratch directory and run the script. Anything else — no file, `enabled = false`, a file
+that will not parse, a copy added on the pushed branch — records the run as `skipped` with
+"ci not enabled on default branch". A skipped run never blocks a merge. No script means no
+job either.
+
+Jobs run one at a time. The script gets `NASHCODE_REPO`, `NASHCODE_BRANCH`, and
+`NASHCODE_COMMIT`, plus `GIT_TOKEN` when the default branch asked for it, and nothing else.
+Non-zero exit is red. Timeout is 30 minutes. Combined output goes to a log file and the
+status lands next to the branch everywhere it appears.
 
 There is no separate deploy system. If the script wants to deploy, it deploys.
 
 ### Security model — read this before granting push access
 
-**Push access to a repo is code execution on the nashcode host.** `.nashcode/ci` runs as
-the server's own user, with `GIT_TOKEN` in its environment, and there is no sandbox: no
-container, no seccomp, no resource limits beyond the 30-minute timeout. Anyone who can
-push a branch can run anything the nashcode user can run and can push anywhere the token
-can push. On a personal tailnet where every pusher is you or your agents, that is the
-point — the CI script deploying *is* the deploy system. Do not point nashcode at repos
-that people you would not hand a shell to can push to.
+**Push access to a repo whose default branch enables CI is code execution on the nashcode
+host.** `.nashcode/ci` runs as the server's own user and there is no sandbox: no container,
+no seccomp, no resource limits beyond the 30-minute timeout. Once `enabled = true` is on the
+default branch, anyone who can push *any* branch can run anything the nashcode user can run,
+because the script comes from the pushed commit. `git_token = true` widens that to "and can
+push anywhere the token can push", which is why it is a second, separate switch.
+
+The opt-in lives on the default branch so that turning CI on is a merge somebody reviewed,
+not a push. Until then a pushed branch runs nothing. On a personal tailnet where every
+pusher is you or your agents, enabling it is the point — the CI script deploying *is* the
+deploy system. Do not enable it on repos that people you would not hand a shell to can push
+to.
 
 Two sharp edges of the timeout: the kill reaches the script process itself, not
 grandchildren it spawned into their own process groups — a detached child can outlive

@@ -412,4 +412,9 @@ deployment that leaves it unset sends links only that box can open.
 - Do not edit another agent's card body. Change `status`, or add a comment.
 - CI runs on every new tip, from `.nashcode/ci` in the repo. Check it is green before asking
   for a merge — a red branch will not merge without a human overriding it.
+- CI is opt-in, and only the **default branch** can opt in. A repo runs nothing until its
+  default branch carries `.nashcode/ci.toml` with `enabled = true`; add `git_token = true`
+  there to give jobs `GIT_TOKEN`. Adding either file on your own branch does nothing — the
+  run is recorded `skipped` with "ci not enabled on default branch", which does not block
+  a merge. To turn CI on, change `ci.toml` on the default branch and have a human merge it.
 - You cannot merge. A human does that.

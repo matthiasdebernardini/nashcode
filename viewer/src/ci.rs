@@ -7,6 +7,10 @@
 //! file, and records the result in SQLite. CD is not a separate system: the script
 //! deploys if it wants to.
 //!
+//! CI is opt-in, and the opt-in is read from the **default branch**, never from the
+//! commit under test. Without that split, anyone who can push a branch can run code on
+//! the box, and a push is an invite away from being remote code execution.
+//!
 //! Code indexing shares this queue rather than getting one of its own. Both are slow,
 //! both are triggered by a commit arriving, and neither may ever run on a request
 //! path; a second queue would only be a second way to fall behind.
@@ -25,11 +29,56 @@ use crate::db::{Db, status};
 use crate::git::{Repo, clone_local};
 use crate::hooks::{self, Webhooks};
 
-/// The script a repo opts into CI with, relative to its root.
+/// The script a job runs, relative to the repo root.
 pub const CI_SCRIPT: &str = ".nashcode/ci";
+
+/// The file a repo opts into CI with, relative to its root. Only the copy on the
+/// default branch counts.
+pub const CI_CONFIG: &str = ".nashcode/ci.toml";
+
+/// The log of a run that had no opt-in to run under.
+pub const NOT_ENABLED: &str = "ci not enabled on default branch";
 
 /// How long a job may run before it is killed.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// What the default branch says CI may do. Every field is off by default, and every
+/// way of failing to read the file answers with this, so the gate fails closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Policy {
+    /// `enabled = true`. Without it no branch of this repo runs anything.
+    pub enabled: bool,
+    /// `git_token = true`. The only way `GIT_TOKEN` reaches a job's environment.
+    pub git_token: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPolicy {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    git_token: bool,
+}
+
+/// Read the opt-in from the default branch tip of a mirror.
+///
+/// The branch under test is never consulted: that is the whole point. A missing,
+/// unreadable, or unparseable file leaves CI off rather than guessing.
+pub async fn policy(mirror: &std::path::Path) -> Policy {
+    let repo = Repo::mirror(mirror, Default::default());
+    let Ok(branch) = repo.default_branch().await else { return Policy::default() };
+    let Ok(Some(bytes)) = repo.show_file(&branch, CI_CONFIG).await else {
+        return Policy::default();
+    };
+    let Ok(text) = String::from_utf8(bytes) else { return Policy::default() };
+    match toml::from_str::<RawPolicy>(&text) {
+        Ok(raw) => Policy { enabled: raw.enabled, git_token: raw.git_token },
+        Err(error) => {
+            tracing::warn!(%error, "cannot parse {CI_CONFIG}; CI stays off");
+            Policy::default()
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
@@ -238,14 +287,21 @@ impl CiWorker {
 
     /// Check the commit out and run the script. Returns (status, combined output).
     async fn execute(&self, job: &Job) -> (&'static str, String) {
-        let scratch = match tempfile::tempdir() {
-            Ok(dir) => dir,
-            Err(error) => return (status::ERROR, format!("cannot create scratch dir: {error}")),
-        };
         let mirror = self.config.mirror_path(&job.repo);
         if !mirror.exists() {
             return (status::ERROR, format!("no mirror for {}", job.repo));
         }
+        // Ask the default branch before cloning anything: a repo that never opted in
+        // must not have a pushed commit written to disk on its behalf.
+        let policy = policy(&mirror).await;
+        if !policy.enabled {
+            return (status::SKIPPED, NOT_ENABLED.to_owned());
+        }
+
+        let scratch = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(error) => return (status::ERROR, format!("cannot create scratch dir: {error}")),
+        };
         let checkout = scratch.path().join("repo");
         if let Err(error) = clone_local(&mirror, &checkout).await {
             return (status::ERROR, format!("scratch clone failed: {error}"));
@@ -260,8 +316,9 @@ impl CiWorker {
             return (status::SKIPPED, String::new());
         }
 
-        // The job's whole environment: the token, the coordinates, and enough of a
-        // shell to run (`PATH`, `HOME`). Nothing else leaks from the server.
+        // The job's whole environment: the coordinates and enough of a shell to run
+        // (`PATH`, `HOME`). Nothing else leaks from the server. The push token is not
+        // in it unless the default branch asked for it by name.
         let mut command = tokio::process::Command::new("sh");
         command
             .arg("-c")
@@ -270,7 +327,6 @@ impl CiWorker {
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()))
             .env("HOME", std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
-            .env("GIT_TOKEN", &self.config.git_token)
             .env("NASHCODE_REPO", &job.repo)
             .env("NASHCODE_BRANCH", &job.branch)
             .env("NASHCODE_COMMIT", &job.commit)
@@ -278,6 +334,9 @@ impl CiWorker {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        if policy.git_token {
+            command.env("GIT_TOKEN", &self.config.git_token);
+        }
 
         let mut child = match command.spawn() {
             Ok(child) => child,

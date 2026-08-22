@@ -72,7 +72,8 @@ Accept when:
 `uat.py` boots the binary against a throwaway fixture world and asserts the criteria
 below. Fixture shape: one repo with a stacked chain (`feat/retry-core` →
 `feat/retry-jitter`), a red-CI branch, a second stack for restacks, plans, cards
-(including one malformed and one with a dangling ref), and a `.nashcode/ci` script.
+(including one malformed and one with a dangling ref), and a `.nashcode/ci` script
+with the `.nashcode/ci.toml` opt-in on the default branch.
 
 | Group | Covers | Accept when |
 |---|---|---|
