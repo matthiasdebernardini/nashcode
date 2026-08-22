@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "nashmeet",
+  "version": "0.1.0",
+  "description": "Records a meeting's tab + mic, transcribes it, labels speakers from Google Calendar — filed as a markdown transcript into a nashcode repo.",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "nashmeet — start/stop recording",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_page": "options.html",
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "storage",
+    "alarms",
+    "identity",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://www.googleapis.com/*",
+    "https://api.x.ai/*",
+    "https://*.ts.net/*"
+  ],
+  "oauth2": {
+    "client_id": "355938372754-j27ortk7t4qf051nb1s0k1273b2og2iu.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/calendar.readonly"
+    ]
+  },
+  "web_accessible_resources": []
+}

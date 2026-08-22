@@ -1,0 +1,10 @@
+{
+  "name": "nashmeet-extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "nashmeet Chrome extension — no build step, no dependencies; this file exists for ESM resolution and `npm test`.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}

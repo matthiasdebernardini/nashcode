@@ -1,0 +1,115 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root {
+      --green: #1ac970; --green-ink: #12a75b; --green-deep: #0e8f4d;
+      --green-tint: rgba(26,201,112,0.12);
+      --rec: #e0413a; --rec-deep: #c5342d;
+      --ink: #1c2024; --muted: #6b7280; --line: #e7eaee; --bg: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      width: 300px; color: var(--ink); background: var(--bg);
+      -webkit-font-smoothing: antialiased;
+    }
+    .app { padding: 14px 14px 12px; }
+
+    /* Header --------------------------------------------------------------- */
+    header { display: flex; align-items: center; gap: 10px; }
+    .brand-mark { width: 34px; height: 34px; border-radius: 9px; flex: none; display: block; }
+    .brand-text { flex: 1; min-width: 0; }
+    .brand-name { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.1; }
+    .brand-state {
+      font-size: 12px; color: var(--muted); margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .rec-badge {
+      flex: none; display: none; align-items: center; gap: 5px;
+      font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--rec); background: rgba(224,65,58,0.10);
+      padding: 3px 8px 3px 6px; border-radius: 999px;
+    }
+    .rec-badge .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--rec);
+                      animation: pulse 1.2s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+    .app[data-state="rec"] .rec-badge { display: inline-flex; }
+
+    /* CTA ------------------------------------------------------------------ */
+    .cta {
+      width: 100%; margin-top: 14px; padding: 11px 14px;
+      display: flex; align-items: center; justify-content: center; gap: 9px;
+      font: inherit; font-weight: 600; font-size: 13px; cursor: pointer;
+      color: #fff; border: none; border-radius: 10px;
+      background: linear-gradient(180deg, var(--green) 0%, var(--green-ink) 100%);
+      box-shadow: 0 1px 2px rgba(14,143,77,0.35), 0 2px 8px rgba(14,143,77,0.20);
+      transition: transform 0.08s ease, box-shadow 0.15s ease, filter 0.15s ease;
+    }
+    .cta:hover { filter: brightness(1.04); box-shadow: 0 2px 4px rgba(14,143,77,0.40), 0 4px 14px rgba(14,143,77,0.26); }
+    .cta:active { transform: translateY(1px); box-shadow: 0 1px 2px rgba(14,143,77,0.35); }
+    .cta .ico { width: 16px; height: 16px; display: grid; place-items: center; }
+    .cta .ico svg { display: block; }
+    .app[data-state="rec"] .cta {
+      background: linear-gradient(180deg, var(--rec) 0%, var(--rec-deep) 100%);
+      box-shadow: 0 1px 2px rgba(197,52,45,0.35), 0 2px 8px rgba(197,52,45,0.20);
+    }
+    .app[data-state="rec"] .cta:hover { box-shadow: 0 2px 4px rgba(197,52,45,0.40), 0 4px 14px rgba(197,52,45,0.26); }
+    /* Show the right glyph per state */
+    .cta .ico-start { display: grid; } .cta .ico-stop { display: none; }
+    .app[data-state="rec"] .cta .ico-start { display: none; }
+    .app[data-state="rec"] .cta .ico-stop { display: grid; }
+
+    .cta[disabled] { opacity: 0.6; cursor: default; filter: none; }
+    .err { color: var(--rec); font-size: 12px; margin-top: 8px; }
+
+    /* Footer --------------------------------------------------------------- */
+    footer { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); }
+    .settings-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      color: var(--muted); font-size: 12px; text-decoration: none; cursor: pointer;
+    }
+    .settings-link:hover { color: var(--green-deep); }
+    .settings-link svg { flex: none; }
+  </style>
+</head>
+<body>
+  <div class="app" id="app">
+    <header>
+      <img class="brand-mark" src="icons/icon128.png" alt="" />
+      <div class="brand-text">
+        <div class="brand-name">nashmeet</div>
+        <div class="brand-state" id="status">checking…</div>
+      </div>
+      <span class="rec-badge"><span class="pip"></span>rec</span>
+    </header>
+
+    <button id="toggle" class="cta">
+      <span class="ico">
+        <span class="ico-start">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/>
+          </svg>
+        </span>
+        <span class="ico-stop">
+          <svg width="13" height="13" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="3" fill="#fff"/></svg>
+        </span>
+      </span>
+      <span class="lbl">Start recording this tab</span>
+    </button>
+    <div class="err" id="err" style="display:none"></div>
+
+    <footer>
+      <a href="#" id="open-options" class="settings-link">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        Settings — Google account &amp; calendars
+      </a>
+    </footer>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

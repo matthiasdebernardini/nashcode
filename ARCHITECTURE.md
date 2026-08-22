@@ -86,6 +86,7 @@ graph LR
     viewer_render[render]
     viewer_stack[stack]
     viewer_traces[traces]
+    viewer_transcripts[transcripts]
     viewer_upstream[upstream]
     viewer_web[web]
   end
@@ -142,6 +143,7 @@ graph LR
   viewer_web --> viewer_render
   viewer_web --> viewer_stack
   viewer_web --> viewer_traces
+  viewer_web --> viewer_transcripts
   viewer_web --> viewer_upstream
 ```
 <!-- arch:end -->
