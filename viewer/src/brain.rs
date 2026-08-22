@@ -212,11 +212,17 @@ async fn git_repo_json(
         })
         .collect();
 
+    // The cards nothing open is waiting on: `todo` with every blocker `done`. This is
+    // the list an agent picks its next task from, so it is answered here rather than
+    // left to be re-derived from `cards` and the `blocks:` edges.
+    let ready: Vec<String> = index.ready().iter().map(|card| card.path.clone()).collect();
+
     serde_json::json!({
         "default_branch": graph.default_branch,
         "branches": branches,
         "plans": plans,
         "cards": cards,
+        "ready": ready,
         "conflicts": conflicts,
         "dangling": index.dangling,
     })

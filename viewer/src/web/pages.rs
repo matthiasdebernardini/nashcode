@@ -1,6 +1,6 @@
 //! Every HTML page. Data is assembled first, then rendered with Primer markup.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use topcoat::Result;
 use topcoat::context::Cx;
@@ -1628,9 +1628,18 @@ async fn wiki_page(cx: &Cx, requested: Option<String>) -> Result {
 
 // ---- /{repo}/board ---------------------------------------------------------------
 
+#[topcoat::router::query_params(error = bad_request)]
+struct BoardQuery {
+    ready: Option<String>,
+}
+
 #[page("/{repo}/board")]
 async fn repo_board(cx: &Cx) -> Result {
     let name = path_param::<Repo>(cx).to_owned();
+    let only_ready = query_params::<BoardQuery>(cx)?
+        .ready
+        .as_deref()
+        .is_some_and(|value| matches!(value, "1" | "true" | "yes" | ""));
     let ctx = repo_ctx(cx, &name).await?;
     if !ctx.status.available {
         return view! {
@@ -1653,12 +1662,20 @@ async fn repo_board(cx: &Cx) -> Result {
     }
     let order = docs::order_columns(statuses);
 
+    // `?ready=1` narrows the todo column to the cards nothing open is waiting on. The
+    // other columns are already started or finished, so the filter says nothing there.
+    let ready: BTreeSet<String> =
+        index.ready().iter().map(|card| card.path.clone()).collect();
+
     // Cards ordered newest-first by the last commit that touched them.
     type Column = (String, Vec<(Document, Option<String>)>);
     let mut columns: Vec<Column> = Vec::new();
     for column_name in &order {
         let mut cards: Vec<(String, Document)> = Vec::new();
         for card in index.cards() {
+            if only_ready && column_name == "todo" && !ready.contains(&card.path) {
+                continue;
+            }
             if card.column() == column_name {
                 let touched = repo
                     .last_touched(&tip, &card.path)
