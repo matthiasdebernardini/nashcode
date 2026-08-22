@@ -1680,6 +1680,22 @@ async fn repo_board(cx: &Cx) -> Result {
     view! {
         shell(title: format!("{name} · board"), repo: name.clone(), active: "board", status: Some(ctx.status.clone()),
             <h3 class="mb-2"><i class="ph ph-kanban"></i>" Board"</h3>
+            if !index.dangling.is_empty() {
+                <details class="mb-3">
+                    <summary class="Label Label--danger">
+                        (format!("{} dangling ref{}", index.dangling.len(), if index.dangling.len() == 1 { "" } else { "s" }))
+                    </summary>
+                    <div class="Box mt-2">
+                        let dn = &name;
+                        for danger in index.dangling.clone() {
+                            <div key=(format!("{}-{}-{}", danger.from, danger.key, danger.target)) class="Box-row text-small">
+                                <a href=(format!("/{dn}/{}", danger.from))>(danger.from.clone())</a>
+                                <span class="color-fg-muted">(format!(" {}: {}", danger.key, danger.target))</span>
+                            </div>
+                        }
+                    </div>
+                </details>
+            }
             <div class="nashcode-board" data-repo=(name.clone())>
                 let n = &name;
                 for (column_name, cards) in columns {

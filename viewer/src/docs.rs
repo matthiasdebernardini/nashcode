@@ -40,6 +40,21 @@ pub struct Refs {
     pub tasks: Vec<String>,
 }
 
+/// A declared ref whose target is not there: a `branch:` naming no branch, or a
+/// `plan:`/`tasks:` path that is in no tree.
+///
+/// The link site already renders one of these as "missing", but only if somebody opens
+/// that page. Collecting them per repo makes the whole set answerable at once.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Dangling {
+    /// The document that declares the ref.
+    pub from: String,
+    /// Which front-matter key it came from: `branch`, `plan`, or `tasks`.
+    pub key: String,
+    /// The branch name or path that resolves to nothing.
+    pub target: String,
+}
+
 /// One plan or card, as read from the mirror.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Document {
@@ -324,6 +339,8 @@ pub struct DocIndex {
     pub by_branch: BTreeMap<String, Vec<String>>,
     /// Plan path -> documents referencing it through `plan:` or `tasks:`.
     pub referencing_plan: BTreeMap<String, Vec<String>>,
+    /// Every declared ref that resolves to nothing, in document order.
+    pub dangling: Vec<Dangling>,
 }
 
 impl DocIndex {
@@ -501,7 +518,45 @@ async fn scan(repo: &Repo, commit: &str) -> GitResult<DocIndex> {
         paths.dedup();
     }
 
-    Ok(DocIndex { commit: commit.to_owned(), documents, all_paths, by_branch, referencing_plan })
+    // Refs that point at nothing. Branches come from the mirror's ref list rather than
+    // the tree, because a branch is not a file; a doc path is dangling when the tree at
+    // this commit does not have it. A git failure aborts the scan rather than reporting
+    // every branch ref as dangling.
+    let branches: BTreeSet<String> = repo.branches().await?.into_iter().collect();
+    let mut dangling: Vec<Dangling> = Vec::new();
+    for document in documents.values() {
+        let mut note = |key: &str, target: &str| {
+            dangling.push(Dangling {
+                from: document.path.clone(),
+                key: key.to_owned(),
+                target: target.to_owned(),
+            });
+        };
+        if let Some(branch) = &document.refs.branch
+            && !branches.contains(branch)
+        {
+            note("branch", branch);
+        }
+        if let Some(plan) = &document.refs.plan
+            && !all_paths.contains(plan)
+        {
+            note("plan", plan);
+        }
+        for task in &document.refs.tasks {
+            if !all_paths.contains(task) {
+                note("tasks", task);
+            }
+        }
+    }
+
+    Ok(DocIndex {
+        commit: commit.to_owned(),
+        documents,
+        all_paths,
+        by_branch,
+        referencing_plan,
+        dangling,
+    })
 }
 
 #[cfg(test)]

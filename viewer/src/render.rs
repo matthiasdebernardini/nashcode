@@ -329,6 +329,7 @@ mod tests {
             all_paths: paths.iter().map(|p| (*p).to_owned()).collect::<BTreeSet<_>>(),
             by_branch: BTreeMap::new(),
             referencing_plan: BTreeMap::new(),
+            dangling: Vec::new(),
         }
     }
 

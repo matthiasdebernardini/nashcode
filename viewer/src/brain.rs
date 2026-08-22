@@ -203,6 +203,7 @@ async fn git_repo_json(
         "branches": branches,
         "plans": plans,
         "cards": cards,
+        "dangling": index.dangling,
     })
 }
 
