@@ -116,7 +116,7 @@ impl Brain {
                         .latest_run(name, tip)
                         .ok()
                         .flatten()
-                        .map(|run| run.status)
+                        .map(|run| run.effective_status().to_owned())
                         .unwrap_or_else(|| "none".to_owned());
                     branch["ci"] = serde_json::Value::String(ci);
                 }
@@ -247,7 +247,7 @@ fn activity_json(db: &Db, repo: &str, since: Option<&str>) -> serde_json::Value 
                 "at": run.created_at,
                 "branch": run.branch,
                 "commit": run.commit,
-                "status": run.status,
+                "status": run.effective_status(),
             }));
         }
     }

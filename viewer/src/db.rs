@@ -91,7 +91,33 @@ pub struct CiRun {
     pub duration_ms: i64,
     pub log_path: Option<String>,
     pub created_at: String,
+    /// The heartbeat. The worker rewrites it while the job runs, so a `running` row
+    /// that stops moving is a job whose worker is gone.
+    pub updated_at: String,
+    /// Why a run ended, when there is no log to say so. Empty for an ordinary run.
+    pub note: String,
 }
+
+impl CiRun {
+    /// The status this run really has.
+    ///
+    /// A `running` row whose heartbeat stopped belongs to a worker that died: nothing
+    /// will ever finish it, so it reads as [`status::STUCK`] rather than as a job
+    /// somebody is still waiting on. Derived, never stored — the row keeps saying
+    /// `running` until a requeue or a restart rewrites it.
+    pub fn effective_status(&self) -> &str {
+        if self.status == status::RUNNING
+            && self.updated_at < now_offset(-status::HEARTBEAT_STALE_SECS)
+        {
+            status::STUCK
+        } else {
+            &self.status
+        }
+    }
+}
+
+/// The note left on runs a restart found in flight.
+pub const ORPHANED: &str = "orphaned by restart";
 
 /// The status vocabulary. `Skipped` means the repo has no `.nashcode/ci` script.
 pub mod status {
@@ -102,10 +128,20 @@ pub mod status {
     pub const TIMEOUT: &str = "timeout";
     pub const ERROR: &str = "error";
     pub const SKIPPED: &str = "skipped";
+    /// Derived, never stored: a `running` row with a dead heartbeat.
+    pub const STUCK: &str = "stuck";
+
+    /// How long a `running` row may go without a heartbeat before it is stuck.
+    /// Five missed beats — the worker writes one a minute.
+    pub const HEARTBEAT_STALE_SECS: i64 = 5 * 60;
 
     /// A merge is blocked unless CI is green or there is nothing to run.
+    ///
+    /// `stuck` does not block. A run nothing is executing says exactly as much about
+    /// the commit as a run that never happened, and blocking on it is the gate that
+    /// can never be satisfied — the branch page offers a requeue instead.
     pub fn blocks_merge(status: Option<&str>) -> bool {
-        !matches!(status, Some(PASSED) | Some(SKIPPED) | None)
+        !matches!(status, Some(PASSED) | Some(SKIPPED) | Some(STUCK) | None)
     }
 }
 
@@ -161,6 +197,16 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.pragma_update(None, "busy_timeout", 5_000)?;
         conn.execute_batch(SCHEMA)?;
+        crate::bugs::index::add_columns(&conn, CI_RUN_COLUMNS)?;
+        // A run that was queued or running belongs to a process that is no longer
+        // here: nothing will ever finish it, and a merge waiting on it waits forever.
+        // Reconciling at open is what makes "in flight" mean "in flight in *this*
+        // process".
+        conn.execute(
+            "UPDATE ci_runs SET status = ?1, note = ?2, updated_at = ?3
+             WHERE status IN (?4, ?5)",
+            params![status::ERROR, ORPHANED, now(), status::QUEUED, status::RUNNING],
+        )?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -269,8 +315,9 @@ impl Db {
     pub fn enqueue_run(&self, repo: &str, branch: &str, commit: &str) -> DbResult<i64> {
         self.with(|conn| {
             conn.execute(
-                "INSERT INTO ci_runs (repo, branch, commit_id, status, duration_ms, created_at)
-                 VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+                "INSERT INTO ci_runs
+                    (repo, branch, commit_id, status, duration_ms, created_at, updated_at, note)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5, '')",
                 params![repo, branch, commit, status::QUEUED, now()],
             )?;
             Ok(conn.last_insert_rowid())
@@ -286,11 +333,34 @@ impl Db {
     ) -> DbResult<()> {
         self.with(|conn| {
             conn.execute(
-                "UPDATE ci_runs SET status = ?2, duration_ms = ?3, log_path = COALESCE(?4, log_path)
+                "UPDATE ci_runs SET status = ?2, duration_ms = ?3, log_path = COALESCE(?4, log_path),
+                        updated_at = ?5
                  WHERE id = ?1",
-                params![id, new_status, duration_ms, log_path],
+                params![id, new_status, duration_ms, log_path, now()],
             )?;
             Ok(())
+        })
+    }
+
+    /// The heartbeat a running job writes. A row that stops moving is a job whose
+    /// worker died; [`CiRun::effective_status`] is what reads that.
+    pub fn touch_run(&self, id: i64) -> DbResult<()> {
+        self.with(|conn| {
+            conn.execute("UPDATE ci_runs SET updated_at = ?2 WHERE id = ?1", params![id, now()])?;
+            Ok(())
+        })
+    }
+
+    /// Put a run back in the queue. Keeps the row, so the requeued run still answers
+    /// for the commit it was recorded against. Returns false when there is no row.
+    pub fn requeue_run(&self, id: i64) -> DbResult<bool> {
+        self.with(|conn| {
+            let changed = conn.execute(
+                "UPDATE ci_runs SET status = ?2, duration_ms = 0, note = '', updated_at = ?3
+                 WHERE id = ?1",
+                params![id, status::QUEUED, now()],
+            )?;
+            Ok(changed > 0)
         })
     }
 
@@ -298,7 +368,8 @@ impl Db {
     pub fn latest_run(&self, repo: &str, commit: &str) -> DbResult<Option<CiRun>> {
         self.with(|conn| {
             conn.query_row(
-                "SELECT id, repo, branch, commit_id, status, duration_ms, log_path, created_at
+                "SELECT id, repo, branch, commit_id, status, duration_ms, log_path, created_at,
+                        updated_at, note
                  FROM ci_runs WHERE repo = ?1 AND commit_id = ?2
                  ORDER BY created_at DESC, id DESC LIMIT 1",
                 params![repo, commit],
@@ -312,7 +383,8 @@ impl Db {
     pub fn recent_runs(&self, repo: &str, limit: usize) -> DbResult<Vec<CiRun>> {
         self.with(|conn| {
             let mut statement = conn.prepare(
-                "SELECT id, repo, branch, commit_id, status, duration_ms, log_path, created_at
+                "SELECT id, repo, branch, commit_id, status, duration_ms, log_path, created_at,
+                        updated_at, note
                  FROM ci_runs WHERE repo = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
             )?;
             let rows = statement
@@ -1064,6 +1136,8 @@ fn read_run(row: &rusqlite::Row<'_>) -> DbResult<CiRun> {
         duration_ms: row.get(5)?,
         log_path: row.get(6)?,
         created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        note: row.get(9)?,
     })
 }
 
@@ -1298,6 +1372,13 @@ pub struct NewAudit {
     pub detail: String,
 }
 
+/// Columns `ci_runs` gained after the first release. An old database predates the
+/// heartbeat; its rows read as stale, which is what an abandoned run is.
+const CI_RUN_COLUMNS: &[(&str, &str, &str)] = &[
+    ("ci_runs", "updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ("ci_runs", "note", "TEXT NOT NULL DEFAULT ''"),
+];
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS comments (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1321,7 +1402,10 @@ CREATE TABLE IF NOT EXISTS ci_runs (
     status      TEXT NOT NULL,
     duration_ms INTEGER NOT NULL DEFAULT 0,
     log_path    TEXT,
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    -- The heartbeat, and why a run ended when no log says so.
+    updated_at  TEXT NOT NULL DEFAULT '',
+    note        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ci_runs_commit ON ci_runs (repo, commit_id, created_at);
 
@@ -1690,6 +1774,26 @@ mod tests {
         assert!(!status::blocks_merge(Some(status::SKIPPED)));
         // Nothing ever ran: there is no red light to ignore.
         assert!(!status::blocks_merge(None));
+        // Nothing is running it either, and nothing ever will be.
+        assert!(!status::blocks_merge(Some(status::STUCK)));
+    }
+
+    #[test]
+    fn a_heartbeat_that_stopped_makes_a_running_run_stuck() {
+        let db = Db::in_memory().unwrap();
+        let id = db.enqueue_run("demo", "main", "abc").unwrap();
+        db.set_run_status(id, status::RUNNING, 0, None).unwrap();
+        let fresh = db.latest_run("demo", "abc").unwrap().unwrap();
+        assert_eq!(fresh.effective_status(), status::RUNNING);
+
+        let stale = CiRun { updated_at: now_offset(-status::HEARTBEAT_STALE_SECS - 1), ..fresh };
+        assert_eq!(stale.effective_status(), status::STUCK);
+
+        // The requeue puts the same row back in the queue, commit and all.
+        assert!(db.requeue_run(id).unwrap());
+        let back = db.latest_run("demo", "abc").unwrap().unwrap();
+        assert_eq!(back.status, status::QUEUED);
+        assert_eq!(back.commit, "abc");
     }
 
     #[test]

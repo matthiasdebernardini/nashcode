@@ -110,6 +110,7 @@ graph LR
   viewer_code --> viewer_db
   viewer_code --> viewer_git
   viewer_code --> viewer_mirror
+  viewer_db --> viewer_bugs
   viewer_docs --> viewer_git
   viewer_docs --> viewer_render
   viewer_mirror --> viewer_config
