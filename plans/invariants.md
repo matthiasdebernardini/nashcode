@@ -1,6 +1,6 @@
 ---
 title: Invariants — what nashcode holds, what it lacks, what other forges do
-status: in-progress
+status: done
 ---
 
 # Invariants
@@ -48,7 +48,7 @@ The audit found ~70 enforced invariants. The strong ones:
 | 6 | **Comment `author` is client-supplied.** Impersonation also hands deletion rights to the impersonated person. | **Done** — enforced at `viewer/src/web/api.rs` (author = Tailscale actor; `on_behalf_of` stored apart) | Every system binds assertions to an authenticated identity. Reviewable types agent authorship so gates can reason about it. |
 | 7 | **Comments have no referential integrity.** No FK (the repo set is in memory). Branch delete strands comments; line anchors never bounds-checked — line 9999 of a 12-line file renders as "current". | **Done** — enforced at `viewer/src/web/api.rs` (anchor bounds-checked, 400), `viewer/src/ops.rs` (`orphaned_at` on branch delete), `viewer/src/web/pages.rs` (gone file → outdated, file-level) | Gerrit: ported comments degrade inline → file-level → change-log, never vanish. Hypothesis: explicit `orphan` state. Notion silently drops — the counterexample. |
 | 8 | **Dangling `branch:`/`plan:`/`tasks:` refs** render "missing" on one page and are reported nowhere. | **Done** — enforced at `viewer/src/docs.rs` (`DocIndex::dangling`), listed in `/brain` and badged on the board | Trac: states derived from transitions, so a typo invents a state — they document `reset_workflow` as the rescue. Beads: `bd doctor`. |
-| 9 | **No blocking graph at all.** Cards have `tasks:` (containment) but no `blocks:`. An agent can claim work whose prerequisite is open. | `viewer/src/docs.rs:95-110` | Beads: typed edges, cycle check before commit, `bd ready` = all blockers closed, `--claim` atomic. Bugzilla: transitive-closure acyclicity on every write. |
+| 9 | **No blocking graph at all.** Cards have `tasks:` (containment) but no `blocks:`. An agent can claim work whose prerequisite is open. | **Done** — enforced at `viewer/src/docs.rs` (`blocks_cycles` at ingest, `DocIndex::ready`), `cli/src/commands/card.rs` (`ready`, `claim`) | Beads: typed edges, cycle check before commit, `bd ready` = all blockers closed, `--claim` atomic. Bugzilla: transitive-closure acyclicity on every write. |
 | 10 | **Trace `seq` race**: `SELECT MAX+1` then `INSERT OR IGNORE` outside a transaction; loser reported as duplicate. Session ids collide on disk (`a.b` = `a_b`, 128→120 truncation) and overwrite. | **Done** — enforced at `viewer/src/db.rs` (`insert_trace_event`, `BEGIN IMMEDIATE`) and `viewer/src/traces.rs` (`sha256(session_id)` filenames, `?replace=1` or 409) | git-bug: IDs from exact stored bytes; FF-only pushes so merged state is never overwritten. |
 
 Smaller: `walk`/`descendants` have no cycle guard (fine until #1 tears the graph); `/plans/{*rest}` has no `..` check; comment body has no cap or rate limit; core tables have no FKs while `bugs_*` tables do; audit write failure after a successful push is a log line.

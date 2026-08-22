@@ -694,6 +694,7 @@ doors share one rule. Every gate can be satisfied or cleared. Audit and rational
 | A comment's `author` is the Tailscale actor, never a client field; `on_behalf_of` is stored apart and rendered "X via Y"; deletion is scoped to the actor. | `api.rs` (comment handler), `db.rs` (`delete_comment`) |
 | Comments degrade, never vanish: `file` must exist at the anchor commit and `line` be within it (else 400); branch delete sets `orphaned_at` and the default-branch page lists them; a comment on a file gone at tip renders as outdated, file-level. | `api.rs`, `ops.rs` (`orphan_comments`), `pages.rs` |
 | Every `branch:`/`plan:`/`tasks:` target that resolves to nothing is listed in `/brain` under `dangling` and badged on the board. | `docs.rs` (`DocIndex::dangling`), `brain.rs`, `pages.rs` |
+| `blocks:` edges form a DAG: a cycle quarantines every card on it (`front_matter_error = "blocks cycle: …"`); a `todo` card is *ready* when every blocker is `done` (`/brain` `ready`, board `?ready=1`, `nashcode ready`, `nashcode claim`). | `docs.rs` (`blocks_cycles`, `DocIndex::ready`), `brain.rs`, `cli/src/commands/card.rs` |
 | Trace `seq` allocation is one `BEGIN IMMEDIATE` transaction (retried on busy); transcripts are keyed by `sha256(session_id)` and never overwritten without `?replace=1` (409 otherwise). | `db.rs` (`insert_trace_event`), `traces.rs`, `web/traces.rs` |
 
 ## Webhooks
