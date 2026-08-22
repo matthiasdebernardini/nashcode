@@ -28,7 +28,7 @@ This file is for agents that are *building* it.
 - **The repo is now a workspace**: `viewer/` (package `nashcode`, binary
   `nashcode-viewer`) and `cli/` (package `nashcode-cli`, binary `nashcode`), merged with
   full history from both original repos.
-- `cargo nextest run --workspace` — 360 tests (271 viewer + 89 cli), all passing.
+- `cargo nextest run --workspace` — 816 tests, all passing.
 - `cargo clippy --workspace --all-targets` — clean.
 - Fresh clone plus `cargo build` produces both runnable binaries: the viewer's
   `build.rs` runs `npm ci` and esbuild and embeds the bundles.
