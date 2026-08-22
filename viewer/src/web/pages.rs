@@ -25,7 +25,8 @@ path_param!(repo);
 path_param!(*rest);
 
 /// Action suffixes parsed off the branch catch-all. A branch name may not end with one.
-const ACTION_SUFFIXES: [&str; 5] = ["ci/rerun", "ci", "merge", "restack", "delete"];
+const ACTION_SUFFIXES: [&str; 6] =
+    ["ci/rerun", "ci/requeue", "ci", "merge", "restack", "delete"];
 
 /// Split `rest` into `(branch, action)`.
 pub fn split_action(rest: &str) -> (&str, Option<&str>) {
@@ -45,7 +46,12 @@ fn join_rest(cx: &Cx) -> String {
 }
 
 async fn ci_for(cx: &Cx, repo: &str, tip: &str) -> Option<String> {
-    app(cx).db.latest_run(repo, tip).ok().flatten().map(|run| run.status)
+    app(cx)
+        .db
+        .latest_run(repo, tip)
+        .ok()
+        .flatten()
+        .map(|run| run.effective_status().to_owned())
 }
 
 // ---- / ---------------------------------------------------------------------------
@@ -1145,9 +1151,10 @@ async fn repo_ci(cx: &Cx) -> Result {
 
 #[component]
 async fn ci_run_row(#[into] repo: String, run: CiRun) -> Result {
+    let effective = run.effective_status().to_owned();
     view! {
         <div class="Box-row d-flex flex-items-center gap-2">
-            ci_icon(run_status: Some(run.status.clone()))
+            ci_icon(run_status: Some(effective))
             branch_label(repo: repo.clone(), branch: run.branch.clone())
             <code class="commit-sha">(run.commit.chars().take(8).collect::<String>())</code>
             <a href=(format!("/{repo}/{}/ci?run={}", run.branch, run.id)) class="Link--secondary text-small">
@@ -1855,6 +1862,9 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
     let parent = node.parent.clone();
     let ci = ci_for(cx, &name, &node.tip).await;
     let ci_blocks = status::blocks_merge(ci.as_deref());
+    // Stuck is not failed: nothing ran this to a red result, so the escape is a
+    // requeue, not the "merge despite CI" override.
+    let ci_stuck = ci.as_deref() == Some(status::STUCK);
 
     let default_tip = graph
         .get(&graph.default_branch)
@@ -1882,6 +1892,14 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
                     }
                     ci_icon(run_status: ci.clone())
                     <a class="Link--secondary text-small" href=(format!("/{name}/{branch}/ci"))>"ci log"</a>
+                    if ci_stuck {
+                        <span class="text-small color-fg-attention">"CI stopped reporting"</span>
+                        <form method="post" action=(format!("/{name}/{branch}/ci/requeue"))>
+                            <button type="submit" class="btn btn-sm">
+                                <i class="ph ph-arrow-counter-clockwise"></i>" Requeue"
+                            </button>
+                        </form>
+                    }
                     if !is_default {
                         <form method="post" action=(format!("/{name}/{branch}/merge")) class="ml-auto d-flex flex-items-center gap-2">
                             <label class="text-small color-fg-muted">
@@ -2089,6 +2107,15 @@ async fn ci_log_page(cx: &Cx, name: &str, branch: &str) -> Result {
         .and_then(|r| r.log_path.as_ref())
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|raw| strip_ansi(&raw));
+    let effective = run.as_ref().map(|r| r.effective_status().to_owned());
+    let stuck = effective.as_deref() == Some(status::STUCK);
+    // A run that ended without producing a log still owes the reader a reason.
+    let no_log = run
+        .as_ref()
+        .map(|r| {
+            if r.note.is_empty() { "This run produced no log.".to_owned() } else { r.note.clone() }
+        })
+        .unwrap_or_default();
 
     view! { cx =>
         shell(title: format!("{name} · {branch} · ci"), repo: name.clone(), active: "ci", status: Some(ctx.status.clone()),
@@ -2096,7 +2123,7 @@ async fn ci_log_page(cx: &Cx, name: &str, branch: &str) -> Result {
                 <h3 class="mb-0"><i class="ph ph-play"></i>" CI · "</h3>
                 branch_label(repo: name.clone(), branch: branch.clone())
                 if let Some(run) = &run {
-                    ci_icon(run_status: Some(run.status.clone()))
+                    ci_icon(run_status: effective.clone())
                     <code class="commit-sha">(run.commit.chars().take(8).collect::<String>())</code>
                     <span class="color-fg-muted text-small">(format!("{} · {}ms", run.created_at, run.duration_ms))</span>
                 }
@@ -2105,11 +2132,18 @@ async fn ci_log_page(cx: &Cx, name: &str, branch: &str) -> Result {
                         <i class="ph ph-arrow-counter-clockwise"></i>" Re-run"
                     </button>
                 </form>
+                if stuck {
+                    <form method="post" action=(format!("/{name}/{branch}/ci/requeue"))>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="ph ph-arrow-counter-clockwise"></i>" Requeue this run"
+                        </button>
+                    </form>
+                }
             </div>
             <div class="Box">
                 match (&run, &log) {
                     (None, _) => <div class="Box-body color-fg-muted">"No CI run recorded for this branch yet."</div>,
-                    (Some(_), None) => <div class="Box-body color-fg-muted">"This run produced no log."</div>,
+                    (Some(_), None) => <div class="Box-body color-fg-muted">(no_log.clone())</div>,
                     (Some(_), Some(log)) => <pre class="Box-body nashcode-ci-log text-small">(log.clone())</pre>,
                 }
             </div>

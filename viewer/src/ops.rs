@@ -277,7 +277,7 @@ impl Ops {
             .ok_or_else(|| OpError::Blocked("the default branch has no parent to merge into".into()))?;
 
         let ci = self.db.latest_run(repo_name, &node.tip).ok().flatten();
-        let ci_status = ci.as_ref().map(|run| run.status.clone());
+        let ci_status = ci.as_ref().map(|run| run.effective_status().to_owned());
         if status::blocks_merge(ci_status.as_deref()) && !allow_red {
             return Err(OpError::Blocked(format!(
                 "CI for {} is {}; confirm to merge anyway",

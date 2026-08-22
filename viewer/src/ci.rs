@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use crate::code::Indexer;
 use crate::config::Config;
-use crate::db::{Db, status};
+use crate::db::{CiRun, Db, status};
 use crate::git::{Repo, clone_local};
 use crate::hooks::{self, Webhooks};
 
@@ -30,6 +30,10 @@ pub const CI_SCRIPT: &str = ".nashcode/ci";
 
 /// How long a job may run before it is killed.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// How often a running job says it is still alive. Five missed beats read as stuck —
+/// see [`crate::db::status::HEARTBEAT_STALE_SECS`].
+pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
@@ -111,6 +115,32 @@ impl CiQueue {
             tracing::warn!(repo, branch, "CI worker is gone; run stays queued");
         }
         Some(run_id)
+    }
+
+    /// Put a recorded run back on the queue, keeping its row and its commit.
+    ///
+    /// This is the escape from a run nothing is executing any more. `enqueue` records
+    /// a *new* run for whatever the branch points at now, which is a different
+    /// question from "finish the run that was already answering for this commit".
+    pub fn requeue(&self, run: &CiRun) -> bool {
+        match self.db.requeue_run(run.id) {
+            Ok(true) => {}
+            Ok(false) => return false,
+            Err(error) => {
+                tracing::warn!(run = run.id, %error, "cannot requeue the run");
+                return false;
+            }
+        }
+        let job = Job {
+            run_id: run.id,
+            repo: run.repo.clone(),
+            branch: run.branch.clone(),
+            commit: run.commit.clone(),
+        };
+        if self.tx.send(Task::Ci(job)).is_err() {
+            tracing::warn!(run = run.id, "CI worker is gone; run stays queued");
+        }
+        true
     }
 
     /// Queue a code index rebuild. `branch` narrows it to the default branch — pass
@@ -210,7 +240,23 @@ impl CiWorker {
         let started = Instant::now();
         let _ = self.db.set_run_status(job.run_id, status::RUNNING, 0, None);
 
+        // The heartbeat. Without it, a worker that dies mid-job leaves a `running`
+        // row that blocks every merge on that commit until a person notices; with it
+        // the row goes quiet and reads as stuck.
+        // ponytail: one task per job; make it one sweeper over every in-flight run if
+        // the queue ever runs more than one at a time.
+        let heartbeat = {
+            let db = self.db.clone();
+            let run_id = job.run_id;
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(HEARTBEAT_EVERY).await;
+                    let _ = db.touch_run(run_id);
+                }
+            })
+        };
         let (outcome, log) = self.execute(job).await;
+        heartbeat.abort();
         let duration_ms = started.elapsed().as_millis() as i64;
 
         let log_path = if log.is_empty() { None } else { Some(self.write_log(job.run_id, &log)) };

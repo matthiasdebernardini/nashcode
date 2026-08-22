@@ -405,6 +405,21 @@ async fn branch_action(cx: &Cx, body: topcoat::router::request::Bytes) -> Result
             };
             respond(result)
         }
+        // The wedge escape. `ci/rerun` asks a new question about the branch's current
+        // tip; requeue finishes the run that was already answering for this one.
+        // ponytail: requeues the tip's latest run; take a run id in the body when an
+        // older run needs rescuing.
+        Some("ci/requeue") => {
+            let repo = app(cx).mirrors.repo(&name);
+            let result = match repo.tip(&branch).await {
+                Ok(tip) => match app(cx).db.latest_run(&name, &tip).ok().flatten() {
+                    Some(run) if app(cx).ci.requeue(&run) => Ok(format!("/{name}/{branch}/ci")),
+                    _ => Err(OpError::NotFound(format!("a CI run for {branch}"))),
+                },
+                Err(_) => Err(OpError::NotFound(format!("branch {branch}"))),
+            };
+            respond(result)
+        }
         Some("delete") => {
             let result = app(cx)
                 .ops

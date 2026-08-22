@@ -158,6 +158,8 @@ pub async fn ci_icon(#[default] run_status: Option<String>) -> Result {
         Some(status::FAILED) | Some(status::ERROR) => ("ph-x-circle", "color-fg-danger", "failed"),
         Some(status::TIMEOUT) => ("ph-x-circle", "color-fg-danger", "timed out"),
         Some(status::RUNNING) => ("ph-hourglass", "color-fg-attention", "running"),
+        // Not a result: nothing is executing this run, and nothing will.
+        Some(status::STUCK) => ("ph-plugs", "color-fg-attention", "stuck, no heartbeat"),
         Some(status::QUEUED) => ("ph-clock", "color-fg-attention", "queued"),
         Some(status::SKIPPED) => ("ph-minus-circle", "color-fg-muted", "no ci script"),
         _ => ("ph-minus-circle", "color-fg-subtle", "never ran"),
