@@ -10,7 +10,7 @@
 //! relation is a strict partial order, so the result is always a forest and never a
 //! cycle.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::git::{Commit, GitResult, Repo};
 
@@ -39,12 +39,11 @@ impl StackGraph {
     /// Infer the whole graph by asking git about every branch pair.
     pub async fn infer(repo: &Repo) -> GitResult<Self> {
         let default_branch = repo.default_branch().await?;
-        let branches = repo.branches().await?;
-
-        let mut tips = BTreeMap::new();
-        for branch in &branches {
-            tips.insert(branch.clone(), repo.tip(branch).await?);
-        }
+        // One ref snapshot for the whole graph. Asking for each tip separately can
+        // straddle a fetch and mix old tips with new ones, which yields wrong merge
+        // bases and so wrong parents.
+        let tips = repo.tips().await?;
+        let branches: Vec<String> = tips.keys().cloned().collect();
 
         let mut nodes: BTreeMap<String, BranchNode> = BTreeMap::new();
         for branch in &branches {
@@ -145,9 +144,14 @@ impl StackGraph {
             .map(|node| node.children.clone())
             .unwrap_or_default();
         // Breadth-first keeps a parent ahead of its own children, which is the order a
-        // restack has to rebase them in.
+        // restack has to rebase them in. `seen` bounds the walk: a torn graph can point
+        // a child back at an ancestor, and a restack must not queue branches forever.
+        let mut seen: BTreeSet<String> = BTreeSet::from([branch.to_owned()]);
         while let Some(name) = queue.first().cloned() {
             queue.remove(0);
+            if !seen.insert(name.clone()) {
+                continue;
+            }
             if let Some(node) = self.nodes.get(&name) {
                 out.push(name);
                 queue.extend(node.children.clone());
@@ -163,6 +167,13 @@ fn walk(
     prefix: &mut Vec<String>,
     chains: &mut Vec<Vec<String>>,
 ) {
+    // The current path is the visited set: a torn graph can name an ancestor as a
+    // child, and rendering the stacks page must not recurse forever. Cut the chain
+    // where it turns back on itself and keep what was walked so far.
+    if prefix.contains(&node.branch) {
+        chains.push(prefix.clone());
+        return;
+    }
     prefix.push(node.branch.clone());
     if node.children.is_empty() {
         chains.push(prefix.clone());
