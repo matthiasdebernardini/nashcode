@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Digest undigested meeting transcripts in the current repo with Claude Code, headless.
+# Usage: bin/meeting-digest [transcripts/YYYY/MM/<id>.md]
+# ponytail: one headless claude run; add a lock file if two callers ever overlap.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+target="${1:-every transcript with digested: false}"
+exec claude -p "Run the meeting-digest skill on: $target" --allowedTools "Read,Edit,Write,Bash(git *)" --permission-mode acceptEdits
