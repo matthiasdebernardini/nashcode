@@ -314,6 +314,62 @@ async fn board_move(cx: &Cx, Json(input): Json<MoveIn>) -> Result<Response> {
     }
 }
 
+// ---- transcripts -----------------------------------------------------------------
+
+/// `POST /{repo}/transcripts` — file a finished meeting transcript as
+/// `transcripts/YYYY/MM/<id>.md` on the default branch, committed as the Tailscale
+/// user and pushed. The id is the UTC start minute plus a slug of the title; a name
+/// already taken at the default-branch tip gets a `-2`, `-3`, … suffix instead of
+/// overwriting the earlier meeting. Responds 201 with the id, path, and commit.
+#[route(POST "/{repo}/transcripts")]
+async fn transcript_post(
+    cx: &Cx,
+    Json(payload): Json<crate::transcripts::TranscriptPayload>,
+) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    if !ctx.status.available {
+        return json_error(StatusCode::BAD_GATEWAY, "no mirror for this repo yet");
+    }
+    if let Err(message) = payload.validate() {
+        return Err(bad_request(message).into());
+    }
+
+    let repo = app(cx).mirrors.repo(&name);
+    let default_branch = repo.default_branch().await?;
+    let tip = repo.tip(&default_branch).await?;
+    let mut chosen = None;
+    for n in 1..=99 {
+        let (id, path) = crate::transcripts::candidate(&payload, n);
+        if repo.show_file(&tip, &path).await?.is_none() {
+            chosen = Some((id, path));
+            break;
+        }
+    }
+    let Some((id, path)) = chosen else {
+        return json_error(StatusCode::CONFLICT, "too many transcripts share this id");
+    };
+
+    let markdown = crate::transcripts::render_markdown(&id, &payload);
+    let who = actor(cx);
+    let message = format!("meeting: {id}");
+    match app(cx).ops.commit_file(&name, &path, &markdown, &message, &who).await {
+        Ok(commit) => {
+            let body =
+                serde_json::json!({ "ok": true, "id": id, "path": path, "commit": commit })
+                    .to_string();
+            let mut response = Response::new(topcoat::router::Body::from(body));
+            *response.status_mut() = StatusCode::CREATED;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            );
+            Ok(response)
+        }
+        Err(error) => op_error(error),
+    }
+}
+
 // ---- branch actions --------------------------------------------------------------
 
 #[derive(Debug, Default, Deserialize)]

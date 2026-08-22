@@ -230,6 +230,26 @@ You do not need to close it yourself.
 If front matter will not parse, the card lands in a "needs attention" column instead of
 breaking the board. Look there when a card goes missing.
 
+## Transcripts
+
+POST a finished meeting and it lands as one commit on the default branch, at
+`transcripts/YYYY/MM/<id>.md`. The id is the UTC start minute plus a slug of the title.
+A name already taken gets a `-2` suffix, so nothing overwrites an earlier meeting. The
+file holds front matter (`id`, `title`, `started_at`, `attendees`, `digested: false`),
+the action items, and the turns. The reply is `201` with `id`, `path`, and `commit`.
+
+```sh
+curl -X POST "$NASHCODE/$REPO/transcripts" \
+  -H 'content-type: application/json' \
+  -d '{"title":"Weekly sync","started_at":"2026-06-12T15:00:00Z",
+       "ended_at":"2026-06-12T15:30:00Z","speakers":[{"id":"S1","name":"Rob"}],
+       "segments":[{"speaker":"S1","start_ms":5000,"end_ms":9000,"text":"Morning."}]}'
+```
+
+Bad payloads get `400` with the reason. A browser extension must POST from its service
+worker: a content script sends `Sec-Fetch-Site: cross-site`, which the origin check
+refuses.
+
 ## State
 
 `GET /brain` returns everything nashcode knows, as one JSON document: every repo's branches

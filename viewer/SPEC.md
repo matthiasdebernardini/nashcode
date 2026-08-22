@@ -196,6 +196,22 @@ way it moves anything else: edit the file, push.
   UI shows a toast and the card snaps back.
 - `board` joins the reserved branch-name words.
 
+## Meeting transcripts
+
+- `POST /:repo/transcripts` takes the browser extension's finished transcript (title,
+  RFC3339 `started_at`/`ended_at`, speakers, segments, optional calendar event and action
+  items) and files it as `transcripts/YYYY/MM/<id>.md`, one commit on the default branch
+  through the same write path as a board move.
+- The id is the UTC start minute plus a slug of the title. A name already taken at the
+  default-branch tip gets a `-2`, `-3`, … suffix, so a same-minute same-title meeting
+  never overwrites the earlier one.
+- The file is front matter (`id`, `title`, times, `attendees`, `digested: false`), the
+  action items, then one line per turn — consecutive segments by one speaker merged.
+  Nothing about a transcript lives in SQLite; the file is the record.
+- A payload that cannot be filed (no segments, no speakers, a segment naming an
+  undeclared speaker, times that run backwards) is refused with `400` and the reason.
+- `transcripts` joins the reserved branch-name words.
+
 ## Code browser parity
 
 The tree/blob pages grow toward GitHub's file browser. Order of value: read well first,
