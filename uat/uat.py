@@ -204,6 +204,9 @@ def build_fixtures(root):
         'python3 -m py_compile src/*.py && echo "all green"\n',
         mode=0o755,
     )
+    # The opt-in. Read from the default branch only, so a pushed branch cannot turn CI
+    # on or hand itself the token.
+    write(f"{demo}/.nashcode/ci.toml", "enabled = true\ngit_token = true\n")
     write(
         f"{demo}/plans/retries.md",
         "---\nbranch: feat/retry-core\n---\n\n# Retry policy\n\n"

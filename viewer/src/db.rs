@@ -119,7 +119,8 @@ impl CiRun {
 /// The note left on runs a restart found in flight.
 pub const ORPHANED: &str = "orphaned by restart";
 
-/// The status vocabulary. `Skipped` means the repo has no `.nashcode/ci` script.
+/// The status vocabulary. `Skipped` means nothing ran: either the default branch never
+/// opted in, or the repo has no `.nashcode/ci` script. The run's log says which.
 pub mod status {
     pub const QUEUED: &str = "queued";
     pub const RUNNING: &str = "running";

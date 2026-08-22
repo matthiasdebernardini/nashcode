@@ -10,9 +10,16 @@ use nashcode::ci::{CiWorker, Job};
 use nashcode::db::status;
 use nashcode::hooks::Webhooks;
 
-/// Add an executable `.nashcode/ci` to the fixture's main branch.
-fn with_ci_script(root: &std::path::Path, script: &str) -> Work {
-    let work = stacked_fixture(root, "demo");
+/// The push token the token tests hand the server. A blank one would prove nothing:
+/// "the job saw no `GIT_TOKEN`" has to mean "it was withheld", not "there was none".
+const TOKEN: &str = "s3cr3t-push-token";
+
+/// The ordinary opt-in: CI on, no token.
+const OPT_IN: &str = "enabled = true\n";
+
+/// Write an executable `.nashcode/ci` — and, when `opt_in` is `Some`, the
+/// `.nashcode/ci.toml` beside it — on the branch that is checked out, then push it.
+fn add_ci(work: &Work, branch: &str, script: &str, opt_in: Option<&str>) {
     work.write(".nashcode/ci", script);
     #[cfg(unix)]
     {
@@ -22,9 +29,47 @@ fn with_ci_script(root: &std::path::Path, script: &str) -> Work {
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).expect("chmod");
     }
+    if let Some(body) = opt_in {
+        work.write(".nashcode/ci.toml", body);
+    }
     work.commit_all("add ci script");
-    work.push("main");
+    work.push(branch);
+}
+
+/// Add an executable `.nashcode/ci` to the fixture's main branch, with the opt-in that
+/// lets it run.
+fn with_ci_script(root: &std::path::Path, script: &str) -> Work {
+    with_ci(root, script, OPT_IN)
+}
+
+/// The same, with the opt-in file spelled out.
+fn with_ci(root: &std::path::Path, script: &str, opt_in: &str) -> Work {
+    let work = stacked_fixture(root, "demo");
+    add_ci(&work, "main", script, Some(opt_in));
     work
+}
+
+/// Run a branch tip against a server that actually holds a push token, and return the
+/// job's log.
+async fn run_tip_log(bed: &common::TestBed, branch: &str) -> String {
+    bed.mirrors.refresh("demo").await;
+    let tip = bed.mirrors.repo("demo").tip(branch).await.expect("tip");
+    let run_id = bed.app.ci.enqueue("demo", branch, &tip).expect("enqueued");
+    let job = Job { run_id, repo: "demo".into(), branch: branch.into(), commit: tip.clone() };
+    let mut config = (*bed.config).clone();
+    config.git_token = TOKEN.to_owned();
+    CiWorker {
+        config: std::sync::Arc::new(config),
+        db: bed.db.clone(),
+        hooks: Webhooks::new(BTreeMap::new()),
+        timeout: Duration::from_secs(60),
+        indexer: Some(bed.indexer.clone()),
+        queue: Some(bed.app.ci.clone()),
+    }
+    .run_job(&job)
+    .await;
+    let run = bed.db.latest_run("demo", &tip).expect("query").expect("run exists");
+    std::fs::read_to_string(run.log_path.expect("log path")).expect("log file")
 }
 
 fn worker(bed: &common::TestBed, hooks: Webhooks, timeout: Duration) -> CiWorker {
@@ -84,6 +129,74 @@ async fn a_repo_without_a_ci_script_is_skipped() {
     let run = bed.db.latest_run("demo", &tip).expect("query").expect("run exists");
     assert_eq!(run.status, status::SKIPPED);
     assert!(!status::blocks_merge(Some(&run.status)));
+}
+
+/// The other way to have nothing to run: opted in, but no script to run.
+#[tokio::test]
+async fn an_opted_in_repo_with_no_script_is_still_skipped() {
+    let bed = simple_bed(|root| {
+        let work = stacked_fixture(root, "demo");
+        work.write(".nashcode/ci.toml", OPT_IN);
+        work.commit_all("opt in without a script");
+        work.push("main");
+        work
+    });
+    run_tip(&bed, Webhooks::new(BTreeMap::new()), Duration::from_secs(60), "main").await;
+    let tip = bed.mirrors.repo("demo").tip("main").await.expect("tip");
+    let run = bed.db.latest_run("demo", &tip).expect("query").expect("run exists");
+    assert_eq!(run.status, status::SKIPPED);
+    assert!(run.log_path.is_none(), "no script is not a reason worth a log file");
+}
+
+/// Invariant 5: pushing a branch is not permission to run code on the box. The opt-in
+/// lives on the default branch, so a branch that brings its own script runs nothing.
+#[tokio::test]
+async fn a_branch_script_without_the_default_branch_opt_in_is_skipped() {
+    let bed = simple_bed(|root| {
+        let work = stacked_fixture(root, "demo");
+        work.checkout("part-1");
+        add_ci(&work, "part-1", "#!/bin/sh\necho pwned\n", None);
+        work
+    });
+    run_tip(&bed, Webhooks::new(BTreeMap::new()), Duration::from_secs(60), "part-1").await;
+
+    let tip = bed.mirrors.repo("demo").tip("part-1").await.expect("tip");
+    let run = bed.db.latest_run("demo", &tip).expect("query").expect("run exists");
+    assert_eq!(run.status, status::SKIPPED);
+    // Nothing ran, so nothing is wrong: a repo that never opted in still merges.
+    assert!(!status::blocks_merge(Some(&run.status)));
+    let log = std::fs::read_to_string(run.log_path.expect("log path")).expect("log file");
+    assert_eq!(log, "ci not enabled on default branch");
+}
+
+/// The second half of the invariant: the opt-in alone buys no token, and a branch
+/// cannot vote itself one by shipping its own `ci.toml`.
+#[tokio::test]
+async fn a_branch_cannot_grant_itself_the_git_token() {
+    let bed = simple_bed(|root| {
+        let script = "#!/bin/sh\necho token=${GIT_TOKEN:-unset}\n";
+        let work = with_ci(root, script, OPT_IN);
+        work.checkout("part-1");
+        add_ci(&work, "part-1", script, Some("enabled = true\ngit_token = true\n"));
+        work
+    });
+    let log = run_tip_log(&bed, "part-1").await;
+    assert!(log.contains("token=unset"), "{log}");
+    assert!(!log.contains(TOKEN), "the push token reached the job: {log}");
+}
+
+/// And the door does open, for the one repo whose default branch asked.
+#[tokio::test]
+async fn git_token_true_on_the_default_branch_hands_the_job_the_token() {
+    let bed = simple_bed(|root| {
+        with_ci(
+            root,
+            "#!/bin/sh\necho token=${GIT_TOKEN:-unset}\n",
+            "enabled = true\ngit_token = true\n",
+        )
+    });
+    let log = run_tip_log(&bed, "main").await;
+    assert!(log.contains(&format!("token={TOKEN}")), "{log}");
 }
 
 #[tokio::test]
