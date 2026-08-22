@@ -677,6 +677,25 @@ The write path to git (the viewer pushes to dgit with `GIT_TOKEN`):
 - Every merge/restack records `(who, what, when, old tip, new tip)` in SQLite — that log
   is the audit trail, shown on the repo page.
 
+## Invariants
+
+Rules the viewer holds, each at the lowest layer that can hold it: parser before HTTP
+handler, database before app code, startup reconciliation before runtime polling. Two
+doors share one rule. Every gate can be satisfied or cleared. Audit and rationale:
+`plans/invariants.md`.
+
+| Rule | Enforced at |
+|---|---|
+| Stack parents come from one ref snapshot; `descendants`/`walk` terminate on a cyclic graph. | `stack.rs` (`StackGraph::infer` → `Repo::tips()`; visited set) |
+| No CI run blocks merge forever: rows in flight at open become `error` ("orphaned by restart"); a running job heartbeats every 60 s; a `running` row quiet for 5 min reads as `stuck`, which does not block and can be requeued. | `db.rs` (`Db::open`, `CiRun::effective_status`), `ci.rs`, `POST /:repo/:branch/ci/requeue` |
+| Card status alphabet (`[a-z0-9-_]`, ≤ 40 chars, never `needs-attention`) is one function used by the parser and the move endpoint; a pushed violation is quarantined with `front_matter_error = "invalid status"`. | `docs.rs` (`valid_status`, `parse_document`), `api.rs` (`board_move`) |
+| A branch is claimed by at most one card and one plan; more is a `conflict` on the branch page and in `/brain`, and merge refuses until one remains. | `docs.rs` (`DocIndex::conflicts`), `ops.rs` (merge precondition) |
+| CI runs only when the default branch carries `.nashcode/ci.toml` with `enabled = true`; `GIT_TOKEN` enters the job env only with `git_token = true` there. Anything else is `skipped`. | `ci.rs` (`policy`, read from the default-branch tip before the clone) |
+| A comment's `author` is the Tailscale actor, never a client field; `on_behalf_of` is stored apart and rendered "X via Y"; deletion is scoped to the actor. | `api.rs` (comment handler), `db.rs` (`delete_comment`) |
+| Comments degrade, never vanish: `file` must exist at the anchor commit and `line` be within it (else 400); branch delete sets `orphaned_at` and the default-branch page lists them; a comment on a file gone at tip renders as outdated, file-level. | `api.rs`, `ops.rs` (`orphan_comments`), `pages.rs` |
+| Every `branch:`/`plan:`/`tasks:` target that resolves to nothing is listed in `/brain` under `dangling` and badged on the board. | `docs.rs` (`DocIndex::dangling`), `brain.rs`, `pages.rs` |
+| Trace `seq` allocation is one `BEGIN IMMEDIATE` transaction (retried on busy); transcripts are keyed by `sha256(session_id)` and never overwritten without `?replace=1` (409 otherwise). | `db.rs` (`insert_trace_event`), `traces.rs`, `web/traces.rs` |
+
 ## Webhooks
 
 Outgoing only (dgit emits none; the viewer's poller is the event source). `$NASHCODE_WEBHOOKS`
