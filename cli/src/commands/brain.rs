@@ -84,10 +84,8 @@ pub fn digest(stanza: &Value) -> Value {
 /// not decode — a shell pipeline, a log line, a person with `cat`.
 fn scrub(value: &mut Value) {
     match value {
-        Value::String(text) => {
-            if text.chars().any(|c| c.is_control() || c == '\u{7f}') {
-                *text = clean(text);
-            }
+        Value::String(text) if text.chars().any(|c| c.is_control() || c == '\u{7f}') => {
+            *text = clean(text);
         }
         Value::Array(rows) => rows.iter_mut().for_each(scrub),
         Value::Object(map) => map.values_mut().for_each(scrub),
