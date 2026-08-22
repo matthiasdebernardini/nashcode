@@ -1958,3 +1958,35 @@ the longest a pushed repo can stay invisible.
 **Out of scope, and wanted: `PUT /:repo/track`.** Discovery sees what dgit lists, which
 is its public repos. A private repo needs the operator to say so by name, and there is no
 door for that yet — `NASHCODE_REPOS` is the only way in. Not built here.
+
+## Invariants (plans/invariants.md)
+
+**A stuck CI run does not block merge.** The goal said "treat as `error`", but `error`
+blocks, and the point was to stop wedging. A `running` row with no heartbeat for five
+minutes carries the same information as a run that never happened, and `blocks_merge(None)`
+is already false. Orphans found at open still become `error`: that is terminal and
+clearable, not pending forever. One line in `status::blocks_merge` flips it if requeue
+should be the only way out.
+
+**Transcripts are keyed by `sha256`, not blake3.** `sha2` is already a direct dependency;
+blake3 is only transitive. No new crate for a filename.
+
+**The CI policy is read from the default branch before the scratch clone.** A branch that
+is not allowed to run never gets written to disk. Every read failure — missing file, bad
+UTF-8, bad TOML — is "off", so the gate fails closed.
+
+**Two cards on one branch block the merge before the push**, next to the CI gate, so
+nothing flips halfway. Cards are counted by `tasks/` directory, not `is_card()`: a plan
+with `status:` would otherwise count as a card, and the directory is what the flip rewrites.
+
+**Orphaned comments show on the default branch page.** Nothing links a comment row to the
+branch it merged into; tracking that needs a second column. The default branch is where
+everything merges and `branch_page` already knows `is_default`.
+
+**Dangling refs over-report, never under-report.** `DocIndexCache` is keyed on
+`repo@commit` and branch existence is not a function of the commit, so a branch created
+without moving the tip stays "dangling" until the tip moves. The stale direction is the
+safe one. `// ponytail: put the branch set in the cache key if it bites`.
+
+**`add_columns` lives in `db.rs`.** Calling it from `bugs::index` made `db → bugs`, a
+cycle the pre-commit hook caught. It is generic SQLite plumbing; `bugs` now imports it.
