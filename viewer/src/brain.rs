@@ -198,11 +198,26 @@ async fn git_repo_json(
         }));
     }
 
+    // Branches two cards (or two plans) both claim. Empty for a healthy repo, and the
+    // one place an agent can see the ambiguity before a merge refuses it.
+    let conflicts: Vec<serde_json::Value> = index
+        .conflicts
+        .iter()
+        .map(|(branch, paths)| {
+            serde_json::json!({
+                "branch": branch,
+                "kind": crate::docs::conflict_kind(paths),
+                "paths": paths,
+            })
+        })
+        .collect();
+
     serde_json::json!({
         "default_branch": graph.default_branch,
         "branches": branches,
         "plans": plans,
         "cards": cards,
+        "conflicts": conflicts,
     })
 }
 

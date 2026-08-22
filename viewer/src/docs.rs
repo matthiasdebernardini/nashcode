@@ -339,6 +339,11 @@ pub struct DocIndex {
     pub by_branch: BTreeMap<String, Vec<String>>,
     /// Plan path -> documents referencing it through `plan:` or `tasks:`.
     pub referencing_plan: BTreeMap<String, Vec<String>>,
+    /// Branches claimed by more than one card, or by more than one plan, as
+    /// `(branch, the claiming paths)`. A branch is allowed one card and one plan; a
+    /// second claimant makes every lookup a coin toss, so it is recorded here rather
+    /// than settled silently by whichever path sorts first.
+    pub conflicts: Vec<(String, Vec<String>)>,
 }
 
 impl DocIndex {
@@ -369,6 +374,18 @@ impl DocIndex {
             .unwrap_or_default()
     }
 
+    /// Every card declaring `branch: <branch>`. More than one is the conflict.
+    ///
+    /// By directory, the way the merge flip picks the files it rewrites — not by
+    /// [`Document::is_card`], which a plan carrying a `status:` also answers yes to.
+    pub fn cards_for_branch(&self, branch: &str) -> Vec<&Document> {
+        let prefix = format!("{TASKS_DIR}/");
+        self.documents_for_branch(branch)
+            .into_iter()
+            .filter(|d| d.path.starts_with(&prefix))
+            .collect()
+    }
+
     /// The single card that owns a branch, if exactly one claims it.
     pub fn card_for_branch(&self, branch: &str) -> Option<&Document> {
         self.documents_for_branch(branch).into_iter().find(|d| d.is_card())
@@ -376,6 +393,11 @@ impl DocIndex {
 
     pub fn plan_for_branch(&self, branch: &str) -> Option<&Document> {
         self.documents_for_branch(branch).into_iter().find(|d| !d.is_card())
+    }
+
+    /// The claimant groups fighting over `branch`, empty when nothing conflicts.
+    pub fn conflicts_for_branch(&self, branch: &str) -> Vec<&Vec<String>> {
+        self.conflicts.iter().filter(|(b, _)| b == branch).map(|(_, paths)| paths).collect()
     }
 
     /// Every markdown file in the repo: the wiki's whole surface, in path order.
@@ -476,8 +498,16 @@ impl DocIndexCache {
     }
 }
 
+/// What a conflict group is made of, for the sentence that reports it.
+pub fn conflict_kind(paths: &[String]) -> &'static str {
+    match paths.first() {
+        Some(path) if path.starts_with(&format!("{TASKS_DIR}/")) => "cards",
+        _ => "plans",
+    }
+}
+
 /// Read every plan and card in the tree at `commit` and derive the back-links.
-async fn scan(repo: &Repo, commit: &str) -> GitResult<DocIndex> {
+pub async fn scan(repo: &Repo, commit: &str) -> GitResult<DocIndex> {
     let all_paths: BTreeSet<String> = repo.list_files(commit, "").await?.into_iter().collect();
 
     let mut documents = BTreeMap::new();
@@ -516,7 +546,32 @@ async fn scan(repo: &Repo, commit: &str) -> GitResult<DocIndex> {
         paths.dedup();
     }
 
-    Ok(DocIndex { commit: commit.to_owned(), documents, all_paths, by_branch, referencing_plan })
+    // One card and one plan per branch. The two kinds are counted apart because a
+    // branch is allowed one of each; two of either kind is a conflict nobody can
+    // resolve for the reader, so it is named instead of hidden.
+    let tasks_prefix = format!("{TASKS_DIR}/");
+    let mut conflicts: Vec<(String, Vec<String>)> = Vec::new();
+    for (branch, paths) in &by_branch {
+        for cards in [true, false] {
+            let claimants: Vec<String> = paths
+                .iter()
+                .filter(|path| path.starts_with(&tasks_prefix) == cards)
+                .cloned()
+                .collect();
+            if claimants.len() > 1 {
+                conflicts.push((branch.clone(), claimants));
+            }
+        }
+    }
+
+    Ok(DocIndex {
+        commit: commit.to_owned(),
+        documents,
+        all_paths,
+        by_branch,
+        referencing_plan,
+        conflicts,
+    })
 }
 
 #[cfg(test)]

@@ -1873,6 +1873,20 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
     let index = app(cx).docs.get(&name, &repo, &default_tip).await;
     let linked_docs: Vec<Document> =
         index.documents_for_branch(&branch).into_iter().cloned().collect();
+    // One card and one plan per branch: say so here, because this is the page whose
+    // merge button the second claimant is about to block.
+    let doc_conflicts: Vec<String> = index
+        .conflicts_for_branch(&branch)
+        .into_iter()
+        .map(|paths| {
+            format!(
+                "{} {} claim this branch: {}",
+                paths.len(),
+                docs::conflict_kind(paths),
+                paths.join(", ")
+            )
+        })
+        .collect();
 
     let title = format!("{name} · {branch}");
     view! { cx =>
@@ -1947,6 +1961,12 @@ async fn branch_page(cx: &Cx, name: &str, branch: &str) -> Result {
                         for child in children {
                             branch_label(key: child.clone(), repo: n.clone(), branch: child.clone())
                         }
+                    </div>
+                }
+                for message in doc_conflicts {
+                    <div key=(message.clone()) class="Box-row text-small color-fg-danger d-flex gap-2 flex-items-center">
+                        <i class="ph ph-warning"></i>
+                        (message.clone())
                     </div>
                 }
                 if !linked_docs.is_empty() {

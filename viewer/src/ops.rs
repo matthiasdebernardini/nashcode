@@ -286,6 +286,22 @@ impl Ops {
             )));
         }
 
+        // One card per branch. Two claimants make the flip below rewrite both, so the
+        // merge stops here — before the scratch clone, next to the CI gate — rather
+        // than picking a winner nobody asked for.
+        let default_branch = graph.default_branch.clone();
+        let default_tip = mirror.tip(&default_branch).await?;
+        let claimed_by = docs::scan(&mirror, &default_tip).await?;
+        let claimants = claimed_by.cards_for_branch(branch);
+        if claimants.len() > 1 {
+            let paths: Vec<&str> = claimants.iter().map(|card| card.path.as_str()).collect();
+            return Err(OpError::Blocked(format!(
+                "branch {branch} is claimed by {} cards; keep one: {}",
+                claimants.len(),
+                paths.join(", ")
+            )));
+        }
+
         let branch_tip = node.tip.clone();
         let scratch =
             Scratch::of_mirror(&self.config.mirror_path(repo_name), self.mirrors.auth(), actor)
@@ -319,7 +335,6 @@ impl Ops {
         let new_tip = scratch.git(&["rev-parse", "HEAD"]).await?.trim().to_owned();
 
         // Card automation: flip `branch: <branch>` cards to done on the default branch.
-        let default_branch = graph.default_branch.clone();
         let cards_done = self
             .flip_cards_done(&scratch, &mirror, &default_branch, &parent, repo_name, branch)
             .await?;
