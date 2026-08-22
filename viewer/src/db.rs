@@ -8,7 +8,9 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::{Deserialize, Serialize};
 use time::format_description::BorrowedFormatItem;
 use time::macros::format_description;
@@ -174,6 +176,15 @@ impl std::fmt::Debug for Db {
 }
 
 pub type DbResult<T> = Result<T, rusqlite::Error>;
+
+/// Did another connection hold the write lock? The caller can just try again.
+fn busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(e, _)
+            if e.code == ErrorCode::DatabaseBusy || e.code == ErrorCode::DatabaseLocked
+    )
+}
 
 impl Db {
     /// Open (creating if needed) the database at `path` and apply the schema.
@@ -423,36 +434,66 @@ impl Db {
     // ---- traces ----------------------------------------------------------------
 
     /// Store one trace event. `seq: None` gets the session's next number; a duplicate
-    /// `(repo, session, seq)` is ignored, which is what makes batch retries safe.
-    /// Returns true when a row was written.
+    /// `(repo, session, seq)` sent by a client is ignored, which is what makes batch
+    /// retries safe. Returns true when a row was written.
+    ///
+    /// Allocation and insert are one `BEGIN IMMEDIATE` critical section. As two
+    /// statements they are a race: a second writer reads the same `MAX(seq)`, picks the
+    /// same number, and its event then vanishes into `INSERT OR IGNORE` with nothing
+    /// said about it.
     pub fn add_trace_event(&self, event: &NewTraceEvent) -> DbResult<bool> {
         self.with(|conn| {
-            let seq: i64 = match event.seq {
-                Some(seq) => seq,
-                None => conn.query_row(
-                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM trace_events
-                     WHERE repo = ?1 AND session = ?2",
-                    params![event.repo, event.session],
-                    |row| row.get(0),
-                )?,
-            };
-            let changed = conn.execute(
-                "INSERT OR IGNORE INTO trace_events
-                     (repo, session, seq, kind, payload, head, agent, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    event.repo,
-                    event.session,
-                    seq,
-                    event.kind,
-                    event.payload,
-                    event.head,
-                    event.agent,
-                    now()
-                ],
-            )?;
-            Ok(changed > 0)
+            // `busy_timeout` already waits out a held write lock. These retries cover
+            // the case where it gives up anyway, under a long-running writer.
+            let mut busy_error = None;
+            for _ in 0..5 {
+                match Self::insert_trace_event(conn, event) {
+                    Err(error) if busy(&error) => busy_error = Some(error),
+                    outcome => return outcome,
+                }
+            }
+            Err(busy_error.expect("the loop returns early on every non-busy outcome"))
         })
+    }
+
+    /// One attempt at allocate-and-insert, as a single critical section.
+    fn insert_trace_event(conn: &Connection, event: &NewTraceEvent) -> DbResult<bool> {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        let seq: i64 = match event.seq {
+            Some(seq) => seq,
+            None => tx.query_row(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM trace_events
+                 WHERE repo = ?1 AND session = ?2",
+                params![event.repo, event.session],
+                |row| row.get(0),
+            )?,
+        };
+        // A client-supplied seq may legitimately repeat: that is the retry contract. An
+        // allocated one cannot, so let the unique index raise rather than swallow it.
+        let sql = if event.seq.is_some() {
+            "INSERT OR IGNORE INTO trace_events
+                 (repo, session, seq, kind, payload, head, agent, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        } else {
+            "INSERT INTO trace_events
+                 (repo, session, seq, kind, payload, head, agent, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        };
+        let changed = tx.execute(
+            sql,
+            params![
+                event.repo,
+                event.session,
+                seq,
+                event.kind,
+                event.payload,
+                event.head,
+                event.agent,
+                now()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(changed > 0)
     }
 
     /// The head recorded by the session's latest event that carried one.

@@ -99,7 +99,17 @@ async fn post_events(cx: &Cx, Json(batch): Json<TraceBatch>) -> Result<Response>
     Ok(json_response(StatusCode::OK, serde_json::to_string(&outcome)?))
 }
 
+#[topcoat::router::query_params(error = bad_request)]
+struct TranscriptQuery {
+    /// `?replace=1` — overwrite a transcript this session already has.
+    replace: Option<String>,
+}
+
 /// `POST /{repo}/traces/{session}/transcript` — the raw transcript, stored verbatim.
+///
+/// A transcript is written once. A second upload for the same session is a mistake far
+/// more often than an intention — two runs sharing an id, a backfill pointed at the
+/// wrong session — so it is refused unless the caller says `?replace=1`.
 #[route(POST "/{repo}/traces/{session}/transcript")]
 async fn post_transcript(cx: &Cx, body: topcoat::router::request::Bytes) -> Result<Response> {
     let name = path_param::<Repo>(cx).to_owned();
@@ -111,7 +121,19 @@ async fn post_transcript(cx: &Cx, body: topcoat::router::request::Bytes) -> Resu
     if body.is_empty() {
         return Err(bad_request("empty transcript").into());
     }
+    let query = topcoat::router::query_params::<TranscriptQuery>(cx)?;
+    let replace = query.replace.as_deref() == Some("1");
     let path = traces::transcript_path(&app(cx).config.traces, &name, &session);
+    if path.exists() && !replace {
+        return Ok(json_response(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": format!("session {session} already has a transcript; \
+                                  post again with ?replace=1 to overwrite it"),
+            })
+            .to_string(),
+        ));
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| bad_request(format!("cannot store transcript: {error}")))?;

@@ -13,6 +13,7 @@
 //! are small and human-edited. A transcript is neither.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::db::{Db, DbResult, NewTraceEvent};
 use crate::git::Repo;
@@ -122,17 +123,14 @@ async fn expand(repo: Option<&Repo>, from: &str, to: &str) -> Vec<String> {
 }
 
 /// Where a session's raw transcript is kept.
+///
+/// The name is a hash of the session id, not a scrubbed copy of it. Session ids come
+/// from another program, so they cannot reach the filesystem raw — but replacing the
+/// awkward characters maps distinct sessions onto one file: `a.b` and `a_b` would then
+/// overwrite each other. A hash is injective enough and needs no escaping.
 pub fn transcript_path(root: &std::path::Path, repo: &str, session: &str) -> std::path::PathBuf {
-    root.join(repo).join(format!("{}.jsonl", sanitize(session)))
-}
-
-/// Session ids come from another program, so they never reach the filesystem raw.
-fn sanitize(session: &str) -> String {
-    session
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .take(120)
-        .collect()
+    let digest = <Sha256 as Digest>::digest(session.as_bytes());
+    root.join(repo).join(format!("{digest:x}.jsonl"))
 }
 
 /// A one-line description of an event, for the session page and `trace show`.
@@ -708,8 +706,20 @@ mod tests {
 
     #[test]
     fn a_session_id_never_reaches_the_filesystem_raw() {
-        let path = transcript_path(std::path::Path::new("/traces"), "demo", "../../etc/passwd");
-        assert_eq!(path, std::path::Path::new("/traces/demo/______etc_passwd.jsonl"));
+        let root = std::path::Path::new("/traces");
+        let path = transcript_path(root, "demo", "../../etc/passwd");
+        assert!(path.starts_with("/traces/demo"), "the id cannot climb out of the directory");
+        let name = path.file_name().expect("a file name").to_str().expect("utf-8");
+        assert_eq!(name.len(), 64 + ".jsonl".len());
+        assert!(name.trim_end_matches(".jsonl").chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// Two session ids one character apart must not share a file. A sanitizing scheme
+    /// folds them together and the second upload silently eats the first.
+    #[test]
+    fn session_ids_that_sanitize_alike_get_different_files() {
+        let root = std::path::Path::new("/traces");
+        assert_ne!(transcript_path(root, "demo", "a.b"), transcript_path(root, "demo", "a_b"));
     }
 
     #[test]

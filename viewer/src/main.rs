@@ -32,6 +32,7 @@ async fn main() {
                         file,
                         nashcode::cli::flag_value(&args, "--session"),
                         nashcode::cli::flag_value(&args, "--repo"),
+                        args.iter().any(|arg| arg == "--replace"),
                     )
                     .await
                 }
