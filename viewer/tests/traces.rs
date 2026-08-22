@@ -8,7 +8,7 @@
 mod common;
 
 use common::{get, get_json, post_json, redirect, request, simple_bed, stacked_fixture};
-use topcoat::router::Method;
+use topcoat::router::{Method, Router};
 
 /// The events a real agent run produces around one commit.
 fn session_events(before: &str, after: &str) -> serde_json::Value {
@@ -317,6 +317,99 @@ async fn traces_read_back_as_json_when_asked() {
     assert_eq!(session["session"], "sess-1");
     assert_eq!(session["events"].as_array().expect("events").len(), 4);
     assert_eq!(session["commits"][0], after);
+}
+
+/// Post a transcript for one session. Returns the status and body.
+async fn put_transcript(router: &Router, path: &str, body: &str) -> (u16, String) {
+    request(router, Method::POST, path, Some(("application/x-ndjson", body.to_owned()))).await
+}
+
+/// Session ids come from harnesses, not from us. Two that differ only in a character a
+/// filename scrubber would flatten are still two sessions, and neither may eat the
+/// other's transcript.
+#[tokio::test]
+async fn lookalike_session_ids_keep_separate_transcripts() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+
+    let dotted = "{\"session\":\"a.b\"}\n";
+    let scored = "{\"session\":\"a_b\"}\n";
+    let (status, body) = put_transcript(&bed.router, "/demo/traces/a.b/transcript", dotted).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = put_transcript(&bed.router, "/demo/traces/a_b/transcript", scored).await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = get(&bed.router, "/demo/traces/a.b/transcript").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, dotted, "`a_b` must not have overwritten `a.b`");
+    let (status, body) = get(&bed.router, "/demo/traces/a_b/transcript").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, scored);
+}
+
+/// A transcript is written once. Overwriting is a decision, not a default.
+#[tokio::test]
+async fn a_second_transcript_needs_replace() {
+    let bed = simple_bed(|root| stacked_fixture(root, "demo"));
+    bed.mirrors.refresh("demo").await;
+
+    let first = "{\"role\":\"user\",\"text\":\"first run\"}\n";
+    let second = "{\"role\":\"user\",\"text\":\"second run\"}\n";
+    let (status, body) = put_transcript(&bed.router, "/demo/traces/sess-1/transcript", first).await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) =
+        put_transcript(&bed.router, "/demo/traces/sess-1/transcript", second).await;
+    assert_eq!(status, 409, "a second upload is refused: {body}");
+    assert!(body.contains("replace"), "the refusal says how to override it: {body}");
+    let (_, stored) = get(&bed.router, "/demo/traces/sess-1/transcript").await;
+    assert_eq!(stored, first, "the refused upload changed nothing");
+
+    let (status, body) =
+        put_transcript(&bed.router, "/demo/traces/sess-1/transcript?replace=1", second).await;
+    assert_eq!(status, 200, "{body}");
+    let (_, stored) = get(&bed.router, "/demo/traces/sess-1/transcript").await;
+    assert_eq!(stored, second, "?replace=1 overwrites");
+}
+
+/// Two writers on the same database allocating `seq` at once. The in-process mutex does
+/// not cover this — each connection is its own writer, the way two nashcode processes
+/// would be — so the transaction has to.
+#[test]
+fn concurrent_seq_allocation_loses_no_event() {
+    use nashcode::db::{Db, NewTraceEvent};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("trace-race.db");
+    Db::open(&path).expect("schema");
+
+    let writers = 8;
+    let each = 20;
+    std::thread::scope(|scope| {
+        for _ in 0..writers {
+            scope.spawn(|| {
+                let db = Db::open(&path).expect("open");
+                for _ in 0..each {
+                    db.add_trace_event(&NewTraceEvent {
+                        repo: "demo".to_owned(),
+                        session: "race".to_owned(),
+                        seq: None,
+                        kind: "event".to_owned(),
+                        payload: "{}".to_owned(),
+                        head: None,
+                        agent: None,
+                    })
+                    .expect("stored");
+                }
+            });
+        }
+    });
+
+    let db = Db::open(&path).expect("open");
+    let events = db.trace_events("demo", "race").expect("events");
+    assert_eq!(events.len(), writers * each, "every event was kept");
+    let numbers: std::collections::BTreeSet<i64> = events.iter().map(|e| e.seq).collect();
+    assert_eq!(numbers.len(), writers * each, "no two events share a seq");
 }
 
 #[tokio::test]

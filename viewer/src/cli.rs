@@ -144,7 +144,15 @@ fn transcript_prompt(value: &serde_json::Value) -> Option<String> {
 }
 
 /// `nashcode-viewer trace push <file>` — backfill a whole transcript for a session.
-pub async fn trace_push(file: &str, session: Option<String>, repo: Option<String>) -> i32 {
+///
+/// `replace` passes `?replace=1`, which the server needs before it will overwrite a
+/// transcript the session already has.
+pub async fn trace_push(
+    file: &str,
+    session: Option<String>,
+    repo: Option<String>,
+    replace: bool,
+) -> i32 {
     let Ok(raw) = std::fs::read_to_string(file) else {
         eprintln!("cannot read {file}");
         return 1;
@@ -239,9 +247,16 @@ pub async fn trace_push(file: &str, session: Option<String>, repo: Option<String
         }
     }
 
-    let url = format!("{base}/{repo}/traces/{session}/transcript");
+    let suffix = if replace { "?replace=1" } else { "" };
+    let url = format!("{base}/{repo}/traces/{session}/transcript{suffix}");
     match http.post(&url).body(raw).send().await {
         Ok(response) if response.status().is_success() => {}
+        Ok(response) if response.status() == reqwest::StatusCode::CONFLICT => {
+            eprintln!(
+                "session {session} already has a transcript; re-run with --replace to overwrite it"
+            );
+            return 1;
+        }
         Ok(response) => {
             eprintln!("server rejected the transcript: {}", response.status());
             return 1;
@@ -396,8 +411,9 @@ nashcode-viewer — stacked-branch viewer and agent-trace client
 USAGE:
   nashcode-viewer [serve]                   run the server (the default)
   nashcode-viewer hook                      record one hook payload from stdin; always exits 0
-  nashcode-viewer trace push <file> [--session s] [--repo r]
-                                           backfill a transcript (JSONL) for a session
+  nashcode-viewer trace push <file> [--session s] [--repo r] [--replace]
+                                           backfill a transcript (JSONL) for a session;
+                                           --replace overwrites one already stored
   nashcode-viewer trace list [--repo r]     sessions, newest first
   nashcode-viewer trace show <session> [--repo r]
                                            one session's events
