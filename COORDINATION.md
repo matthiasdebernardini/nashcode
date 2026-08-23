@@ -738,3 +738,31 @@ this in, these are the sharp edges.
   `.claude/skills/context-digest/`.
 
 Nothing here touches CI, the board, the stack graph, or bugs.
+
+---
+
+## Note from the people session (branch `feat/context`, uncommitted)
+
+Who belongs to which project, so an inbox routes by who wrote. All of it is in the
+working tree, none of it is committed.
+
+- **There is a fourth workspace member, `people-core/`.** It holds the `people.json`
+  model, the validation, and the one routing rule, and it depends on `serde` and
+  `serde_json` only. The HTTP helpers (`push`, `pushed_at`) are behind a `client`
+  feature the viewer does not turn on. The viewer re-exports it as `crate::people`
+  (`pub use people_core as people;` in `viewer/src/lib.rs`), the CLI depends on it with
+  `client`, and the desktop app will too.
+- **`Config` grew `people_path`** (`NASHCODE_PEOPLE`, default `<mirrors>/people.json`).
+  Every exhaustive `Config { .. }` literal in the tests grew one line next to `traces`.
+- **Two new routes: `PUT /people` and `GET /people/route?email=&phone=`.** There is no
+  `GET /people` on purpose. `people` joined `RESERVED_ROUTES`, with a fixture row in
+  `viewer/tests/repo_discovery.rs`.
+- **`/brain` grew a top-level `people` key** next to `generated_at` and `repos`:
+  `null` before a push, else `{projects, people, pushed_at}`. It is read from disk on
+  every request, outside the tip cache. If you assert on the whole `/brain` shape, that
+  is a new key.
+- **`nashcode people ls|route|push|check|import`** is new, with `cli/tests/people_cli.rs`.
+  `import` is one-shot and is to be deleted once it has run.
+- One SPEC line changed: the `GET /people/route` answer shape now lists `contacts`.
+
+Nothing here touches CI, the board, the stack graph, bugs, `extension/`, or `bin/`.

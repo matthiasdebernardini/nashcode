@@ -341,6 +341,28 @@ after the insert, drops it when the task is deleted or goes stale, and the same 
 turns a completed task into `status: done`. Never write `gtask` yourself, and never
 delete it to force a re-add: a card with `top: false` is off the list on purpose.
 
+## People
+
+Who belongs to which project, so an inbox routes by who wrote. The operator keeps one
+file on their Mac, `~/.nashcode/people.json`: `people` with their phones and emails,
+`projects` with the people on them, the folder, and the nashcode `repo` when there is
+one. The viewer holds a pushed copy and answers one question.
+
+```sh
+curl "$NASHCODE/people/route?email=rob@example.com&email=joey@example.com"
+```
+
+The answer is `{matches: [{project, repo, folder, people, contacts, score}], tie}`. A
+project scores one point per distinct person matched; equal scores keep file order and
+set `tie: true`. `404 no people file` means nobody has pushed yet; `400` means you sent
+no contact. There is no `GET /people`: the phones and emails never leave the Mac. The
+Meet extension uses this to pick the repo a meeting files into; `bin/context-email` and
+imsg-router read the file directly.
+
+From a terminal: `nashcode people route --email …`, `nashcode people check`,
+`nashcode people push`. `/brain` carries `people: {projects, people, pushed_at,
+pushed_by}` once per viewer, `null` before a push.
+
 ## State
 
 `GET /brain` returns everything nashcode knows, as one JSON document: every repo's branches
