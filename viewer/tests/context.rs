@@ -299,8 +299,10 @@ async fn an_unfilable_payload_is_refused_before_anything_is_committed() {
 #[tokio::test]
 async fn the_old_transcripts_route_is_gone() {
     let bed = bed().await;
-    let (status, _) = post_json(&bed.router, "/demo/transcripts", meeting()).await;
-    assert_ne!(status, 201, "the old route still files transcripts");
+    let (status, body) = post_json(&bed.router, "/demo/transcripts", meeting()).await;
+    // 404, not merely "not 201": a 400 or a 502 here would mean the route still
+    // exists and is only unhappy, which is not what removed means.
+    assert_eq!(status, 404, "{body}");
 }
 
 fn show(bare: &std::path::Path, path: &str) -> String {

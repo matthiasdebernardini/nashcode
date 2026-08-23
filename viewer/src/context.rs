@@ -413,8 +413,42 @@ fn offset(ms: u64) -> String {
 
 /// Front-matter scalars are always double-quoted, so a title with `:` or `#` can
 /// never break the parse.
+///
+/// Escaped by YAML's double-quoted rules, not by Rust's `{:?}`. Rust's Debug spells a
+/// combining accent as `\u{301}` — braces and all — which YAML does not accept, so an
+/// accented subject in NFD form used to produce front matter that would not parse. A
+/// file whose front matter will not parse loses its `ingested_at`, which makes its
+/// list cursor `|kind/id` and hides it behind every poller's first page.
+///
+/// Only what has to be escaped is: backslash, the closing quote, and the control
+/// characters. Every other character — accents, CJK, emoji — travels verbatim, which
+/// is both legal YAML and readable in a diff.
 fn yaml_str(s: &str) -> String {
-    format!("{s:?}")
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // C0 and DEL.
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            // C1, and the two separators YAML reads as line breaks.
+            c if (0x80..=0x9f).contains(&(c as u32))
+                || c == '\u{2028}'
+                || c == '\u{2029}' =>
+            {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 // ---- reading back ----------------------------------------------------------------
@@ -759,6 +793,48 @@ mod tests {
         assert_eq!(front.kind, "note");
         assert_eq!(front.id, "2026-06-12-1500-scratch");
         assert_eq!(body, "# Scratch\n");
+    }
+
+    /// A subject is a stranger's text. Whatever is in it, the front matter it lands in
+    /// has to parse — a block that does not costs the item its `ingested_at`, and an
+    /// item with no `ingested_at` sorts to the front of the cursor and is never seen
+    /// again after the first page.
+    #[test]
+    fn a_hostile_title_still_round_trips_through_the_front_matter() {
+        // An accent in NFD form (`e` + U+0301), a bell, a DEL, a tab, a newline, a
+        // quote, a backslash, a colon, a `#`, and a line separator.
+        let title = "Cafe\u{301} re\u{301}sume\u{301} \u{7}\u{7f}\ttwo\nlines \"q\" \\b: #x\u{2028}z";
+        let payload = Payload::Item(ItemPayload {
+            title: title.to_owned(),
+            at: "2026-06-12T15:00:00Z".into(),
+            text: "body".into(),
+            source: Some("18f2a".into()),
+        });
+        let (id, path) = candidate("email", &payload, 1);
+        let md = render_markdown("email", &id, "2026-06-12T15:31:00.000000Z", &payload);
+
+        // The block parses, and every field survives — including the one the cursor
+        // rests on.
+        let (front, body) = read(&path, &md);
+        assert_eq!(front.title, title, "front matter did not round-trip: {md}");
+        assert_eq!(front.ingested_at, "2026-06-12T15:31:00.000000Z", "{md}");
+        assert_eq!(front.kind, "email");
+        assert_eq!(front.id, id);
+        assert_eq!(front.source.as_deref(), Some("18f2a"));
+        assert!(body.starts_with("# Cafe"), "{body}");
+        assert_eq!(cursor(&front), format!("2026-06-12T15:31:00.000000Z|email/{id}"));
+
+        // Rust's Debug spelling would have leaked into the file. YAML's has not.
+        assert!(!md.contains("\\u{"), "{md}");
+        assert!(md.contains("\\x07"), "{md}");
+        assert!(md.contains("\\u2028"), "{md}");
+        assert!(md.contains("\\t"), "{md}");
+        assert!(md.contains("\\n"), "{md}");
+        assert!(md.contains("\\\"q\\\""), "{md}");
+
+        // And the split itself still finds a block at all.
+        let (block, _) = crate::docs::split_front_matter(&md);
+        assert!(block.is_some_and(|b| b.contains("title: ")), "{md}");
     }
 
     #[test]
