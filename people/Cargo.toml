@@ -1,0 +1,26 @@
+[package]
+name = "nashcode-people"
+version = "0.1.0"
+edition = "2024"
+description = "The desktop editor for ~/.nashcode/people.json: projects, people, and the contact map they produce."
+license = "Apache-2.0"
+
+# machete matches on package names, but gpui-ce exports its lib as `gpui`,
+# so every `use gpui::...` is invisible to it.
+[package.metadata.cargo-machete]
+ignored = ["gpui-ce"]
+
+[[bin]]
+name = "nashcode-people"
+path = "src/main.rs"
+
+[dependencies]
+# The community edition, as in the reference app: `gpui-component` pulls Zed's
+# `gpui 0.2.2`, a different package that cannot coexist with this one.
+gpui-ce = "0.3.3"
+people-core = { path = "../people-core", features = ["client"] }
+# The CLI's profile store is TOML; the app reads the viewer URL and token out of
+# it directly rather than depending on the CLI crate.
+serde = { version = "1", features = ["derive"] }
+toml = "1.1.4"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

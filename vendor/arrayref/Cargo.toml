@@ -1,0 +1,6 @@
+[package]
+name = "arrayref"
+version = "0.3.9"
+edition = "2015"
+license = "BSD-2-Clause"
+description = "Macros to take array references of slices (vendored 0.3.9 source)"
