@@ -741,10 +741,10 @@ Nothing here touches CI, the board, the stack graph, or bugs.
 
 ---
 
-## Note from the people session (branch `feat/context`, uncommitted)
+## Note from the people session (branch `feat/context`, committed there)
 
-Who belongs to which project, so an inbox routes by who wrote. All of it is in the
-working tree, none of it is committed.
+Who belongs to which project, so an inbox routes by who wrote. Everything below is on
+`feat/context`, not on `main`; the claim row above stays until the branch lands.
 
 - **There is a fourth workspace member, `people-core/`.** It holds the `people.json`
   model, the validation, and the one routing rule, and it depends on `serde` and
@@ -761,8 +761,14 @@ working tree, none of it is committed.
   `null` before a push, else `{projects, people, pushed_at}`. It is read from disk on
   every request, outside the tip cache. If you assert on the whole `/brain` shape, that
   is a new key.
-- **`nashcode people ls|route|push|check|import`** is new, with `cli/tests/people_cli.rs`.
-  `import` is one-shot and is to be deleted once it has run.
-- One SPEC line changed: the `GET /people/route` answer shape now lists `contacts`.
+- **`nashcode people ls|route|push|check|import|sync-folders|suggest|seen`** is new,
+  with `cli/tests/people_cli.rs`. `import` is one-shot and is to be deleted once it
+  has run.
+- **Two more workspace members: `people/`** (`nashcode-people`, the GPUI desktop canvas
+  on `gpui-ce`) and `vendor/arrayref` (a patched crate gpui needs; `[patch.crates-io]`
+  in the root `Cargo.toml`, excluded from the workspace). `cargo build --workspace`
+  now compiles gpui; use `-p` when you only need the viewer or the CLI.
+- `bin/context-email` and `bin/context-digest` read `people.json`; `context.toml`
+  keeps only the runner's settings (`host`, `me`, `tasklist`, …).
 
 Nothing here touches CI, the board, the stack graph, bugs, `extension/`, or `bin/`.
