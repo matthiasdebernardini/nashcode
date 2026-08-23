@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+# Mirror claimed cards to one Google Tasks list, and the list back to the cards.
+#
+# The cards are the record. The list is a view of them, and it is short: only the cards
+# the operator claimed in the first person ("action items from me are…"), which the
+# digest marks `top: true`. Everything else stays on the board.
+#
+# Run by bin/context-digest inside the same lock and before the same push, so the
+# commits this makes travel with the digest's.
+#
+# The list has other sources — tasks the operator types into Google by hand. This sync
+# touches only the tasks whose id it holds in a card's `gtask`: it never lists in order
+# to delete, and it never patches a task it did not create. Counting the open tasks for
+# `max_open` is the one time it reads the whole list, and it reads it to decide whether
+# to add, not to decide what to remove.
+#
+# `me`, `tasklist`, `max_open` and `stale_days` live in ~/.nashcode/context.toml. No
+# account, list id or person's name belongs in this file.
+#
+# Usage:
+#   bin/context-tasks <checkout> [repo]   repo defaults to the directory's basename
+set -euo pipefail
+
+NASHCODE_HOME="${NASHCODE_HOME:-$HOME/.nashcode}"
+CONFIG="$NASHCODE_HOME/context.toml"
+
+die() { printf 'context-tasks: %s\n' "$*" >&2; exit 1; }
+say() { printf 'context-tasks: %s\n' "$*"; }
+
+command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH"
+
+checkout="${1:-}"
+[ -n "$checkout" ] || die "usage: bin/context-tasks <checkout> [repo]"
+[ -d "$checkout/.git" ] || die "$checkout is not a git checkout"
+checkout="$(cd "$checkout" && pwd)"
+repo="${2:-$(basename "$checkout")}"
+
+# --- config ------------------------------------------------------------------------
+# tomllib is stdlib from Python 3.11, so the config needs no third-party parser.
+
+read_config() { # <key> -> the top-level scalar, or empty
+  python3 - "$CONFIG" "$1" <<'PY'
+import pathlib, sys, tomllib
+
+path, want = pathlib.Path(sys.argv[1]), sys.argv[2]
+data = tomllib.loads(path.read_text()) if path.exists() else {}
+value = data.get(want)
+if value is None or isinstance(value, bool) or isinstance(value, (list, dict)):
+    print("")
+else:
+    print(str(value).strip())
+PY
+}
+
+ME="$(read_config me)"
+TASKLIST="$(read_config tasklist)"
+MAX_OPEN="$(read_config max_open)"
+STALE_DAYS="$(read_config stale_days)"
+[ -n "$MAX_OPEN" ] || MAX_OPEN=7
+[ -n "$STALE_DAYS" ] || STALE_DAYS=14
+
+# Not configured is not broken. A repo whose operator has not named themselves and a
+# list has no short list to keep, and the digest around this must still push.
+if [ -z "$ME" ] || [ -z "$TASKLIST" ]; then
+  say "$repo: $CONFIG sets no \`me\` and \`tasklist\`, so there is no list to sync"
+  exit 0
+fi
+
+case "$MAX_OPEN" in *[!0-9]*|"") die "max_open must be a whole number, not \`$MAX_OPEN\`" ;; esac
+case "$STALE_DAYS" in *[!0-9]*|"") die "stale_days must be a whole number, not \`$STALE_DAYS\`" ;; esac
+
+command -v gws >/dev/null 2>&1 || die "gws is not on PATH"
+
+# --- front matter ------------------------------------------------------------------
+#
+# A card's front matter is the block between the `---` on line 1 and the one that
+# closes it. Reading and writing both stop there, so a body that quotes a front-matter
+# block — a card about this very sync — is never mistaken for one.
+
+fm_ok() { # <file>: does the front matter parse at all?
+  awk '
+    NR == 1 { if ($0 != "---") { bad = 1; exit } ; next }
+    $0 == "---" { found = 1; exit }
+    END { exit (bad || !found) ? 1 : 0 }
+  ' "$1"
+}
+
+fm_get() { # <file> <key> -> the scalar value, unquoted, or empty
+  FM_KEY="$2" awk '
+    NR == 1 { if ($0 != "---") exit ; next }
+    $0 == "---" { exit }
+    {
+      key = ENVIRON["FM_KEY"]
+      line = $0
+      sub(/^[ \t]+/, "", line)
+      if (index(line, key ":") != 1) next
+      value = substr(line, length(key) + 2)
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      first = substr(value, 1, 1)
+      last = substr(value, length(value), 1)
+      if (length(value) >= 2 && first == last && (first == "\"" || first == "'"'"'")) {
+        value = substr(value, 2, length(value) - 2)
+        if (first == "\"") { gsub(/\\"/, "\"", value); gsub(/\\\\/, "\\", value) }
+      }
+      print value
+      exit
+    }
+  ' "$1"
+}
+
+# The one helper that edits a card. It rewrites a key in place keeping its indent,
+# appends it just before the closing `---` when it is not there, and deletes it when
+# the value is empty. Nothing outside the front matter is read, and every other line —
+# including a trailing newline the file never had — comes back byte for byte.
+fm_edit() { # <file> <key> <value|"">
+  local file="$1" tmp
+  tmp="$(mktemp)"
+  FM_KEY="$2" FM_VALUE="$3" awk '
+    BEGIN { key = ENVIRON["FM_KEY"]; value = ENVIRON["FM_VALUE"] }
+    NR == 1 { print; if ($0 == "---") infm = 1; next }
+    infm && $0 == "---" {
+      if (!done && value != "") print key ": " value
+      infm = 0
+      print
+      next
+    }
+    infm {
+      line = $0
+      sub(/^[ \t]+/, "", line)
+      if (index(line, key ":") == 1) {
+        if (done || value == "") next
+        match($0, /^[ \t]*/)
+        print substr($0, 1, RLENGTH) key ": " value
+        done = 1
+        next
+      }
+      print
+      next
+    }
+    { print }
+  ' "$file" > "$tmp"
+  # awk terminates every line; a file that ended without a newline gets its last byte
+  # back, so "only these three keys moved" is true of the bytes and not just the text.
+  if [ -s "$file" ] && [ "$(tail -c 1 "$file" | wc -l | tr -d ' ')" = "0" ]; then
+    printf '%s' "$(cat "$tmp")" > "$tmp.trimmed"
+    mv "$tmp.trimmed" "$tmp"
+  fi
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
+card_title() { # <file> <slug>
+  local title
+  title="$(fm_get "$1" title)"
+  if [ -z "$title" ]; then
+    title="$(awk '
+      NR == 1 && $0 == "---" { infm = 1; next }
+      infm && $0 == "---" { infm = 0; next }
+      !infm && /^#+[ \t]+/ { sub(/^#+[ \t]+/, ""); print; exit }
+    ' "$1")"
+  fi
+  [ -n "$title" ] || title="$2"
+  printf '%s\n' "$title"
+}
+
+# --- gws ---------------------------------------------------------------------------
+#
+# Every value reaches gws as `--flag=value`. A card title is somebody else's text, and
+# a pending `--json` whose next token starts with `--` resolves to boolean true, so the
+# `=` form is what binds a value to its own flag whatever the value looks like. The
+# JSON itself is built by python3's json.dumps, never by pasting strings together.
+
+# Answers a gws document, whether it came back as one object, pretty-printed, or as
+# `--page-all`'s one-line-per-page NDJSON. Prints one line per requested field.
+DECODE_PY=$(cat <<'PY'
+import json, sys
+
+decoder = json.JSONDecoder()
+text = sys.stdin.read()
+pages, at = [], 0
+while True:
+    while at < len(text) and text[at] in " \t\r\n":
+        at += 1
+    if at >= len(text):
+        break
+    page, at = decoder.raw_decode(text, at)
+    pages.append(page)
+
+want = sys.argv[1]
+if want == "count":
+    print(sum(len(page.get("items") or []) for page in pages))
+else:
+    print("" if not pages else str(pages[0].get(want, "")))
+PY
+)
+
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+out="$scratch/out"; err="$scratch/err"
+
+# Set by any gws call that failed. The loop still finishes — one dead task must not
+# hide the rest — but the script exits nonzero so the runner's log says so.
+trouble=0
+
+# 0 on success. 2 means the task is gone: gws says so with a 404 either in its exit
+# message or in the error document Google handed back, and both spellings are checked
+# because a demotion is the one failure with a consequence.
+gws_call() { # <args...>
+  if gws "$@" >"$out" 2>"$err"; then
+    return 0
+  fi
+  if grep -qE '(^|[^0-9])404([^0-9]|$)|[Nn]ot ?[Ff]ound|notFound' "$out" "$err"; then
+    return 2
+  fi
+  return 1
+}
+
+gws_failed() { # <what>
+  say "$repo: gws failed: $*"
+  sed -n '1,5p' "$err" >&2
+  trouble=1
+}
+
+params() { # <key=value>...
+  python3 - "$@" <<'PY'
+import json, sys
+print(json.dumps(dict(argument.split("=", 1) for argument in sys.argv[1:])))
+PY
+}
+
+# --- the list ----------------------------------------------------------------------
+
+# Every open task on the list, hand-made ones included. The cap is about how long the
+# list is, not about how much of it this sync put there.
+#
+# The answer lands in OPEN_COUNT rather than on stdout: `$(count_open)` would run the
+# whole thing in a subshell, where a `trouble=1` dies with the subshell and the run
+# would exit 0 after failing to read the list.
+OPEN_COUNT=0
+count_open() {
+  local query
+  query="$(python3 -c 'import json,sys; print(json.dumps({"tasklist": sys.argv[1], "showCompleted": False, "maxResults": 100}))' "$TASKLIST")"
+  if ! gws_call tasks tasks list --params="$query" --format=json --page-all; then
+    gws_failed "could not count the open tasks on the list"
+    return 1
+  fi
+  OPEN_COUNT="$(python3 -c "$DECODE_PY" count < "$out")"
+}
+
+# One card, one commit, and never an empty one: an edit that changed nothing must not
+# end the run with git's "nothing to commit".
+commit_card() { # <card> <message>
+  if git diff --quiet -- "$1"; then
+    return 0
+  fi
+  git commit -q -m "$2" -- "$1"
+}
+
+# --- forward: card -> task ---------------------------------------------------------
+
+cd "$checkout"
+
+cards=()
+while IFS= read -r -d '' card; do
+  cards+=("$card")
+done < <(find tasks -type f -name '*.md' -print0 2>/dev/null | sort -z)
+
+if [ "${#cards[@]}" -eq 0 ]; then
+  say "$repo: no cards"
+  exit 0
+fi
+
+waiting=()
+adding=()
+for card in "${cards[@]}"; do
+  if ! fm_ok "$card"; then
+    say "$repo: $card has front matter that will not parse; skipped"
+    continue
+  fi
+  [ "$(fm_get "$card" top)" = "true" ] || continue
+  [ "$(fm_get "$card" assignee)" = "$ME" ] || continue
+  case "$(fm_get "$card" status)" in todo|doing) ;; *) continue ;; esac
+  [ -z "$(fm_get "$card" gtask)" ] || continue
+  adding+=("$card")
+done
+
+if [ "${#adding[@]}" -gt 0 ]; then
+  if count_open; then
+    open="$OPEN_COUNT"
+    for card in "${adding[@]}"; do
+      slug="$(basename "$card" .md)"
+      if [ "$open" -ge "$MAX_OPEN" ]; then
+        waiting+=("$card")
+        continue
+      fi
+      title="$(card_title "$card" "$slug")"
+      due="$(fm_get "$card" due)"
+      body="$(python3 - "$repo" "$title" "$slug" "$due" <<'PY'
+import json, sys
+
+repo, title, slug, due = sys.argv[1:5]
+task = {"title": f"[{repo}] {title}", "notes": f"{repo}/tasks/{slug}.md"}
+if due:
+    task["due"] = f"{due[:10]}T00:00:00.000Z"
+print(json.dumps(task))
+PY
+)"
+      if ! gws_call tasks tasks insert --params="$(params "tasklist=$TASKLIST")" --json="$body" --format=json; then
+        gws_failed "could not insert a task for $card"
+        continue
+      fi
+      id="$(python3 -c "$DECODE_PY" id < "$out")"
+      if [ -z "$id" ]; then
+        say "$repo: gws inserted a task for $card but answered no id; the card is unchanged"
+        trouble=1
+        continue
+      fi
+      fm_edit "$card" gtask "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$id")"
+      commit_card "$card" "tasks: $slug to google tasks"
+      say "$repo: $slug is on the list"
+      open=$((open + 1))
+    done
+  fi
+fi
+
+if [ "${#waiting[@]}" -gt 0 ]; then
+  say "$repo: the list is at $MAX_OPEN open tasks, so nothing more was added; waiting:"
+  for card in "${waiting[@]}"; do
+    printf 'context-tasks:   %s\n' "$card"
+  done
+fi
+
+# --- back: task -> card ------------------------------------------------------------
+
+# `top: false` and no `gtask`, status untouched. A task deleted in Google means "not
+# top of mind", so the card goes back to the board rather than being added again on
+# the next run.
+demote() { # <card>
+  fm_edit "$1" top false
+  fm_edit "$1" gtask ""
+}
+
+for card in "${cards[@]}"; do
+  fm_ok "$card" || continue
+  id="$(fm_get "$card" gtask)"
+  [ -n "$id" ] || continue
+  slug="$(basename "$card" .md)"
+  status="$(fm_get "$card" status)"
+
+  gws_call tasks tasks get --params="$(params "tasklist=$TASKLIST" "task=$id")" --format=json && state=0 || state=$?
+  if [ "$state" = "2" ]; then
+    demote "$card"
+    commit_card "$card" "tasks: $slug demoted (deleted in google tasks)"
+    say "$repo: $slug was deleted in google tasks, so the card is off the list"
+    continue
+  fi
+  if [ "$state" != "0" ]; then
+    gws_failed "could not read the task for $card"
+    continue
+  fi
+
+  task_status="$(python3 -c "$DECODE_PY" status < "$out")"
+  updated="$(python3 -c "$DECODE_PY" updated < "$out")"
+
+  if [ "$task_status" = "completed" ]; then
+    if [ "$status" != "done" ]; then
+      fm_edit "$card" status "done"
+      commit_card "$card" "tasks: $slug done"
+      say "$repo: $slug was completed in google tasks"
+    fi
+    continue
+  fi
+
+  # Open in Google. The board is the record, so a card somebody moved to done here
+  # closes the task there.
+  if [ "$status" = "done" ]; then
+    if ! gws_call tasks tasks patch --params="$(params "tasklist=$TASKLIST" "task=$id")" --json='{"status":"completed"}' --format=json; then
+      gws_failed "could not complete the task for $card"
+      continue
+    fi
+    say "$repo: $slug is done on the board, so its task is completed"
+    continue
+  fi
+
+  # Stale is measured from the task's own `updated`, so renaming or reordering it in
+  # Google — paying it any attention at all — keeps it alive.
+  [ "$STALE_DAYS" -gt 0 ] || continue
+  [ -n "$updated" ] || continue
+  if ! python3 - "$updated" "$STALE_DAYS" <<'PY'
+import datetime, sys
+
+try:
+    updated = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+except ValueError:
+    sys.exit(1)
+if updated.tzinfo is None:
+    updated = updated.replace(tzinfo=datetime.timezone.utc)
+age = datetime.datetime.now(datetime.timezone.utc) - updated
+sys.exit(0 if age.days >= int(sys.argv[2]) else 1)
+PY
+  then
+    continue
+  fi
+
+  if ! gws_call tasks tasks delete --params="$(params "tasklist=$TASKLIST" "task=$id")" --format=json; then
+    gws_failed "could not delete the stale task for $card"
+    continue
+  fi
+  demote "$card"
+  commit_card "$card" "tasks: $slug demoted (stale)"
+  say "$repo: $slug sat open for $STALE_DAYS days, so it left the list"
+done
+
+exit "$trouble"
