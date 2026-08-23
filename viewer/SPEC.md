@@ -374,7 +374,9 @@ the Mac's file and never hands the copy back out.
   The enrichment config lives in `~/.imsg-router/config.json`.
 - **Desktop.** `nashcode-people` (workspace member `people/`) shows projects and people
   side by side, edits them, saves the file, and pushes it. The last push time comes
-  from brain.
+  from brain. A third view is the contact map: every phone and email in the file, the
+  person it belongs to, and the projects that person is on, so the operator sees at a
+  glance which number or address routes where, and which routes nowhere.
 
 ## Code browser parity
 
