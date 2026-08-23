@@ -1990,3 +1990,115 @@ safe one. `// ponytail: put the branch set in the cache key if it bites`.
 
 **`add_columns` lives in `db.rs`.** Calling it from `bugs::index` made `db → bugs`, a
 cycle the pre-commit hook caught. It is generic SQLite plumbing; `bugs` now imports it.
+
+## Context (plans/context.md)
+
+**The ordering tie-break is `(ingested_at, kind, id)`, compared as one string.** The
+list cursor is the opaque `"<ingested_at>|<kind>/<id>"`, and it is compared with `<=` as
+plain text rather than parsed back into a tuple. That is the same order as the tuple
+because `ingested_at` is the fixed-width UTC spelling `crate::db::now` produces and no
+kind is a prefix of another. A cursor that had to be parsed to be compared would be a
+cursor a client could corrupt by editing it.
+
+**`ingested_at` is `crate::db::now()`: six subsecond digits, not three.** SPEC says
+"RFC3339 with milliseconds"; the tree already dates everything to the microsecond with
+one formatter whose string order equals its time order, and a second spelling beside it
+would be a second thing to keep in step. Six digits carries milliseconds and makes two
+puts in the same millisecond order correctly instead of falling through to the
+`(kind, id)` tie-break.
+
+**`at` is never the cursor.** A backfilled email is older than everything around it and
+two items can share a minute, so a client walking on `at` would either repeat or skip.
+`ingested_at` is the one timestamp the caller cannot choose: the route reads the server
+clock at the moment it renders the file.
+
+**`next_since` on an empty page is the caller's own `since`, echoed back.** Returning
+the empty string there would rewind a poller to the beginning of the store every time it
+caught up.
+
+**`facts` are the last three `- ` lines outside `## Conflicts`.** The conflicts section
+holds both sides of a disagreement the digest refused to settle; quoting one of them in
+`memory` as though it were a fact would be exactly the silent pick the digest avoided.
+Three, because `memory` is a first read and not an archive — the whole entity file is
+one `nashcode grep <slug>` away.
+
+**One Claude run per file, not one per repository.** A run that digests six files and
+writes outside `context/`, `brain/` or `tasks/` on the sixth loses all six: the runner
+aborts the working tree and commits nothing. One run per file means one commit per file,
+`context: digest <id>`, and a bad run costs one file's work. It also keeps the skill's
+job small, which is the difference between "resolve these entities" and "resolve these
+entities across six documents at once".
+
+**The host check is at push time, not at clone time.** A checkout's remote can be
+changed after it is cloned, and the moment worth refusing is the push — when `context/`
+and `brain/` would leave the machine. `github.com` is refused by name, because that is
+where client code lives and where this content must never go; any other host that is not
+the configured one is refused too.
+
+**The `host` config key is a top-level string in `~/.nashcode/context.toml`.** It is the
+only host `bin/context-digest` pushes to, and the host it clones from
+(`https://<host>/<repo>.git`). Absent means no push at all — fail closed. No hostname
+appears in tracked source; the file is the operator's, and the repo knows only the key's
+name.
+
+**No repo had a `transcripts/` directory, so there is no migration commit.** Verified
+2026-08-23 against the live viewer: `CommandSpace-gpui`, `inv-live-check`, `nashcode`,
+`nashgit` and `pushtest` all answer 404 for `/tree/transcripts`. `/transcripts` is
+removed, not aliased, and no script was written for a move nobody needs.
+
+**The digest is a runner, not CI** (plan section 4). CI checks out a historical commit
+detached, with no push identity, and quick pushes queue stale jobs against commits
+nobody is looking at any more. The digest needs the current tip, an identity that can
+push, and exactly one run at a time — which is a `flock` on
+`~/.nashcode/state/<repo>.lock`, not a job queue. A missing `flock` is a hard failure
+rather than a quiet unserialised run.
+
+**Claude gets `Read,Edit,Write` and no Bash.** The runner owns git. That is not only
+about the diff check: the text in a `context/` file is a stranger's words, and an email
+that tells the reader to run something has no shell to reach for even if the skill's
+rules were ignored. The path check afterwards is the second fence, and it aborts dirty
+on purpose — a `git checkout .` there would destroy the evidence of what went wrong.
+
+**Out of scope, and named so nobody re-derives them: `bin/context-chat`
+(`imessage-exporter`) and `bin/context-pdf` (`pdftotext`).** Same config file, same
+`--source` rule, same `nashcode context put`. Neither is written.
+
+**`bin/context-email` advances its marker past a skipped message.** A message under ten
+words is not filed, but the marker still moves to its date: a "thanks" left behind the
+marker is one every later run has to fetch and skip again. A *failed* put does not move
+it — that message has to be retried, and `existing: true` exits 0, so retrying one
+already filed costs a round trip and nothing else.
+
+**A first run with no marker looks back seven days.** Enough to seed a new client with
+the threads that are live, short enough not to import a year of history into a repo
+nobody has read yet.
+
+**The launchd plist is host configuration and is not tracked**, because it names a path
+on one Mac. It looks like this; write it to
+`~/Library/LaunchAgents/io.nashvilleautomation.context-digest.plist` and
+`launchctl load` it:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>Label</key><string>io.nashvilleautomation.context-digest</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>-lc</string>
+  <string>/path/to/nashcode/bin/context-email; /path/to/nashcode/bin/context-digest</string></array>
+  <key>StartInterval</key><integer>900</integer>
+  <key>StandardOutPath</key><string>/tmp/context-digest.log</string>
+  <key>StandardErrorPath</key><string>/tmp/context-digest.log</string>
+</dict></plist>
+```
+
+**There is no reserved-branch-name list to add `context` to.** The plan asked for one;
+the tree has none. Branch pages are matched after the reserved routes, so
+`/:repo/context` already outranks a branch called `context` — the existing rule that
+`board` and `docs` rely on. `context` did join `RESERVED_ROUTES` in `mirror.rs`, so
+discovery refuses a *repo* by that name.
+
+**Listing is O(n) `git show` calls, and says so.** `GET /:repo/context` and the brain's
+`memory` both walk `git ls-tree` and read each file. There is no SQLite table for
+context — the file is the record, and an index would be a second copy to keep honest.
+When the subprocess count starts to hurt, the upgrade is one `git cat-file --batch` fed
+every path at once, marked `ponytail:` at both sites.
