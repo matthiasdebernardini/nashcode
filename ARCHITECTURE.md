@@ -84,6 +84,7 @@ graph LR
     viewer_hooks[hooks]
     viewer_mirror[mirror]
     viewer_ops[ops]
+    viewer_people[people]
     viewer_render[render]
     viewer_stack[stack]
     viewer_traces[traces]

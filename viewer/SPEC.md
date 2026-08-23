@@ -367,7 +367,10 @@ the Mac's file and never hands the copy back out.
 - **Email.** `bin/context-email` reads the file. For each project with a `repo` and an
   `email.account`, the Gmail query is `(from:(a OR b) OR to:(a OR b))` over the
   project's people's emails, plus the age bound, unless the project's `email.query`
-  replaces it. `~/.nashcode/context.toml` is gone.
+  replaces it. The per-client `[[source]]` tables are gone from
+  `~/.nashcode/context.toml`; the file keeps only the runner's own settings (`host`,
+  `me`, `tasklist`, `max_open`, `stale_days`), and the digest runner takes its repo
+  list from the projects that have a `repo`.
 - **iMessage.** imsg-router reads the file and nothing else for routing. A project's
   participants are the union of its people's phones. A chat id match wins over a
   participant match; among participant matches the first project in file order wins.
