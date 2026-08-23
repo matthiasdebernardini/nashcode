@@ -3,8 +3,9 @@
 
 export const DEFAULTS = {
   // The nashcode viewer on the tailnet. Transcripts POST to
-  // `${viewerBase}/${repo}/transcripts` and land as markdown on the repo's
-  // default branch. Only a pre-fill: the options page overrides it into
+  // `${viewerBase}/${repo}/context/meeting` and land as markdown under
+  // `context/meeting/YYYY/MM/` on the repo's default branch. Only a pre-fill:
+  // the options page overrides it into
   // chrome.storage.sync, and someone on another tailnet just sees
   // checkService() go red until they point it at their own viewer.
   viewerBase: 'https://nashcode.tail76ec53.ts.net:8443',

@@ -279,7 +279,7 @@ async function file(assignments) {
 
   try {
     phase('filing transcript…');
-    const r = await fetch(`${cfg.viewerBase}/${encodeURIComponent(cfg.repo)}/transcripts`, {
+    const r = await fetch(`${cfg.viewerBase}/${encodeURIComponent(cfg.repo)}/context/meeting`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
@@ -298,7 +298,11 @@ async function file(assignments) {
     phase('done');
     document.getElementById('actions').style.display = 'none';
     const result = document.getElementById('result');
-    result.textContent = `Filed: ${filed.path} (commit ${String(filed.commit || '').slice(0, 7)})`;
+    // A meeting URL that repeats names the file that is already there: the viewer
+    // answers `existing: true` with no commit, and re-filing is not a failure.
+    result.textContent = filed.existing
+      ? `Already filed: ${filed.path}`
+      : `Filed: ${filed.path} (commit ${String(filed.commit || '').slice(0, 7)})`;
     const link = document.createElement('a');
     link.href = `${cfg.viewerBase}/${encodeURIComponent(cfg.repo)}`;
     link.target = '_blank';

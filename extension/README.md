@@ -38,13 +38,18 @@ that recording is on; click the pill to stop. The mapping screen then opens:
 Grok transcribes both channels, the calendar event pre-fills the speaker names,
 you confirm, and the transcript is filed.
 
-nashmeet POSTs to `${viewerBase}/${repo}/transcripts`. The viewer commits the
-markdown to `transcripts/YYYY/MM/<id>.md` on the repo's default branch and
+nashmeet POSTs to `${viewerBase}/${repo}/context/meeting`. The viewer commits the
+markdown to `context/meeting/YYYY/MM/<id>.md` on the repo's default branch and
 answers with the path and the commit. The mapping screen shows both and links
 to the repo. The local recording is deleted only after that answer arrives.
 
-After filing, run `/meeting-digest` in Claude Code inside the repo (or
-`bin/meeting-digest`). It cleans up the raw transcript and updates the kanban.
+The id ends in a hash of the meeting URL, so a meeting filed twice is filed once:
+the second POST answers `200 {existing: true}` with no new commit, and the screen
+says "Already filed". Re-filing after a hiccup is safe.
+
+After filing, run `/context-digest` in Claude Code inside the repo (or
+`bin/context-digest`). It cleans up the raw transcript, writes what the meeting
+decided into `brain/entities/`, and updates the kanban.
 
 ## Long meetings
 
