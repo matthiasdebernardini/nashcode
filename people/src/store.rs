@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Local};
-use people_core::{PeopleFile, PushReply};
+use people_core::{PeopleFile, PushReply, SyncReport};
 use serde::Deserialize;
 
 /// What the window is showing.
@@ -250,6 +250,51 @@ pub fn pushed_at(viewer: &Viewer) -> Result<Option<String>, String> {
     people_core::pushed_at(&viewer.base)
 }
 
+/// A leading `~/` as `$HOME`.
+///
+/// A shell would have done this. Nothing between this window and the path does, and
+/// `~/NashvilleAutomation` is how the operator writes where the clients are. An empty
+/// field is an empty path, which the caller refuses with a better sentence than a
+/// directory read would.
+pub fn expand_home(path: &str) -> PathBuf {
+    let path = path.trim();
+    if path.is_empty() {
+        return PathBuf::new();
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match (path.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ if path == "~" => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default(),
+        _ => PathBuf::from(path),
+    }
+}
+
+/// What one folder sync did, in one line the status bar can hold.
+///
+/// It names the projects it added, because the operator is about to look for them in a
+/// lane of thirty-five, and it names what the `skip` list turned away, because a client
+/// folder that did not arrive is the question the command raises.
+pub fn sync_summary(report: &SyncReport) -> String {
+    let added = match report.added.len() {
+        0 => "Nothing new".to_owned(),
+        n => format!("Added {n}: {}", report.added.join(", ")),
+    };
+    let kept = format!("{} already there", report.kept);
+    let skipped = match report.skipped.len() {
+        0 => String::new(),
+        _ => format!(", skipped {}", report.skipped.join(", ")),
+    };
+    // Named, and named apart from the skipped ones: the operator asked for a skip and
+    // did not ask for this. A folder here is one to rename or to put in `skip`, and it
+    // cannot be either while nothing on screen says which folder it was.
+    let unnameable = match report.unnameable.len() {
+        0 => String::new(),
+        _ => format!(", no project name in {}", report.unnameable.join(", ")),
+    };
+    let unsaved = if report.added.is_empty() { "" } else { ". Not saved yet." };
+    format!("{added}. {kept}{skipped}{unnameable}{unsaved}")
+}
+
 /// A wall-clock time for the status line: the date only when it is not today, so a
 /// line the operator reads twenty times a day stays short.
 pub fn short_time(at: DateTime<Local>) -> String {
@@ -386,6 +431,44 @@ mod tests {
         let file = thin.to_file();
         assert!(!file.validate().is_empty(), "a person with no address is worth saying");
         assert_eq!(refusals(&file), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_leading_tilde_is_the_home_directory_and_an_empty_field_is_no_path() {
+        let home = PathBuf::from(std::env::var("HOME").expect("a home directory"));
+        assert_eq!(expand_home("~/NashvilleAutomation"), home.join("NashvilleAutomation"));
+        assert_eq!(expand_home("  ~/Clients  "), home.join("Clients"));
+        assert_eq!(expand_home("/opt/clients"), PathBuf::from("/opt/clients"));
+        // A tilde inside a path is a directory called `~`, not a home directory.
+        assert_eq!(expand_home("/opt/~/x"), PathBuf::from("/opt/~/x"));
+        assert_eq!(expand_home("   "), PathBuf::new());
+    }
+
+    #[test]
+    fn a_sync_says_what_arrived_what_was_already_there_and_what_was_turned_away() {
+        let report = SyncReport {
+            added: vec!["acres".into(), "agstaff".into()],
+            skipped: vec!["deploy-web".into()],
+            unnameable: Vec::new(),
+            kept: 12,
+        };
+        assert_eq!(
+            sync_summary(&report),
+            "Added 2: acres, agstaff. 12 already there, skipped deploy-web. Not saved yet."
+        );
+
+        // A folder whose name slugs to nothing is named, and named apart from the
+        // skips: one was asked for and the other was not.
+        let odd = SyncReport { unnameable: vec!["---".into(), "...".into()], ..report };
+        assert_eq!(
+            sync_summary(&odd),
+            "Added 2: acres, agstaff. 12 already there, skipped deploy-web, \
+             no project name in ---, .... Not saved yet."
+        );
+
+        // A run that added nothing says so, and does not claim there is a save owed.
+        let nothing = SyncReport::default();
+        assert_eq!(sync_summary(&nothing), "Nothing new. 0 already there");
     }
 
     #[test]

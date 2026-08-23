@@ -121,7 +121,15 @@ impl PeopleApp {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let mut lane = self.lane_head(Lane::Contacts, board.contacts.len(), None, cx).w(rems(CONTACTS));
+        // Addresses collapse on the same rule as the other two lanes. Thirty-five
+        // client folders is seventy addresses, and a lane that drew every one of them
+        // in full while the two beside it collapsed would be the tallest column on a
+        // canvas that scrolls as one piece — it would push the people and the projects
+        // off the fold to say "phone" seventy times.
+        let open = board.expanded(Lane::Contacts, self.selected.as_ref());
+        let mut lane = self
+            .lane_head(Lane::Contacts, board.contacts.len(), open.len(), None, cx)
+            .w(rems(CONTACTS));
 
         let mut band = Band::Routes;
         for card in &board.contacts {
@@ -135,17 +143,21 @@ impl PeopleApp {
                 ContactKind::Phone => "phone",
                 ContactKind::Email => "email",
             };
-            lane = lane.child(
-                // The address alone does not name a card: two people may hold it, and
-                // one person may hold it twice. The id carries the owner and the
-                // occurrence with it, so the three never collide.
-                widgets::card(widgets::eid("contact", &card.id.key()), state, theme)
-                    .child(
-                        div().truncate().text_color(state.ink(theme)).child(card.value.clone()),
-                    )
+            // The address alone does not name a card: two people may hold it, and one
+            // person may hold it twice. The id carries the owner and the occurrence
+            // with it, so the three never collide.
+            let mut face = widgets::card(widgets::eid("contact", &card.id.key()), state, theme)
+                .child(div().truncate().text_color(state.ink(theme)).child(card.value.clone()));
+            // Collapsed, a contact is its address and its wire. The kind is already in
+            // the address — a `+` or an `@` — and a warning about an address nobody is
+            // looking at is a warning read on the card that was clicked.
+            if open.contains(&id) {
+                face = face
                     .child(div().text_xs().text_color(state.wash(theme)).child(kind))
-                    .children(warning(card.warning.as_deref(), theme))
-                    .child(self.measure(id.clone()))
+                    .children(warning(card.warning.as_deref(), theme));
+            }
+            lane = lane.child(
+                face.child(self.measure(id.clone()))
                     .on_click(cx.listener(move |this, _, _, cx| this.select_card(id.clone(), cx))),
             );
         }
@@ -159,8 +171,9 @@ impl PeopleApp {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let open = board.expanded(Lane::People, self.selected.as_ref());
         let mut lane = self
-            .lane_head(Lane::People, board.people.len(), Some("New person"), cx)
+            .lane_head(Lane::People, board.people.len(), open.len(), Some("New person"), cx)
             .w(rems(PEOPLE));
 
         let mut band = Band::Routes;
@@ -171,17 +184,21 @@ impl PeopleApp {
             }
             let id = card.id.clone();
             let state = self.card_state(board, &id, lit);
-            lane = lane.child(
-                widgets::card(widgets::eid("person", &card.person), state, theme)
-                    .child(div().truncate().text_color(state.ink(theme)).child(card.name.clone()))
+            let mut face = widgets::card(widgets::eid("person", &card.person), state, theme)
+                .child(div().truncate().text_color(state.ink(theme)).child(card.name.clone()));
+            if open.contains(&id) {
+                face = face
                     .child(
                         div()
                             .text_xs()
                             .text_color(state.wash(theme))
                             .child(format!("{} ph · {} em", card.phones, card.emails)),
                     )
-                    .children(warning(card.warning.as_deref(), theme))
-                    .child(self.measure(id.clone()))
+                    .children(warmth(card.warmth.as_deref(), state, theme))
+                    .children(warning(card.warning.as_deref(), theme));
+            }
+            lane = lane.child(
+                face.child(self.measure(id.clone()))
                     .on_click(cx.listener(move |this, _, _, cx| this.select_card(id.clone(), cx))),
             );
         }
@@ -195,13 +212,30 @@ impl PeopleApp {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let open = board.expanded(Lane::Projects, self.selected.as_ref());
         let mut lane = self
-            .lane_head(Lane::Projects, board.projects.len(), Some("New project"), cx)
+            .lane_head(Lane::Projects, board.projects.len(), open.len(), Some("New project"), cx)
             .w(rems(PROJECTS));
 
         for card in &board.projects {
             let id = card.id.clone();
             let state = self.card_state(board, &id, lit);
+            // A collapsed project is its name and its wire, and nothing else. Thirty
+            // full cards would be a lane nobody reads; thirty names is a list somebody
+            // finds one in.
+            if !open.contains(&id) {
+                lane = lane.child(
+                    widgets::card(widgets::eid("project", &card.project), state, theme)
+                        .child(
+                            div().truncate().text_color(state.ink(theme)).child(card.name.clone()),
+                        )
+                        .child(self.measure(id.clone()))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.select_card(id.clone(), cx)),
+                        ),
+                );
+                continue;
+            }
             // The repo is a page on the viewer, so it is a Link and it opens a
             // browser. Every other word on the card is a fact, not a destination.
             let repo: gpui::AnyElement = match (&card.repo, &self.viewer) {
@@ -240,6 +274,7 @@ impl PeopleApp {
                             .text_color(state.wash(theme))
                             .child(people_count(card.people)),
                     )
+                    .children(warmth(card.warmth.as_deref(), state, theme))
                     .children(warning(card.warning.as_deref(), theme))
                     .child(self.measure(id.clone()))
                     .on_click(cx.listener(move |this, _, _, cx| this.select_card(id.clone(), cx))),
@@ -250,10 +285,15 @@ impl PeopleApp {
 
     /// A lane's title, its count, and — for the two lanes that own a collection —
     /// the command that adds to it.
+    ///
+    /// `shown` is how many of `count` are drawn in full. When it is fewer, the header
+    /// says so: a lane that quietly stopped drawing cards would read as a lane that
+    /// had lost them.
     fn lane_head(
         &self,
         lane: Lane,
         count: usize,
+        shown: usize,
         add: Option<&'static str>,
         cx: &Context<Self>,
     ) -> gpui::Div {
@@ -270,7 +310,7 @@ impl PeopleApp {
             .child(
                 h().gap(space::TIGHT)
                     .child(div().text_sm().text_color(theme.foreground).child(lane.title()))
-                    .child(section_title(count.to_string(), theme)),
+                    .child(section_title(lane_count(count, shown), theme)),
             );
         if let Some(label) = add {
             let is_person = lane == Lane::People;
@@ -353,6 +393,16 @@ fn warning(text: Option<&str>, theme: &Theme) -> Option<gpui::Div> {
     })
 }
 
+/// `35 · 10 shown`, or just `8` when the whole lane is drawn.
+fn lane_count(count: usize, shown: usize) -> String {
+    if shown >= count { count.to_string() } else { format!("{count} · {shown} shown") }
+}
+
+/// The warmth the lane's order was decided by, under the card it decided.
+fn warmth(text: Option<&str>, state: CardState, theme: &Theme) -> Option<gpui::Div> {
+    text.map(|text| div().text_xs().text_color(state.wash(theme)).child(text.to_owned()))
+}
+
 fn people_count(people: usize) -> String {
     match people {
         1 => "1 person".to_owned(),
@@ -362,12 +412,22 @@ fn people_count(people: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::people_count;
+    use super::{lane_count, people_count};
 
     #[test]
     fn a_project_with_one_person_on_it_does_not_say_1_people() {
         assert_eq!(people_count(0), "0 people");
         assert_eq!(people_count(1), "1 person");
         assert_eq!(people_count(4), "4 people");
+    }
+
+    #[test]
+    fn a_lane_header_says_how_much_of_itself_it_is_drawing() {
+        assert_eq!(lane_count(35, 10), "35 · 10 shown");
+        // A selection opens its chain, and the header counts what is on screen.
+        assert_eq!(lane_count(35, 12), "35 · 12 shown");
+        // A lane that fits says its size and nothing more: "8 · 8 shown" is noise.
+        assert_eq!(lane_count(8, 8), "8");
+        assert_eq!(lane_count(0, 0), "0");
     }
 }

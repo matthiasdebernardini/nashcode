@@ -8,7 +8,7 @@
 use gpui::{Context, div, prelude::*, rems};
 use people_core::ContactKind;
 
-use crate::app::{Field, PeopleApp};
+use crate::app::{Field, PeopleApp, Suggested};
 use crate::board::{Board, CardId};
 use crate::edit::display;
 use crate::theme::{ThemeExt, space};
@@ -19,8 +19,10 @@ impl PeopleApp {
         let theme = cx.theme();
         let body: gpui::AnyElement = match self.selected.clone() {
             None => self.nothing_selected(cx).into_any_element(),
-            Some(CardId::Person(id)) => self.person_inspector(&id, cx).into_any_element(),
-            Some(CardId::Project(id)) => self.project_inspector(&id, cx).into_any_element(),
+            Some(CardId::Person(id)) => self.person_inspector(board, &id, cx).into_any_element(),
+            Some(CardId::Project(id)) => {
+                self.project_inspector(board, &id, cx).into_any_element()
+            }
             Some(id @ CardId::Contact { .. }) => {
                 self.contact_inspector(board, &id, cx).into_any_element()
             }
@@ -58,7 +60,7 @@ impl PeopleApp {
             )
     }
 
-    fn person_inspector(&self, id: &str, cx: &Context<Self>) -> impl IntoElement {
+    fn person_inspector(&self, board: &Board, id: &str, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let Some(person) = self.edit.person(id) else {
             return v().child(muted("That person is gone.", theme));
@@ -66,12 +68,17 @@ impl PeopleApp {
         let key = id.to_owned();
 
         // Every project, filled when this person is on it. One row, so membership is
-        // a thing you see rather than a list you maintain.
+        // a thing you see rather than a list you maintain. Warmest first, the same
+        // order the lane behind it draws — a chip row sorted differently from the lane
+        // it names would be a second answer to "which project matters".
         let mut chips = h().gap(space::TIGHT).flex_wrap();
-        if self.edit.projects.is_empty() {
+        if board.projects.is_empty() {
             chips = chips.child(muted("No projects yet.", theme).text_xs());
         }
-        for project in &self.edit.projects {
+        for card in &board.projects {
+            let Some(project) = self.edit.project(&card.project) else {
+                continue;
+            };
             let on = project.people.iter().any(|listed| listed == id);
             let name = display(&project.id, &project.name);
             let project_id = project.id.clone();
@@ -127,7 +134,11 @@ impl PeopleApp {
                         "One E.164 number per line, e.g. +15550001111",
                         cx,
                     ))
-                    .child(self.field(Field::PersonEmails, "Emails", "One address per line", cx)),
+                    .child(self.field(Field::PersonEmails, "Emails", "One address per line", cx))
+                    .child(self.switch(Field::PersonSignal, "Signal", cx))
+                    .child(
+                        muted("The number above is also their Signal number.", theme).text_xs(),
+                    ),
             )
             .child(v().gap(space::TIGHT).child(section_title("On these projects", theme)).child(chips))
             .child(
@@ -136,20 +147,26 @@ impl PeopleApp {
             )
     }
 
-    fn project_inspector(&self, id: &str, cx: &Context<Self>) -> impl IntoElement {
+    fn project_inspector(&self, board: &Board, id: &str, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let Some(project) = self.edit.project(id) else {
             return v().child(muted("That project is gone.", theme));
         };
-        let members: Vec<String> = project
+        // Warmest first, like the lane. A dangling id has no card to take a place
+        // from, so it is named last, where a fault belongs.
+        let mut members: Vec<String> = board
             .people
             .iter()
-            .map(|person| {
-                self.edit
-                    .person(person)
-                    .map_or_else(|| format!("{person} (no such person)"), |p| display(&p.id, &p.name))
-            })
+            .filter(|card| project.people.iter().any(|listed| listed == &card.person))
+            .map(|card| card.name.clone())
             .collect();
+        members.extend(
+            project
+                .people
+                .iter()
+                .filter(|person| self.edit.person(person).is_none())
+                .map(|person| format!("{person} (no such person)")),
+        );
 
         v().gap(space::SECTION)
             .child(
@@ -238,6 +255,120 @@ impl PeopleApp {
                         "A Gmail query that replaces the built one",
                         cx,
                     )),
+            )
+            .child(self.suggestions(id, cx))
+    }
+
+    /// Who else writes about this project, and the two things to do about each of
+    /// them.
+    ///
+    /// All four states are drawn: asked and waiting, nobody new, a source that could
+    /// not answer, and a list. The section is always here while a project is selected,
+    /// because a section that appeared only when it had something would read as a
+    /// section that had gone wrong.
+    fn suggestions(&self, id: &str, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let mut section = v()
+            .gap(space::GROUP)
+            .child(section_title("Suggested", theme))
+            .child(
+                muted(
+                    "From Messages and Gmail. Only this project's name is searched; nothing out of the file is sent.",
+                    theme,
+                )
+                .text_xs(),
+            );
+
+        match self.suggestions.get(id) {
+            // Nothing has been asked. Only a project reloaded from disk under an old
+            // selection lands here, and it is a state with a way out rather than a
+            // spinner that never turns.
+            None => {
+                let project = id.to_owned();
+                return section
+                    .child(muted("Not looked yet.", theme).text_sm())
+                    .child(
+                        widgets::button("look", "Look for people", Tone::Default, true, theme)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.look_again(project.clone(), cx);
+                            })),
+                    );
+            }
+            Some(Suggested::Looking) => {
+                return section.child(muted("Looking…", theme).text_sm());
+            }
+            Some(Suggested::Failed(why)) => {
+                let project = id.to_owned();
+                return section
+                    .child(div().text_sm().text_color(theme.warning).child(why.clone()))
+                    .child(
+                        widgets::button("look-again", "Try again", Tone::Ghost, true, theme)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.look_again(project.clone(), cx);
+                            })),
+                    );
+            }
+            Some(Suggested::Found(found)) if found.is_empty() => {
+                return section.child(muted("Nobody new.", theme).text_sm());
+            }
+            Some(Suggested::Found(found)) => {
+                for candidate in found {
+                    section = section.child(self.candidate_row(id, candidate, cx));
+                }
+            }
+        }
+        section
+    }
+
+    /// One candidate: who, where to write to them, where they were seen, and the two
+    /// commands. Accept is the primary of this row and it does not save.
+    fn candidate_row(
+        &self,
+        project: &str,
+        candidate: &people_core::Candidate,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        // The address, not a row number: the list shortens under every accept, and a
+        // position would name whoever moved up into it.
+        let address = candidate.address().to_owned();
+        let (accept_to, skip_to) = (project.to_owned(), project.to_owned());
+        let (accept_at, skip_at) = (address.clone(), address.clone());
+
+        v().gap(space::PART)
+            .p(space::TIGHT)
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .child(div().text_sm().truncate().child(candidate.name.clone()))
+            .child(section_title(address, theme))
+            .child(section_title(candidate.where_seen.clone(), theme))
+            .child(
+                h().gap(space::TIGHT)
+                    .child(
+                        widgets::button(
+                            widgets::eid("accept", &accept_at),
+                            "Accept",
+                            Tone::Primary,
+                            true,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.accept_suggestion(&accept_to, &accept_at, cx);
+                        })),
+                    )
+                    .child(
+                        widgets::button(
+                            widgets::eid("skip", &skip_at),
+                            "Skip",
+                            Tone::Ghost,
+                            true,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.skip_suggestion(&skip_to, &skip_at, cx);
+                        })),
+                    ),
             )
     }
 

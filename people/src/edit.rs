@@ -9,7 +9,7 @@
 //! Nothing here touches gpui or the disk. It is the app's domain model, so the round
 //! trip and every list edit are provable without a window.
 
-use people_core::{Email, Imsg, PeopleFile, Person, Project};
+use people_core::{Candidate, Email, Imsg, PeopleFile, Person, Project, Seen};
 
 /// The whole file, in the form the fields edit.
 ///
@@ -39,7 +39,9 @@ pub struct PersonEdit {
     pub phones: String,
     /// One email per line.
     pub emails: String,
-    /// This person's `signal`, `seen`, and any hand-written key. See [`Edit::carried`].
+    /// The number in `phones` is also this person's Signal number.
+    pub signal: bool,
+    /// This person's `seen` and any hand-written key. See [`Edit::carried`].
     carried: Person,
 }
 
@@ -77,6 +79,7 @@ impl Edit {
                     name: person.name.clone(),
                     phones: lines(&person.phones),
                     emails: lines(&person.emails),
+                    signal: person.signal,
                     carried: carried_person(person),
                 })
                 .collect(),
@@ -118,6 +121,7 @@ impl Edit {
                     name: person.name.clone(),
                     phones: entries(&person.phones),
                     emails: entries(&person.emails),
+                    signal: person.signal,
                     // Everything this window does not model, back where it was.
                     ..person.carried.clone()
                 })
@@ -172,6 +176,42 @@ impl Edit {
         let id = self.free_person_id(&name, "");
         self.people.push(PersonEdit { id: id.clone(), name, ..PersonEdit::default() });
         id
+    }
+
+    /// Add a person the file has already met somewhere else — a suggestion the
+    /// operator accepted — and answer with the id to select.
+    ///
+    /// Not `add_person` with the fields filled in afterwards: the id is the name in
+    /// slug form, so a person who arrives with a name has to arrive with the id that
+    /// name gives, or the first keystroke anywhere would move them.
+    pub fn accept_person(&mut self, name: &str, phone: Option<&str>, email: Option<&str>) -> String {
+        let id = self.free_person_id(name, "");
+        self.people.push(PersonEdit {
+            id: id.clone(),
+            name: name.trim().to_owned(),
+            phones: phone.unwrap_or_default().trim().to_owned(),
+            emails: email.unwrap_or_default().trim().to_owned(),
+            ..PersonEdit::default()
+        });
+        id
+    }
+
+    /// One more match for this person, now.
+    ///
+    /// `seen` is not a field on the form: nobody types a count. It is parked with
+    /// everything else the window carries rather than edits, which is exactly where
+    /// the file wants it written back from.
+    pub fn bump_person(&mut self, id: &str, now: &str) {
+        if let Some(person) = self.person_mut(id) {
+            Seen::bump(&mut person.carried.seen, now);
+        }
+    }
+
+    /// The same for a project.
+    pub fn bump_project(&mut self, id: &str, now: &str) {
+        if let Some(project) = self.project_mut(id) {
+            Seen::bump(&mut project.carried.seen, now);
+        }
     }
 
     /// Add a project and answer with the id to select.
@@ -292,7 +332,54 @@ impl Edit {
             project.people.retain(|listed| listed != person);
         }
     }
+}
 
+/// What accepting a suggestion did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Accepted {
+    /// The id the new person got, which is their name in slug form.
+    pub person: String,
+    /// The sentence the status line says.
+    pub notice: String,
+}
+
+/// Take one suggestion into the edits, and answer with what to say about it.
+///
+/// Five steps that are one step: the person is created with the id their name gives
+/// them, put on the project, counted as having matched on both ends, and the row that
+/// offered them is dropped. Half of that would leave a person on no project or a
+/// project warmed for somebody it does not list, so the sequence is one function and
+/// the window calls it once.
+///
+/// The row is named by its **address**. The list shortens under every accept, so a
+/// position would name whoever moved up into it.
+///
+/// It does not save. Accepting is a claim about who somebody is, and the operator gets
+/// to look at the picture that claim makes before it reaches the file every router
+/// reads. `None` means the address is not in the list — a second click on a row that
+/// has already gone.
+pub fn accept(
+    edit: &mut Edit,
+    found: &mut Vec<Candidate>,
+    project: &str,
+    address: &str,
+    now: &str,
+) -> Option<Accepted> {
+    let candidate = found.iter().find(|it| it.address() == address)?.clone();
+    let person = edit.accept_person(
+        &candidate.name,
+        candidate.phone.as_deref(),
+        candidate.email.as_deref(),
+    );
+    edit.add_to_project(project, &person);
+    edit.bump_person(&person, now);
+    edit.bump_project(project, now);
+    found.retain(|it| it.address() != address);
+
+    let who = display(&person, &candidate.name);
+    let what =
+        edit.project(project).map_or_else(|| project.to_owned(), |it| display(&it.id, &it.name));
+    Some(Accepted { person, notice: format!("Added {who} to {what}. Not saved yet.") })
 }
 
 /// One person, with everything the window models blanked out, so what is left is
@@ -307,6 +394,7 @@ fn carried_person(person: &Person) -> Person {
         name: String::new(),
         phones: Vec::new(),
         emails: Vec::new(),
+        signal: false,
         ..person.clone()
     }
 }
@@ -347,18 +435,13 @@ pub fn slug(name: &str, fallback: &str) -> String {
 }
 
 /// `base`, else `base-2`, `base-3`, … until `taken` says no.
+///
+/// [`people_core::unique_id`] and not a second copy of it: a window that minted ids by
+/// one rule and a `sync-folders` that minted them by another would collide on the one
+/// key the whole file joins on. `base` is never empty here, because [`slug`] takes a
+/// fallback and the crate's version answers an empty base with an empty id.
 fn unique(base: &str, taken: impl Fn(&str) -> bool) -> String {
-    if !taken(base) {
-        return base.to_owned();
-    }
-    let mut n = 2usize;
-    loop {
-        let candidate = format!("{base}-{n}");
-        if !taken(&candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
+    people_core::unique_id(base, taken)
 }
 
 /// What to call someone: their name when they have one, else their id.
@@ -532,6 +615,120 @@ mod tests {
         assert_eq!(slug("!!! ???", "project"), "project");
         assert_eq!(slug("  Pristine   Acres  ", "project"), "pristine-acres");
         assert_eq!(slug("agstaff", "project"), "agstaff");
+    }
+
+    #[test]
+    fn the_signal_flag_is_a_field_of_the_form_rather_than_a_key_carried_past_it() {
+        let file = PeopleFile::parse(
+            r#"{ "people": [ { "id": "rob", "name": "Rob", "phones": ["+15550001111"],
+                               "signal": true } ], "projects": [] }"#,
+        )
+        .expect("a valid file");
+        let mut edit = Edit::from_file(&file);
+        assert!(edit.person("rob").expect("rob").signal, "the flag reached the form");
+        assert_eq!(edit.to_file(), file, "and it goes back where it came from");
+
+        edit.person_mut("rob").expect("rob").signal = false;
+        // Turned off, it is the absence of a flag: the file writes nothing at all.
+        assert!(!edit.to_file().people[0].signal);
+        assert!(!edit.to_file().to_pretty_json().contains("signal"));
+    }
+
+    #[test]
+    fn an_accepted_suggestion_arrives_with_the_id_its_name_gives_it() {
+        let mut edit = Edit::from_file(&fixture());
+        let id = edit.accept_person("  Dana Vale ", None, Some("  dana@example.com "));
+
+        assert_eq!(id, "dana-vale");
+        let dana = edit.person(&id).expect("Dana");
+        assert_eq!(dana.name, "Dana Vale", "the source's stray whitespace is not the name");
+        assert_eq!(dana.emails, "dana@example.com", "the address is trimmed on the way in");
+        assert_eq!(dana.phones, "");
+        assert_eq!(edit.to_file().validate().iter().filter(|f| f.fatal).count(), 0);
+
+        // A name somebody already holds is suffixed, never a collision on the join key.
+        assert_eq!(edit.accept_person("Rob Castro", Some("+15550009999"), None), "rob-castro");
+        assert_eq!(edit.accept_person("Rob Castro", None, None), "rob-castro-2");
+    }
+
+    #[test]
+    fn accepting_warms_both_ends_of_what_was_accepted() {
+        const NOW: &str = "2026-08-23T12:00:00Z";
+        let mut edit = Edit::from_file(&fixture());
+        let id = edit.accept_person("Dana Vale", None, Some("dana@example.com"));
+        edit.add_to_project("acres", &id);
+        edit.bump_person(&id, NOW);
+        edit.bump_project("acres", NOW);
+
+        let file = edit.to_file();
+        let dana = file.people.iter().find(|p| p.id == id).expect("Dana");
+        assert_eq!(dana.seen.as_ref().map(|s| s.count), Some(1));
+        assert_eq!(dana.seen.as_ref().map(|s| s.last.as_str()), Some(NOW));
+        let acres = file.projects.iter().find(|p| p.id == "acres").expect("acres");
+        assert_eq!(acres.seen.as_ref().map(|s| s.count), Some(1));
+
+        // A second acceptance counts, rather than restarting.
+        edit.bump_project("acres", NOW);
+        assert_eq!(
+            edit.to_file().projects.iter().find(|p| p.id == "acres").and_then(|p| p.seen.as_ref()).map(|s| s.count),
+            Some(2)
+        );
+        // And a bump of nobody is not a panic and not a new person.
+        edit.bump_person("nobody", NOW);
+        edit.bump_project("nothing", NOW);
+        assert_eq!(edit.people.len(), 3);
+    }
+
+    /// The whole of "accept", as one step, without a window.
+    #[test]
+    fn accepting_a_suggestion_is_one_step_and_says_what_it_did() {
+        const NOW: &str = "2026-08-23T12:00:00Z";
+        let mut edit = Edit::from_file(&fixture());
+        let mut found = vec![
+            Candidate {
+                name: "Dana Vale".to_owned(),
+                email: Some("dana@example.com".to_owned()),
+                phone: None,
+                where_seen: "Gmail, 2026-08-22".to_owned(),
+                last: None,
+            },
+            Candidate {
+                name: "Kit Alder".to_owned(),
+                email: None,
+                phone: Some("+15550007777".to_owned()),
+                where_seen: "Acres crew".to_owned(),
+                last: None,
+            },
+        ];
+
+        let done = accept(&mut edit, &mut found, "acres", "dana@example.com", NOW)
+            .expect("the address is in the list");
+        assert_eq!(done.person, "dana-vale", "the id is the name in slug form");
+        assert_eq!(done.notice, "Added Dana Vale to Pristine Acres. Not saved yet.");
+
+        // On the project, warm on both ends, and gone from the list that offered her.
+        let file = edit.to_file();
+        let acres = file.projects.iter().find(|p| p.id == "acres").expect("acres");
+        assert!(acres.people.iter().any(|listed| listed == "dana-vale"));
+        assert_eq!(acres.seen.as_ref().map(|s| s.count), Some(1));
+        assert_eq!(acres.seen.as_ref().map(|s| s.last.as_str()), Some(NOW));
+        let dana = file.people.iter().find(|p| p.id == "dana-vale").expect("Dana");
+        assert_eq!(dana.emails, ["dana@example.com"]);
+        assert_eq!(dana.seen.as_ref().map(|s| s.count), Some(1));
+        assert_eq!(found.len(), 1, "the row that was taken is gone");
+        assert_eq!(found[0].name, "Kit Alder", "and nobody else moved");
+        assert_eq!(file.validate().iter().filter(|f| f.fatal).count(), 0);
+
+        // A second click on a row that has already gone writes nothing at all.
+        assert!(accept(&mut edit, &mut found, "acres", "dana@example.com", NOW).is_none());
+        assert_eq!(edit.people.len(), 3);
+
+        // A project with no name of its own is named by its id, in the one spelling
+        // `display` gives, so the sentence never says "Added Kit Alder to .".
+        let taken = accept(&mut edit, &mut found, "agstaff", "+15550007777", NOW)
+            .expect("the phone is in the list");
+        assert_eq!(taken.notice, "Added Kit Alder to agstaff. Not saved yet.");
+        assert!(found.is_empty());
     }
 
     #[test]

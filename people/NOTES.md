@@ -77,6 +77,33 @@ bounds map, the wires, and the selection. The board itself is derived on every f
 `edit.to_file()`; a stored board would go stale between keystrokes, and the file is
 small enough that deriving it costs less than keeping it right.
 
+**Order** — `people_core::by_frecency`, never alphabetical. A `seen` count halved
+every **fourteen days** (`people_core::HALF_LIFE_DAYS`): a client untouched for a
+fortnight is worth half what they were, one untouched for a quarter about a fiftieth.
+The clock is read once per `Board::from_file` and handed to every lane below it, so
+three lanes can never disagree about the same file; `Board::at(file, now)` is the same
+function with the instant stated, which is what makes the order testable. Projects and
+people sort by their own `seen`; **contacts have none of their own and follow their
+holder's place**, because an address is warm when the person holding it is. A card that
+has ever matched carries `3× · 2d ago` under it — the number the order was made of,
+said out loud, in `people_core::seen_label`, which is the same spelling
+`nashcode people ls` prints.
+
+**Collapse at scale** — with thirty-five client folders the picture stops being a
+picture. A lane past `board::EXPANDED` (ten) draws its warm head in full and the tail
+as one line each: the name, still clickable, still on the arrow keys, still carrying
+its wire. A selection expands **its whole connected chain**, whatever its rank, which
+is the exception the rule exists for — the project the operator just clicked is the one
+they want in full, and a chain that collapsed halfway would answer "where does this
+route?" with half a wire. The header says what it is doing: `Projects 35 · 10 shown`,
+and just `Projects 8` when the whole lane is drawn, because "8 · 8 shown" is noise. Ten
+is what fits above the fold beside the inspector at the window's opening height.
+**All three lanes, addresses included.** The canvas scrolls as one piece, so a
+contacts lane that drew all seventy addresses of a thirty-five-client file in full
+would push the people and the projects off the fold to say "phone" seventy times. A
+collapsed address is its value alone: the kind is already the `+` or the `@` in it,
+and a warning about an address nobody has clicked is read on the card that was.
+
 **Bands** — a lane is sorted into runs, not annotated in place: `Band::Routes`, then
 `Band::Nowhere` under a warning-coloured "Routes nowhere", then `Band::Mine` under
 "Yours, never scores". `me` entries are not a fault — never scoring is their job — so
@@ -116,7 +143,14 @@ back on hover, so nothing is ever unreadable.
 `board::tests::the_file_becomes_three_lanes_with_the_dead_ends_below_the_fold`,
 `board::tests::a_warning_sits_on_the_card_it_is_about`,
 `board::tests::a_project_with_nobody_on_it_says_so_on_its_own_card`,
-`board::tests::one_number_on_two_people_is_two_cards_two_wires_and_two_selections`, and
+`board::tests::one_number_on_two_people_is_two_cards_two_wires_and_two_selections`,
+`board::tests::every_lane_is_warmest_first_and_never_alphabetical`,
+`board::tests::a_card_says_the_warmth_its_place_was_decided_by`,
+`board::tests::a_long_lane_draws_its_warm_head_and_collapses_the_rest`,
+`board::tests::a_long_contacts_lane_collapses_like_the_other_two`,
+`board::tests::a_selection_expands_its_whole_chain_however_cold_it_is`,
+`board::tests::the_rule_itself_is_about_an_order_and_a_selection_and_nothing_else`,
+`lanes::tests::a_lane_header_says_how_much_of_itself_it_is_drawing`, and
 `lanes::tests::a_project_with_one_person_on_it_does_not_say_1_people`.
 
 ---
@@ -200,9 +234,16 @@ address in `me` belongs to nobody and lights up alone, which is the whole point 
 `inspector.rs`.
 
 **Retained identity and lifecycle** — whatever `selected` names. A person shows name,
-phones and emails, and a row of chips holding **every** project, filled when the
-person is on it: membership is a thing you see, not a list you maintain. A project
-shows its nine fields. A contact is read-only — it is a line inside a person, and the
+phones, emails, a **Signal** switch, and a row of chips holding **every** project,
+filled when the person is on it: membership is a thing you see, not a list you
+maintain. The chips are in the lane's order — warmest first — because a chip row sorted
+differently from the lane it names would be a second answer to "which project matters".
+A project shows its nine fields, its members in the same warm order, and its Suggested
+section.
+
+**Signal** — one switch, bound to `Person.signal`. Not a third list: the number is
+already in `phones`, and the flag says what else that number reaches. Off is the
+absence of a flag, so a file that never had `"signal"` in it never gains one. A contact is read-only — it is a line inside a person, and the
 person is where it is edited — with one command, "Go to person". Nothing selected
 shows one sentence and the two New buttons.
 
@@ -229,6 +270,7 @@ their width whatever the inspector holds.
 and a focused field, `danger` for Delete, `muted` for labels and help.
 
 **The test that fails if it regresses** —
+`edit::tests::the_signal_flag_is_a_field_of_the_form_rather_than_a_key_carried_past_it`,
 `edit::tests::an_id_is_the_name_in_slug_form_and_a_rename_carries_every_project_with_it`,
 `edit::tests::a_rename_onto_a_taken_id_is_suffixed_rather_than_a_collision`,
 `edit::tests::a_name_with_nothing_to_slug_still_gets_an_id`,
@@ -237,6 +279,146 @@ and a focused field, `danger` for Delete, `muted` for labels and help.
 `edit::tests::the_file_survives_the_round_trip_through_the_fields`,
 `app::tests::every_field_is_on_exactly_one_tab_ring`, and
 `app::tests::only_the_two_name_fields_move_a_card`.
+
+---
+
+## The Suggested section
+
+**Behavior owner** — `PeopleApp`: `look_for_suggestions`, `look_again`,
+`accept_suggestion`, `skip_suggestion`, `carry_suggestion`, and `edit::accept`, which
+is the whole of an accept over the model. The discovery itself is
+`people_core::suggest::candidates_for`, which is also what `nashcode people suggest`
+calls — one implementation, so a name the terminal offers and a name the window offers
+are the same name found the same way. **Presentation owner** —
+`PeopleApp::suggestions` and `candidate_row` in `inspector.rs`.
+
+**What leaves the machine.** The Gmail search sends the selected project's **name** as
+the query, and nothing else. No phone number, no address, no person id, nothing else
+out of `people.json` is ever sent. The Messages side sends nothing at all: `imsg` reads
+the local database. Everything the two answer with is compared against the file here,
+on this Mac. The section says so on screen, under its title, rather than only here.
+
+**Retained identity and lifecycle** — `HashMap<project id, Suggested>`, for the life of
+the window and no longer. A lookup runs two processes, so re-running it every time the
+operator clicked back onto a card would make the inspector feel broken and would ask
+Gmail the same question ten times. A candidate is identified by its **address**, never
+by its row: the list shortens under every accept, and a position would name whoever
+moved up into it.
+
+**A rename carries an answer and never an unanswered question.** `Found` and `Failed`
+are about the project, and it is the same project under a new name, so `resync_id`
+moves them to the new id. `Looking` is not an answer — it is a question the *old* id
+asked, and the task that asked it drops its own work when it sees the selection has
+moved. Carried across, that left `Looking…` on the new id with nothing coming, no Look
+button, and a key already in the map that `look_for_suggestions` would not ask about
+again: "Looking…" for the rest of the session, one keystroke into naming a project. So
+a rename hands the question back as no question at all, which is the state the Look
+button is in. `carry_suggestion` is that one decision, and it is pure.
+
+**A project that goes takes its answer with it**, and a reload drops every answer:
+they were about the file that has just been replaced, and a project that kept its id
+through it is not the same question — its name, its query and its people may all have
+moved under it. The same reload gives Gmail's hundred-message budget back
+(`people_core::suggest::reset_gmail_budget`). The budget stops one CLI sweep from
+making eight hundred round trips; a window open all day would otherwise spend it once
+and then draw "nobody new" for the rest of the day with nothing on screen saying why.
+A reload is the one moment that is a new run and is not a keystroke.
+
+**The settle delay.** Every way of landing on a project asks — the click, the arrow
+keys, Tab between lanes, a project just created — so the section is not the one part of
+the inspector a keyboard cannot reach. Arrowing down a lane of thirty-five would then
+be thirty-five pairs of processes, so the task waits `app::SETTLE` (350 ms) and then
+checks that the project is still the selection; if it is not, it forgets its own
+`Looking` and returns, and coming back asks properly. A third of a second is below the
+threshold at which a person waiting notices a wait and well above the speed at which
+the same person walks past a card.
+
+**Accepting never saves.** `edit::accept` is the whole sequence in one function over
+the model: it creates the person (`Edit::accept_person`, id from
+`people_core::unique_id` over the name's slug), puts them on the project, counts one
+match on both ends, drops the row that offered them, and answers with the sentence the
+status line says. Half of it would leave a person on no project, or a project warmed
+for somebody it does not list. What is left in the window is the frame. It leaves the
+file unsaved. Accepting is a claim about who
+somebody is, and the operator gets to look at the picture that claim makes before it
+reaches the file every router reads. Skipping writes nothing at all, so the next window
+offers them again — the answer was "not now", not "never".
+
+**Pointer, keyboard, focus** — the rows are pointer-only, like the project chips and
+the toolbar. Same documented gap, same v2 fix.
+
+**Layout and overflow** — inside the inspector's own scroll column, so a project with
+nine candidates does not widen the lanes.
+
+**Theme tokens** — `border` for a row, `muted` for the address and the sighting,
+`warning` for the source that could not answer, `accent` through `Tone::Primary` on
+Accept.
+
+**All four states are drawn** — not asked (with a Look button, which is where a
+project selected by a reload lands), looking, nobody new, and a source that could not
+answer, that last one with the reason and a **Try again**. A section that appeared only
+when it had something would read as a section that had gone wrong.
+
+**The test that fails if it regresses** —
+`edit::tests::an_accepted_suggestion_arrives_with_the_id_its_name_gives_it`,
+`edit::tests::accepting_warms_both_ends_of_what_was_accepted`,
+`edit::tests::accepting_a_suggestion_is_one_step_and_says_what_it_did`,
+`app::tests::a_rename_carries_an_answer_across_and_never_an_unanswered_question`,
+and, in the shared
+crate, `people_core::suggest::tests::*` — the chat parser, the `From:` parser, the
+dedupe, and `a_person_on_another_project_is_not_a_candidate_here_either`.
+
+---
+
+## The Sync folders panel
+
+**Behavior owner** — `PeopleApp::open_sync_panel`, `close_sync_panel`, `sync_folders`;
+the two pure parts are `store::expand_home` and `store::sync_summary`. The sync itself
+is `PeopleFile::sync_folders`, in the shared crate, so the CLI and the window add the
+same projects from the same directory. **Presentation owner** —
+`PeopleApp::render_sync_panel`.
+
+**Retained identity and lifecycle** — `clients_dir`, a string on the window;
+`sync_panel` and `clients_dir_from_env`, two bools. The panel opens filled from
+`NASHCODE_CLIENTS` when that is set, and whether it did is decided **at open time**
+and kept: a render is a picture of state, and a process-wide variable read from inside
+one is a fact no field owns. The flag says "prefilled" only while the field still
+holds what the variable said, so a path typed over the top stops claiming to have come
+from there. The panel **opens** rather than running: a command that added thirty-five projects the
+instant it was clicked, from a path nobody on screen had seen, would be the one command
+in this window the operator could not predict.
+
+**No native dialog in v1.** The answer is one path the operator can type, and a file
+picker is a platform surface with its own focus contract, its own sandbox questions,
+and no test.
+
+**The report goes into the edits, not onto the disk.** `Edit::from_file` of the
+window's own `to_file` is the round trip the whole app rests on, so nothing already
+typed is lost by it, and the status line says what arrived —
+`Added 2: orchard-hill, stone-bakery. 0 already there, skipped deploy-web,
+tin-roof-backups. Not saved yet.` It names what the file's `skip` list turned away,
+because a client folder that did not appear is the question the command raises. It
+names a folder whose name slugs to nothing (`---`) apart from those, under `no project
+name in …`: the operator asked for a skip and did not ask for this, and the folder has
+to be renamed or put in `skip` — neither of which is possible while nothing on screen
+says which folder it was.
+
+**Pointer, keyboard, focus** — the panel opens with the keyboard in its field, Enter
+runs the sync, Escape closes it. `Field::ClientsDir` is on **no** tab ring: it is one
+field in a panel that is either open or closed, and Tab stepping out of it into the
+inspector behind would move the keyboard somewhere the eye is not. It is not a focus
+trap either — Escape is always the way out.
+
+**Layout and overflow** — a band under the toolbar, above the body, exactly where the
+changed-on-disk banner sits, so the two never fight for the same strip.
+
+**Theme tokens** — `surface`, `border`, `muted`; `Tone::Primary` on the one command and
+`Tone::Ghost` on Cancel.
+
+**The test that fails if it regresses** —
+`store::tests::a_leading_tilde_is_the_home_directory_and_an_empty_field_is_no_path`,
+`store::tests::a_sync_says_what_arrived_what_was_already_there_and_what_was_turned_away`,
+and `app::tests::the_panels_field_is_reached_by_opening_the_panel_and_left_by_closing_it`.
 
 ---
 
@@ -266,11 +448,13 @@ and a focused field, `danger` for Delete, `muted` for labels and help.
   missing (with Create empty file), parse error (nothing editable, error text shown),
   empty board (with the two New buttons), unsaved, changed-on-disk (Reload or Keep),
   push in flight, push failed.
-- **Long data sets use a virtualized component** — they do not. The file holds tens of
-  people, not thousands; the canvas is one scrolling column. Virtualization would also
-  break the links layer, which measures every card each frame; a virtualized canvas
-  would have to derive the bounds of cards it did not lay out. That is the v2 change
-  if the file ever grows.
+- **Long data sets use a virtualized component** — they do not, and they now collapse
+  instead. The file holds tens of people, not thousands; the canvas is one scrolling
+  column, and a lane past ten draws the rest as one line each (`board::expanded`), so
+  thirty-five projects cost thirty-five short rows rather than thirty-five full cards.
+  Virtualization proper would break the links layer, which measures every card each
+  frame: a virtualized canvas would have to derive the bounds of cards it did not lay
+  out. That is still the v2 change if the file ever reaches thousands.
 - **Public API additions preserve dependency direction** — the only new public API is
   `people_core::contact_map`. It went into the shared crate, not the app, so the join
   exists once. `people-core` still knows nothing about gpui.
@@ -299,7 +483,11 @@ and takes no callback: the view that owns the behavior wraps it in
 be held responsible for them. The text field is the one with real behavior — insert,
 backspace, delete, left, right, home, end, up, down — and all of it is pure and
 tested. It has **no selection, no mouse caret placement, and no clipboard**: a click
-focuses the field and puts the caret at the end. That is v1's honest limit.
+focuses the field and puts the caret at the end. That is v1's honest limit, and it is
+why a new card opens on an **empty** name field rather than on a selected placeholder:
+a caret parked in front of "New project" made the first keystroke read
+`AcmeNew project` and the id `acmenew-project`. The card keeps a title either way,
+because `edit::display` falls back to the id.
 
 **GPUI Actions.** The commands are dispatched from one `on_key_down` on the focused
 root, as the reference application does on this crate version, rather than through
@@ -342,11 +530,33 @@ because there is no receipt yet.
 file rather than pulled by hand. Dragging a wire would be a second way to say the same
 thing, with its own hit-testing and its own undo.
 
-**What v1 does not do.** It cannot edit `me` — those addresses are shown in their own
+**One implementation of the discovery.** `Candidate` and the two sources moved out of
+`cli/src/commands/people.rs` into `people_core::suggest`, behind the `client` feature,
+and the CLI now calls `candidates_for`. Two copies of "who else writes about this
+project" would have drifted the first time one of them learned a new source. The
+Messages chat list is read **once per process** (`suggest::chats`): `imsg chats` takes
+no search, so the alternative was thirty-five reads of one answer. That is right for
+the CLI, which exits after a run, and right for the window, whose suggestions are
+cached per project anyway — a chat list from earlier in the session is exactly as fresh
+as the suggestions drawn from it.
+
+**A source that could not answer speaks once — to a process that then exits.**
+`people_core::suggest` keeps one note per tool per process. The CLI takes them with
+`take_notes`, which drains, and exits. The window reads them with `notes_now`, which
+does not: its lookups are cached per project, so a drained note would be spent on
+whichever project was asked first, and the second project would report "Nobody new."
+about a source that is still not installed. `gws` is still not on `PATH` on the
+eleventh lookup, so the eleventh lookup may still say so.
+
+**What v1 does not do.** The lane does not scroll to the selection: arrowing onto the
+fourteenth project expands it, and the operator still has to scroll to it. It cannot
+edit `me` — those addresses are shown in their own
 band and carried through the round trip untouched. It has no search, no images, and no
 icons beyond text glyphs.
 
-**What v2 would add.** An editable `me`; selection, mouse caret placement and
-clipboard in the text field; registered Actions with a visible shortcut list; a
-filesystem watcher; keyboard reach for the chips and the toolbar; a virtualized canvas
-with derived card bounds if the file ever grows past a screen or two.
+**What v2 would add.** Scroll-to-selection, so a keyboard walk down a collapsed lane
+brings the card it lands on into view; an editable `me`; selection, mouse caret
+placement and clipboard in the text field; registered Actions with a visible shortcut
+list; a filesystem watcher; keyboard reach for the chips, the suggestion rows and the
+toolbar; a native folder picker behind `Sync folders…`; a virtualized canvas with
+derived card bounds if the file ever grows past thousands.
