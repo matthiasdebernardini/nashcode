@@ -2016,6 +2016,11 @@ clock at the moment it renders the file.
 the empty string there would rewind a poller to the beginning of the store every time it
 caught up.
 
+**The CLI's digest of `memory` drops `path`; the JSON keeps it.** `GET /brain` answers
+`{slug, path, updated_at, facts}` for every entity, and `nashcode brain` prints
+everything but the path: the slug names the file, and `brain/entities/<slug>.md` is the
+whole of the mapping. Same rule the plan digest follows when it drops `summary`.
+
 **`facts` are the last three `- ` lines outside `## Conflicts`.** The conflicts section
 holds both sides of a disagreement the digest refused to settle; quoting one of them in
 `memory` as though it were a fact would be exactly the silent pick the digest avoided.
@@ -2075,13 +2080,13 @@ nobody has read yet.
 
 **The launchd plist is host configuration and is not tracked**, because it names a path
 on one Mac. It looks like this; write it to
-`~/Library/LaunchAgents/io.nashvilleautomation.context-digest.plist` and
+`~/Library/LaunchAgents/io.example.context-digest.plist` and
 `launchctl load` it:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
-  <key>Label</key><string>io.nashvilleautomation.context-digest</string>
+  <key>Label</key><string>io.example.context-digest</string>
   <key>ProgramArguments</key>
   <array><string>/bin/bash</string><string>-lc</string>
   <string>/path/to/nashcode/bin/context-email; /path/to/nashcode/bin/context-digest</string></array>
@@ -2096,6 +2101,26 @@ the tree has none. Branch pages are matched after the reserved routes, so
 `/:repo/context` already outranks a branch called `context` — the existing rule that
 `board` and `docs` rely on. `context` did join `RESERVED_ROUTES` in `mirror.rs`, so
 discovery refuses a *repo* by that name.
+
+**Front matter is escaped by YAML's rules, not by `format!("{s:?}")`.** Rust's Debug
+spells a combining accent as `\u{301}`, braces included, which YAML rejects — so a
+subject in NFD form ("Café" as `e` + U+0301, which is what a Mac pastes) produced a
+block that would not parse. The damage was quiet and bad: a file whose front matter
+does not parse loses its `ingested_at`, its cursor becomes `|kind/id`, it sorts ahead
+of everything, and no poller sees it after the first page. `yaml_str` now escapes only
+backslash, the quote, and the control characters.
+
+**Untrusted text reaches the CLI as `--flag=value`, never `--flag value`.** agcli
+resolves a pending `--title` to boolean true when the next token starts with `--`, so
+`bin/context-email` sending a subject of `--repo=victim` positionally would have filed
+that mail into another repository. The `=` form binds the value to its flag whatever
+the value looks like.
+
+**Undigested is `digested: false` in the front matter only.** `bin/context-digest`
+walks the block between the opening `---` and the one that closes it with awk. A
+substring match over the whole file re-digests forever any item that quotes a
+front-matter block — an email about this very system — because the real key flips to
+true and the quotation does not.
 
 **Listing is O(n) `git show` calls, and says so.** `GET /:repo/context` and the brain's
 `memory` both walk `git ls-tree` and read each file. There is no SQLite table for

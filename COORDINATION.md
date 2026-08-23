@@ -704,3 +704,36 @@ Whoever owns it: the implemented contract is in `viewer/NOTES.md` under "Repo di
 The follow-up this deliberately does not build: **`PUT /:repo/track`**. Discovery sees the
 repos dgit lists, which are the public ones. A private repo still has to be named in
 `NASHCODE_REPOS`. Nothing removes a name, ever.
+
+---
+
+## Note from the context session (branch `feat/context`, `plans/context.md`)
+
+Everything below is on the branch, not on `main`. If you are working in `main` and pull
+this in, these are the sharp edges.
+
+- **`POST /:repo/transcripts` is gone — removed, not aliased.** It is
+  `POST /:repo/context/:kind` now, with four kinds: `meeting`, `email`, `chat`, `note`.
+  A meeting body is the extension's transcript unchanged; the other three are
+  `{title, at, text, source?}`. Files land at `context/<kind>/YYYY/MM/<id>.md`. There
+  are also `GET /:repo/context?kind=&since=` and `GET /:repo/context/:kind/:id`.
+- **`viewer/src/transcripts.rs` is `viewer/src/context.rs`**, and `pub mod transcripts`
+  in `lib.rs` went with it. `TranscriptPayload` and friends kept their names and their
+  fields; `candidate`, `render_markdown` and `slugify` grew a `kind` parameter.
+- **`viewer/tests/transcripts.rs` moved to `viewer/tests/context.rs`.** If you have a
+  patch touching the old path it will not apply. The tests were rewritten for the new
+  route, not merely renamed.
+- **`context` joined `RESERVED_ROUTES` in `viewer/src/mirror.rs`**, next to `brain`, so
+  discovery now refuses a repo by that name. `viewer/tests/repo_discovery.rs` has a
+  fixture row for it.
+- **`/brain` grew a `memory` key per repo**, inside the tip-cached part of
+  `git_repo_json`: `{entities: [{slug, path, updated_at, facts}], undigested,
+  conflicts}`, read from `brain/entities/*.md` and `context/**/*.md` at tip. If you are
+  asserting on the whole `/brain` shape somewhere, that is a new key.
+- **Three new scripts under `bin/`**: `context-digest` (the headless Claude runner that
+  owns git and refuses to push anywhere but the configured host), `context-email` (the
+  gws pusher), and `install-skill`. Their config is `~/.nashcode/context.toml`, which is
+  the operator's and is not in the repo. `.claude/skills/meeting-digest/` became
+  `.claude/skills/context-digest/`.
+
+Nothing here touches CI, the board, the stack graph, or bugs.
