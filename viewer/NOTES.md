@@ -2165,3 +2165,45 @@ person's Google account and `me` is a person's name; neither belongs in a tracke
 so `bin/context-tasks` knows only the key names. `me` or `tasklist` missing means the
 sync says so and exits 0 — an operator who has not set up a list still gets their digest
 pushed.
+
+**Three things about `gws tasks`, measured against the live API** (one throwaway task,
+read, inserted and deleted; the list id is the operator's and is not written down here):
+
+1. **A deleted task is not a 404.** `gws tasks tasks get` on a task deleted in Google
+   exits 0 and answers the task with `"deleted": true` on it. It does stop appearing in
+   `list`, so the `max_open` count is already the count a person would make.
+2. **A failed call prints a JSON error document on stdout**, Google's own —
+   `{"error":{"code":400,"message":"Invalid task ID","reason":"invalid"}}` — plus a
+   one-line `error[api]: Invalid task ID` on stderr.
+3. **`delete` exits 0 and is idempotent.** A second delete of the same id also exits 0,
+   and `--format=json` is accepted. A run that dies between the delete and the commit
+   costs nothing on the next run.
+
+**A demotion needs evidence, never text.** Only two things un-claim a card: a `get` that
+succeeded and carries `deleted: true`, or a failure whose error document has
+`error.code == 404`. Every other failure — and every failure with no document at all —
+is a failure: it is named, it sets `trouble=1`, and the card is not touched. The first
+spelling of this returned "the task is gone" from a regex over both streams
+(`404|Not Found|notFound`), which meant a `gws` wrapper that was not there, exiting 127
+with `command not found`, demoted every card on the board, committed, and exited 0. A
+"404" inside a stranger's error string is a word; `error.code` is a fact.
+
+**The whole back-sync is fenced behind proof that the list is reachable.** `count_open`
+runs on every run, whether or not there is anything to add, and a `list` that answers is
+that proof. When it fails, no card is demoted and no task is deleted for that run: each
+one is named as held back and keeps its claim. Otherwise one mistyped `tasklist` in the
+config answers 404 for every card in turn and quietly un-claims the whole board — the
+same damage as the regex, arriving by a different door.
+
+`completed -> done` and `done -> patch` are deliberately *not* fenced. Both need a
+*successful* `get` before they do anything, and a list that is not there cannot produce
+one, so they carry their own evidence. Only the paths that act on a *failure*, or that
+remove something, need the fence.
+
+**A `due:` that is not a date is dropped, and the card is named.** The value is a
+person's, so `due: next friday` happens. Truncating it to ten characters built a `due`
+Google rejects, and that card would have failed its insert on every run for ever.
+`datetime.date.fromisoformat` decides; a value that will not parse costs the task its
+due date and nothing else. The same rule applies to a task's `updated`: unreadable and
+"not old yet" have to be different answers, or an unparseable date is silently a fresh
+one for ever.
