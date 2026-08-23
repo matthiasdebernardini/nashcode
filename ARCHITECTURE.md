@@ -98,6 +98,7 @@ graph LR
   viewer_brain --> viewer_docs
   viewer_brain --> viewer_git
   viewer_brain --> viewer_mirror
+  viewer_brain --> viewer_people
   viewer_brain --> viewer_stack
   viewer_brain --> viewer_upstream
   viewer_bugs --> viewer_config
@@ -145,6 +146,7 @@ graph LR
   viewer_web --> viewer_git
   viewer_web --> viewer_mirror
   viewer_web --> viewer_ops
+  viewer_web --> viewer_people
   viewer_web --> viewer_render
   viewer_web --> viewer_stack
   viewer_web --> viewer_traces

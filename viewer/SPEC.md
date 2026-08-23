@@ -326,8 +326,9 @@ the Mac's file and never hands the copy back out.
 
 ### Routing
 
-- One rule, in one Rust module (`viewer/src/people.rs`) that the CLI and the desktop
-  app compile too: `route(contacts) -> matches`. A project scores one point per
+- One rule, in one workspace crate (`people-core`) that the viewer, the CLI and the
+  desktop app all depend on, so the file's types, its validation, its routing, and the
+  push client exist once: `route(contacts) -> matches`. A project scores one point per
   distinct person matched by any email or phone in the contacts. Projects with a score
   come back highest first; equal scores keep file order and the answer says `tie:
   true` when the top score is shared. The operator's own addresses (`me`, plus each
