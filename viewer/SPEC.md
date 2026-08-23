@@ -316,8 +316,9 @@ the Mac's file and never hands the copy back out.
   only source of truth. It is not a git repo: the router and the desktop app read it
   without a checkout, and the numbers in it are for no mirror.
 - `me` is the operator's own emails and phones. `people` is `[{id, name, phones,
-  emails}]`. `projects` is `[{id, name, folder, repo?, people, chat_ids, imsg: {prompt,
-  enrich, media_only}, email: {account, query?}}]`. `people` on a project lists person
+  emails, signal?, seen?}]`. `projects` is `[{id, name, folder, repo?, people, chat_ids, imsg: {prompt,
+  enrich, media_only}, email: {account, query?}, seen?}]`. `skip` is a list of folder
+  names `sync-folders` ignores. `people` on a project lists person
   ids; `chat_ids` are iMessage group ids. `repo` is the nashcode repo name and may be
   absent for a GitHub-only client; meetings and email then have nowhere to file, and
   the consumer says so.
@@ -358,6 +359,25 @@ the Mac's file and never hands the copy back out.
   puts the file. `nashcode people check` names every dangling id, duplicate id,
   project with no people, and phone that is not E.164, and exits non-zero when it
   found one. `--json` on each, in the agcli envelope.
+
+### Sources and order
+
+- The operator's client folders are the project list. `nashcode people sync-folders
+  <dir>` makes one project per child directory (`id` the slug, `folder` the path,
+  `repo` when the folder's `origin` is on the forge), keeps the people already on a
+  project, and skips names matched by the file's `skip` list. It never removes a
+  project.
+- People are suggested from where they already wrote: `nashcode people suggest` lists
+  candidates per project with name, address, and where seen (a Gmail `From:` in a
+  thread under that client, a Messages chat whose name matches the project), and
+  writes nothing. Accepting a suggestion is the operator's act, in the desktop app.
+- A person may carry `signal: true`: the phone in `phones` is also their Signal
+  number. Signal is a third handle kind for a future router, not a third file.
+- Every list of projects or people, in the CLI and in the desktop app, is ordered by
+  frecency: each person and project carries `seen: {count, last}`, which `suggest`,
+  `sync-folders`, and the routers update when they match, and the order is
+  `count` decayed by the age of `last`. Never alphabetical. The file keeps its own
+  order; only the views sort.
 
 ### Consumers
 
