@@ -7,6 +7,7 @@ pub mod context;
 pub mod doctor;
 pub mod grep;
 pub mod invite;
+pub mod people;
 pub mod plan;
 pub mod profiles;
 pub mod repo;

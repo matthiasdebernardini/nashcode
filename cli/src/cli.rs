@@ -12,7 +12,8 @@
 //! it lists commands.
 
 use crate::commands::{
-    Ctx, brain, card, code, context, doctor, grep, invite, plan, profiles, repo, setup,
+    Ctx, brain, card, code, context, doctor, grep, invite, people, plan, profiles, repo,
+    setup,
 };
 use crate::exit::{Class, class_of};
 use crate::output::Out;
@@ -302,6 +303,28 @@ memory `nashcode brain` prints before a session searches. Nothing here runs it.
 
 Context lives in the viewer, so the profile needs a viewer URL:
 `nashcode setup --viewer` records one.";
+
+const PEOPLE_DOC: &str = "\
+Say who belongs to which project, so every inbox routes by who wrote.
+
+One file — ~/.nashcode/people.json, or $NASHCODE_PEOPLE, or --file — lists people
+and projects. A person has an id, a name, phones in E.164, and emails. A project
+has an id, a folder, an optional nashcode repo, and the ids of the people who ask
+about it. Nothing else joins a phone number to a project.
+
+  ls      every project, who is in it, and who is in no project.
+  route   which project these contacts are about, best first.
+  push    give the viewer a copy, so the meeting extension can ask too.
+  check   everything wrong with the file. Non-zero when there is anything.
+  import  build the file once from the old per-inbox lists. One-shot.
+
+Routing is one rule: a project scores one point per distinct person any contact
+matches, by email or by phone. Equal scores keep file order and come back with
+tie: true, which means nothing here decides — ask a human. Your own addresses
+never score.
+
+The file stays on this machine. `push` sends the viewer a copy so a browser can
+ask the same question; the viewer has no route that hands it back.";
 
 const BRAIN_DOC: &str = "\
 Read the viewer's work state and return the short version.
@@ -602,6 +625,34 @@ pub struct ContextGetArgs {
     pub repo: Option<String>,
 }
 
+#[derive(Debug, Default)]
+pub struct PeopleLsArgs {
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct PeopleRouteArgs {
+    pub emails: Vec<String>,
+    pub phones: Vec<String>,
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct PeoplePushArgs {
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct PeopleCheckArgs {
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct PeopleImportArgs {
+    pub routes: Option<String>,
+    pub context: Option<String>,
+}
+
 // --- the handler boundary ---------------------------------------------------
 
 /// What every command gets from the request: the profile it acts on and whether
@@ -615,6 +666,34 @@ fn context(req: &CommandRequest<'_>) -> Ctx {
 
 fn text(req: &CommandRequest<'_>, key: &str) -> Option<String> {
     req.flag(key).map(str::to_string).filter(|v| !v.is_empty())
+}
+
+/// Every value a repeated flag was given, in the order it was given.
+///
+/// agcli keeps flags in a map, so `--email a --email b` would arrive as `b` and
+/// nothing else. One meeting has many attendees, so this reads the raw argv
+/// instead. Both spellings count: `--email a` and `--email=a`.
+///
+/// A candidate that starts with `--` is the next flag, not this one's value:
+/// `--email --json` has no address in it. Swallowing the flag would turn a typo into a
+/// search for an attendee called "--json", so it is left where it is and agcli reports
+/// the missing value.
+fn repeated(req: &CommandRequest<'_>, key: &str) -> Vec<String> {
+    let long = format!("--{key}");
+    let assigned = format!("--{key}=");
+    let mut values = Vec::new();
+    let mut args = req.invocation().raw_args().iter().peekable();
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix(&assigned) {
+            values.push(value.to_owned());
+        } else if arg == &long
+            && args.peek().is_some_and(|next| !next.starts_with("--"))
+            && let Some(value) = args.next()
+        {
+            values.push(value.clone());
+        }
+    }
+    values.into_iter().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()).collect()
 }
 
 /// A declared boolean flag. agcli stores `--flag` as the string `"true"`, and an
@@ -694,6 +773,7 @@ pub fn build() -> AgentCli {
         .command(comments_command())
         .command(brain_command())
         .command(context_command())
+        .command(people_command())
         .command(ready_command())
         .command(claim_command())
         .command(grep_command())
@@ -1352,6 +1432,143 @@ fn context_command() -> Command {
                         Ok(CommandOutput::new(value))
                     })
                 }),
+        )
+}
+
+fn people_command() -> Command {
+    Command::new("people", PEOPLE_DOC)
+        .subcommand(
+            Command::new(
+                "ls",
+                "Every project, the people in it, and the people in no project.\n\n\
+                 A project shows its nashcode repo and its folder; a person shows how \
+                 many phones and emails they have, because a person with neither can \
+                 never be matched. `pushed_at` is when the viewer last got a copy.",
+            )
+            .usage("nashcode people ls [--file <path>] [--profile <name>]")
+            .handler(|req, _ctx| {
+                let ctx = context(req);
+                let args = PeopleLsArgs { file: text(req, "file") };
+                Box::pin(async move {
+                    let value = people::ls(&ctx, &args)
+                        .map_err(|e| oops(e, "nashcode people import   # build the file once"))?;
+                    Ok(CommandOutput::new(value).next_action(NextAction::new(
+                        "nashcode people check",
+                        "Check the file before pushing it",
+                    )))
+                })
+            }),
+        )
+        .subcommand(
+            Command::new(
+                "route",
+                "Which project these contacts are about, best first.\n\n\
+                 Both flags repeat: pass every attendee. A project scores one point \
+                 per distinct person matched, so the winner is the project the most \
+                 of these people belong to. `tie: true` means the top two score the \
+                 same and nothing here decides — ask a person. Your own addresses \
+                 never score.",
+            )
+            .usage(
+                "nashcode people route [--email <address>]... [--phone <e164>]... \
+                 [--file <path>]",
+            )
+            .handler(|req, _ctx| {
+                let ctx = context(req);
+                let args = PeopleRouteArgs {
+                    emails: repeated(req, "email"),
+                    phones: repeated(req, "phone"),
+                    file: text(req, "file"),
+                };
+                Box::pin(async move {
+                    if args.emails.is_empty() && args.phones.is_empty() {
+                        return Err(misuse(
+                            "ask about somebody",
+                            "nashcode people route --email rob@example.com",
+                        ));
+                    }
+                    let value = people::route(&ctx, &args)
+                        .map_err(|e| oops(e, "nashcode people ls"))?;
+                    Ok(CommandOutput::new(value))
+                })
+            }),
+        )
+        .subcommand(
+            Command::new(
+                "push",
+                "Give the viewer a copy of the file.\n\n\
+                 The viewer answers GET /people/route with it, which is how the \
+                 meeting extension fills the repo box. It has no route that hands the \
+                 copy back: phones and emails stay on this machine. A file the viewer \
+                 refuses comes back with the reason and nothing is stored.",
+            )
+            .usage("nashcode people push [--file <path>] [--profile <name>]")
+            .handler(|req, _ctx| {
+                let ctx = context(req);
+                let args = PeoplePushArgs { file: text(req, "file") };
+                Box::pin(async move {
+                    let value = people::push(&ctx, &args).map_err(|e| {
+                        oops(e, "nashcode setup --viewer   # people live in the viewer")
+                    })?;
+                    Ok(CommandOutput::new(value))
+                })
+            }),
+        )
+        .subcommand(
+            Command::new(
+                "check",
+                "Everything wrong with the file, and a non-zero exit when there is \
+                 anything.\n\n\
+                 Refused: a duplicate id, a project naming an id no person has, an id \
+                 that is blank. Those break the join key, so the file does not load at \
+                 all. Warned: a project with nobody in it, a phone that is not E.164, \
+                 a person with neither a phone nor an email. Those load and never do \
+                 their job.",
+            )
+            .usage("nashcode people check [--file <path>]")
+            .handler(|req, _ctx| {
+                let ctx = context(req);
+                let args = PeopleCheckArgs { file: text(req, "file") };
+                Box::pin(async move {
+                    let value = people::check(&ctx, &args)
+                        .map_err(|e| oops(e, "nashcode people ls"))?;
+                    Ok(CommandOutput::new(value).next_action(NextAction::new(
+                        "nashcode people push",
+                        "Give the viewer the file it will answer from",
+                    )))
+                })
+            }),
+        )
+        .subcommand(
+            Command::new(
+                "import",
+                "Build the file once from the old per-inbox lists. One-shot.\n\n\
+                 Reads ~/.imsg-router/routes.json and, when it is there, \
+                 ~/.nashcode/context.toml, and returns the people.json they add up \
+                 to. Nothing is written and nothing is deleted: read the result, fix \
+                 the names, then save it yourself:\n\n\
+                 \x20 nashcode people import | jq .result.file > ~/.nashcode/people.json\n\n\
+                 routes.json knows numbers, not names, so every person arrives as \
+                 <project>-<n> with an empty name and stderr lists them. This \
+                 subcommand is deleted once it has run.",
+            )
+            .usage("nashcode people import [--routes <path>] [--context <path>]")
+            .handler(|req, _ctx| {
+                let ctx = context(req);
+                let args = PeopleImportArgs {
+                    routes: text(req, "routes"),
+                    context: text(req, "context"),
+                };
+                Box::pin(async move {
+                    let value = people::import(&ctx, &args).map_err(|e| {
+                        oops(e, "nashcode people import --routes ~/.imsg-router/routes.json")
+                    })?;
+                    Ok(CommandOutput::new(value).next_action(NextAction::new(
+                        "nashcode people check",
+                        "Save the file, fill in the empty names, then check it",
+                    )))
+                })
+            }),
         )
 }
 
