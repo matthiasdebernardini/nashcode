@@ -360,7 +360,10 @@ Meet extension uses this to pick the repo a meeting files into; `bin/context-ema
 imsg-router read the file directly.
 
 From a terminal: `nashcode people route --email …`, `nashcode people check`,
-`nashcode people push`. `/brain` carries `people: {projects, people, pushed_at,
+`nashcode people push`. `nashcode people sync-folders <dir> --write` adds a project per
+client directory; `nashcode people suggest` prints people candidates from Messages and
+Gmail and writes nothing; `nashcode people seen <id>` bumps the frecency a router or a
+digest saw. Every list is ordered by frecency. `/brain` carries `people: {projects, people, pushed_at,
 pushed_by}` once per viewer, `null` before a push.
 
 ## State
