@@ -190,8 +190,47 @@ while True:
 want = sys.argv[1]
 if want == "count":
     print(sum(len(page.get("items") or []) for page in pages))
+elif not pages:
+    print("")
 else:
-    print("" if not pages else str(pages[0].get(want, "")))
+    value = pages[0].get(want)
+    if isinstance(value, bool):
+        print("true" if value else "false")
+    else:
+        print("" if value is None else str(value))
+PY
+)
+
+# The `error.code` of a failed call, or empty when the failure carried no error
+# document. Measured against the real API: a failure prints its document on stdout —
+# `{"error":{"code":400,"message":"Invalid task ID","reason":"invalid"}}` — and a one
+# line summary on stderr.
+ERROR_CODE_PY=$(cat <<'PY'
+import json, sys
+
+try:
+    document = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    sys.exit(0)
+error = document.get("error") if isinstance(document, dict) else None
+code = error.get("code") if isinstance(error, dict) else None
+print(code if isinstance(code, int) and not isinstance(code, bool) else "")
+PY
+)
+
+# The age of an RFC3339 stamp in whole days, or nothing at all when it will not parse.
+# "Will not parse" and "is not old" have to be different answers: read as the same, an
+# unreadable date is silently a fresh one forever.
+AGE_PY=$(cat <<'PY'
+import datetime, sys
+
+try:
+    updated = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+except ValueError:
+    sys.exit(1)
+if updated.tzinfo is None:
+    updated = updated.replace(tzinfo=datetime.timezone.utc)
+print((datetime.datetime.now(datetime.timezone.utc) - updated).days)
 PY
 )
 
@@ -203,16 +242,22 @@ out="$scratch/out"; err="$scratch/err"
 # hide the rest — but the script exits nonzero so the runner's log says so.
 trouble=0
 
-# 0 on success. 2 means the task is gone: gws says so with a 404 either in its exit
-# message or in the error document Google handed back, and both spellings are checked
-# because a demotion is the one failure with a consequence.
+# 0 when gws succeeded. 1 when it did not, with GWS_ERROR_CODE set to the `error.code`
+# Google answered with, and left empty when the failure carried no error document at
+# all — a wrapper that is not there and exits 127, a killed process, a plain message.
+#
+# Nothing here matches text. A demotion un-claims a card, so it wants evidence: "404"
+# somewhere in a stranger's error string is a word, `error.code == 404` is a fact. The
+# first spelling of this grepped `404|Not Found|notFound` across both streams, which
+# would have let `gws: command not found` from a broken wrapper demote every card on
+# the board and exit 0.
+GWS_ERROR_CODE=""
 gws_call() { # <args...>
+  GWS_ERROR_CODE=""
   if gws "$@" >"$out" 2>"$err"; then
     return 0
   fi
-  if grep -qE '(^|[^0-9])404([^0-9]|$)|[Nn]ot ?[Ff]ound|notFound' "$out" "$err"; then
-    return 2
-  fi
+  GWS_ERROR_CODE="$(python3 -c "$ERROR_CODE_PY" < "$out")"
   return 1
 }
 
@@ -232,7 +277,12 @@ PY
 # --- the list ----------------------------------------------------------------------
 
 # Every open task on the list, hand-made ones included. The cap is about how long the
-# list is, not about how much of it this sync put there.
+# list is, not about how much of it this sync put there. A deleted task stops appearing
+# here, so this is already the count a person would make looking at the list.
+#
+# It runs on every run, whether or not there is anything to add, because a `list` that
+# answers is this run's proof that the configured list is a list that exists. Every
+# demotion below is fenced behind that proof.
 #
 # The answer lands in OPEN_COUNT rather than on stdout: `$(count_open)` would run the
 # whole thing in a subshell, where a `trouble=1` dies with the subshell and the run
@@ -285,43 +335,75 @@ for card in "${cards[@]}"; do
   adding+=("$card")
 done
 
-if [ "${#adding[@]}" -gt 0 ]; then
-  if count_open; then
-    open="$OPEN_COUNT"
-    for card in "${adding[@]}"; do
-      slug="$(basename "$card" .md)"
-      if [ "$open" -ge "$MAX_OPEN" ]; then
-        waiting+=("$card")
-        continue
-      fi
-      title="$(card_title "$card" "$slug")"
-      due="$(fm_get "$card" due)"
-      body="$(python3 - "$repo" "$title" "$slug" "$due" <<'PY'
+# The one read of the whole list, and the run's proof that the list is reachable.
+LIST_REACHABLE=1
+open=0
+if count_open; then
+  open="$OPEN_COUNT"
+else
+  LIST_REACHABLE=0
+fi
+
+# The cards this run put on the list. Reading one back a second later says only what
+# the insert already said, so the back pass skips them.
+inserted=()
+was_inserted() { # <card>
+  local one
+  for one in ${inserted[@]+"${inserted[@]}"}; do
+    if [ "$one" = "$1" ]; then return 0; fi
+  done
+  return 1
+}
+
+if [ "$LIST_REACHABLE" != 1 ] && [ "${#adding[@]}" -gt 0 ]; then
+  say "$repo: the list could not be read, so nothing was added; still off the list:"
+  for card in "${adding[@]}"; do
+    printf 'context-tasks:   %s\n' "$card"
+  done
+fi
+
+if [ "$LIST_REACHABLE" = 1 ]; then
+  for card in "${adding[@]}"; do
+    slug="$(basename "$card" .md)"
+    if [ "$open" -ge "$MAX_OPEN" ]; then
+      waiting+=("$card")
+      continue
+    fi
+    title="$(card_title "$card" "$slug")"
+    # A `due:` somebody typed by hand ("next friday") is not a date. Truncating it to
+    # ten characters made a `due` Google rejects, and the card would fail its insert on
+    # every run forever. The date goes if it does not parse, and the card is named.
+    due="$(fm_get "$card" due)"
+    if [ -n "$due" ] && ! python3 -c 'import datetime, sys; datetime.date.fromisoformat(sys.argv[1][:10])' "$due" >/dev/null 2>&1; then
+      say "$repo: $slug has a \`due:\` that is not a date (\`$due\`), so its task gets no due date"
+      due=""
+    fi
+    body="$(python3 - "$repo" "$card" "$title" "$due" <<'PY'
 import json, sys
 
-repo, title, slug, due = sys.argv[1:5]
-task = {"title": f"[{repo}] {title}", "notes": f"{repo}/tasks/{slug}.md"}
+repo, path, title, due = sys.argv[1:5]
+task = {"title": f"[{repo}] {title}", "notes": f"{repo}/{path}"}
 if due:
     task["due"] = f"{due[:10]}T00:00:00.000Z"
 print(json.dumps(task))
 PY
 )"
-      if ! gws_call tasks tasks insert --params="$(params "tasklist=$TASKLIST")" --json="$body" --format=json; then
-        gws_failed "could not insert a task for $card"
-        continue
-      fi
-      id="$(python3 -c "$DECODE_PY" id < "$out")"
-      if [ -z "$id" ]; then
-        say "$repo: gws inserted a task for $card but answered no id; the card is unchanged"
-        trouble=1
-        continue
-      fi
-      fm_edit "$card" gtask "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$id")"
-      commit_card "$card" "tasks: $slug to google tasks"
-      say "$repo: $slug is on the list"
-      open=$((open + 1))
-    done
-  fi
+    if ! gws_call tasks tasks insert --params="$(params "tasklist=$TASKLIST")" --json="$body" --format=json; then
+      gws_failed "could not insert a task for $card"
+      continue
+    fi
+    id="$(python3 -c "$DECODE_PY" id < "$out")"
+    if [ -z "$id" ]; then
+      say "$repo: gws inserted a task for $card but answered no id; the card is unchanged"
+      trouble=1
+      continue
+    fi
+    fm_edit "$card" gtask "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$id")"
+    commit_card "$card" "tasks: $slug to google tasks"
+    say "$repo: $slug is on the list"
+    inserted+=("$card")
+    open=$((open + 1))
+  done
 fi
 
 if [ "${#waiting[@]}" -gt 0 ]; then
@@ -336,32 +418,59 @@ fi
 # `top: false` and no `gtask`, status untouched. A task deleted in Google means "not
 # top of mind", so the card goes back to the board rather than being added again on
 # the next run.
-demote() { # <card>
+demote() { # <card> <slug> <reason> <sentence>
   fm_edit "$1" top false
   fm_edit "$1" gtask ""
+  commit_card "$1" "tasks: $2 demoted ($3)"
+  say "$repo: $2 $4"
+}
+
+# A demotion un-claims a card and a delete takes a task off the list. Both need this
+# run to have proved the list exists — otherwise one mistyped `tasklist` in the config
+# answers 404 for every card in turn and quietly un-claims the whole board. Reading a
+# task back is different: it needs a *successful* get to say anything, which a list
+# that is not there cannot produce, so `completed -> done` and `done -> patch` are left
+# to run under their own evidence.
+held_back() { # <slug> <reason>
+  if [ "$LIST_REACHABLE" = 1 ]; then
+    return 1
+  fi
+  say "$repo: $1 would be demoted ($2), but the list could not be read this run, so the card keeps its claim"
+  return 0
 }
 
 for card in "${cards[@]}"; do
   fm_ok "$card" || continue
   id="$(fm_get "$card" gtask)"
   [ -n "$id" ] || continue
+  # Inserted a moment ago: the get would only repeat the insert's own answer.
+  if was_inserted "$card"; then continue; fi
   slug="$(basename "$card" .md)"
   status="$(fm_get "$card" status)"
 
-  gws_call tasks tasks get --params="$(params "tasklist=$TASKLIST" "task=$id")" --format=json && state=0 || state=$?
-  if [ "$state" = "2" ]; then
-    demote "$card"
-    commit_card "$card" "tasks: $slug demoted (deleted in google tasks)"
-    say "$repo: $slug was deleted in google tasks, so the card is off the list"
-    continue
-  fi
-  if [ "$state" != "0" ]; then
-    gws_failed "could not read the task for $card"
+  if ! gws_call tasks tasks get --params="$(params "tasklist=$TASKLIST" "task=$id")" --format=json; then
+    # 404 is the id or the list not existing. Every other failure — and every failure
+    # with no error document at all — is a failure, and the card is not touched.
+    if [ "$GWS_ERROR_CODE" = "404" ]; then
+      if held_back "$slug" "deleted in google tasks"; then continue; fi
+      demote "$card" "$slug" "deleted in google tasks" "is gone from google tasks (404), so the card is off the list"
+    else
+      gws_failed "could not read the task for $card"
+    fi
     continue
   fi
 
   task_status="$(python3 -c "$DECODE_PY" status < "$out")"
   updated="$(python3 -c "$DECODE_PY" updated < "$out")"
+
+  # Deleting a task in Google does not make it a 404. The real API answers the task,
+  # exit 0, with `deleted: true` on it, and drops it from `list`. That flag is the
+  # demotion signal.
+  if [ "$(python3 -c "$DECODE_PY" deleted < "$out")" = "true" ]; then
+    if held_back "$slug" "deleted in google tasks"; then continue; fi
+    demote "$card" "$slug" "deleted in google tasks" "was deleted in google tasks, so the card is off the list"
+    continue
+  fi
 
   if [ "$task_status" = "completed" ]; then
     if [ "$status" != "done" ]; then
@@ -386,30 +495,25 @@ for card in "${cards[@]}"; do
   # Stale is measured from the task's own `updated`, so renaming or reordering it in
   # Google — paying it any attention at all — keeps it alive.
   [ "$STALE_DAYS" -gt 0 ] || continue
-  [ -n "$updated" ] || continue
-  if ! python3 - "$updated" "$STALE_DAYS" <<'PY'
-import datetime, sys
-
-try:
-    updated = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
-except ValueError:
-    sys.exit(1)
-if updated.tzinfo is None:
-    updated = updated.replace(tzinfo=datetime.timezone.utc)
-age = datetime.datetime.now(datetime.timezone.utc) - updated
-sys.exit(0 if age.days >= int(sys.argv[2]) else 1)
-PY
-  then
+  if [ -z "$updated" ]; then
+    say "$repo: $slug: its task carries no \`updated\`, so its age is unknown and it stays on the list"
     continue
   fi
+  age="$(python3 -c "$AGE_PY" "$updated" 2>/dev/null || true)"
+  if [ -z "$age" ]; then
+    say "$repo: $slug: its task's \`updated\` (\`$updated\`) is not a date, so its age is unknown and it stays on the list"
+    continue
+  fi
+  [ "$age" -ge "$STALE_DAYS" ] || continue
 
+  if held_back "$slug" "stale"; then continue; fi
+  # `delete` is idempotent against the real API — a second delete of the same id also
+  # exits 0 — so a run that died between the delete and the commit costs nothing.
   if ! gws_call tasks tasks delete --params="$(params "tasklist=$TASKLIST" "task=$id")" --format=json; then
     gws_failed "could not delete the stale task for $card"
     continue
   fi
-  demote "$card"
-  commit_card "$card" "tasks: $slug demoted (stale)"
-  say "$repo: $slug sat open for $STALE_DAYS days, so it left the list"
+  demote "$card" "$slug" "stale" "sat open for $age days, so it left the list"
 done
 
 exit "$trouble"
