@@ -131,10 +131,23 @@ digest_checkout() { # <dir> <label> <pull:yes|no>
     git pull --ff-only >&2 || die "$label: pull failed; fix the checkout and run again"
   fi
 
-  local files=()
-  while IFS= read -r file; do
-    [ -n "$file" ] && files+=("$file")
-  done < <(grep -rl --include='*.md' -F 'digested: false' context 2>/dev/null | sort)
+  # Undigested means `digested: false` in the *front matter*, between the opening
+  # `---` and the one that closes it. Matching anywhere in the file would re-digest
+  # forever any item that quotes a front-matter block — an email about this very
+  # system, say — because the digest sets the real key to true and the quotation
+  # stays. Null-delimited throughout, so a path with a space or a newline in it is
+  # still one path.
+  local files=() file
+  while IFS= read -r -d '' file; do
+    if awk '
+        NR == 1 { if ($0 != "---") { bad = 1; exit } ; next }
+        $0 == "---" { exit }
+        /^digested:[ \t]*false[ \t]*$/ { found = 1 }
+        END { exit (bad || !found) ? 1 : 0 }
+      ' "$file"; then
+      files+=("$file")
+    fi
+  done < <(find context -type f -name '*.md' -print0 2>/dev/null | sort -z)
 
   if [ "${#files[@]}" -eq 0 ]; then
     say "$label: nothing undigested"
@@ -145,11 +158,14 @@ digest_checkout() { # <dir> <label> <pull:yes|no>
   for file in "${files[@]}"; do
     id="$(basename "$file" .md)"
     say "$label: digesting $file"
-    # Read, Edit, Write and nothing else. No Bash: Claude never runs git, and the
-    # file's own text — an email that asks the reader to run something — has no shell
-    # to reach for even if the skill's rules were ignored.
+    # Read, Edit, Write and nothing else, allowed and denied both ways round so a
+    # default that changes under us cannot quietly widen this. No Bash: Claude never
+    # runs git, and the file's own text — an email that asks the reader to run
+    # something, fetch a URL, or hand the job to a subagent — has nothing to reach for
+    # even if the skill's rules were ignored.
     claude -p "Run the context-digest skill on: $file" \
       --allowedTools Read,Edit,Write \
+      --disallowedTools Bash,WebFetch,WebSearch,Task \
       --permission-mode acceptEdits >&2 || die "$label: claude failed on $file"
 
     check_paths
@@ -180,13 +196,26 @@ push_checkout() { # <dir> <label>
   [ -n "$HOST" ] || die "$label: ~/.nashcode/context.toml sets no top-level host, so no push is allowed"
   [ "$host" = "$HOST" ] || die "$label: origin is $host, and the only host this pushes to is $HOST"
 
-  git push origin HEAD >&2
-  say "$label: pushed to $host"
+  # Digests go on the default branch, like board moves. `git push origin HEAD` would
+  # follow whatever the checkout happens to be on — a detached head, or a branch
+  # somebody left behind — and either invent a remote branch or push the wrong one.
+  local branch default
+  branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+  [ -n "$branch" ] || die "$label: the checkout is on a detached head, so there is no branch to push"
+  default="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  default="${default#origin/}"
+  [ -n "$default" ] || die "$label: origin has no HEAD, so the default branch is unknown; run \`git remote set-head origin -a\`"
+  [ "$branch" = "$default" ] || die "$label: the checkout is on $branch, not the default branch $default; nothing pushed"
+
+  git push origin "HEAD:refs/heads/$default" >&2
+  say "$label: pushed $default to $host"
 }
 
+# One repository, start to finish. Run this in a subshell: `die` inside it ends the
+# subshell, not the whole run, so one broken repository does not take the others with
+# it. The lock is released when that subshell exits.
 run_repo() { # <repo>
   local repo="$1" dir lock
-  dir="$(ensure_checkout "$repo")"
   mkdir -p "$STATE"
   lock="$STATE/$repo.lock"
   exec 9>"$lock"
@@ -194,9 +223,11 @@ run_repo() { # <repo>
     say "$repo: another run holds $lock; skipping"
     return 0
   fi
-  ( digest_checkout "$dir" "$repo" yes )
-  ( push_checkout "$dir" "$repo" )
-  exec 9>&-
+  # The clone is inside the lock. Two runs that both found the checkout missing would
+  # otherwise clone into the same directory at the same time.
+  dir="$(ensure_checkout "$repo")"
+  digest_checkout "$dir" "$repo" yes
+  push_checkout "$dir" "$repo"
 }
 
 # --- what to run -------------------------------------------------------------------
@@ -214,8 +245,8 @@ if [ -n "$target" ] && [ -d "$target/.git" ]; then
     say "$label: another run holds the lock; skipping"
     exit 0
   fi
-  ( digest_checkout "$dir" "$label" no )
-  ( push_checkout "$dir" "$label" )
+  digest_checkout "$dir" "$label" no
+  push_checkout "$dir" "$label"
   exit 0
 fi
 
@@ -231,6 +262,10 @@ else
 fi
 [ "${#repos[@]}" -gt 0 ] || die "$CONFIG names no [[source]] repositories"
 
+# A subshell each, so one repository that cannot be cloned, pulled, digested or pushed
+# is one nonzero exit at the end rather than the end of the run.
+trouble=0
 for repo in "${repos[@]}"; do
-  run_repo "$repo"
+  ( run_repo "$repo" ) || trouble=1
 done
+exit "$trouble"
