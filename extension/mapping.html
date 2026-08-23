@@ -47,7 +47,11 @@
     .card.context label:first-of-type { margin-top: 0; }
     .card.context input[type="text"] { width: 100%; }
     .card.context .hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
-    #actions { margin: 24px 0; display: flex; gap: 10px; }
+    #actions { margin: 24px 0; display: flex; gap: 10px; align-items: flex-start; }
+    #actions > label { padding-top: 10px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+    .repo-field { display: flex; flex-direction: column; gap: 6px; }
+    #repoReason { color: var(--muted); font-size: 12px; max-width: 260px; }
+    #repoReason:empty { display: none; }
     button.big { padding: 11px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
                  border-radius: 9px; border: 1px solid var(--line); background: #fff; color: var(--ink); }
     button.big:hover { border-color: #cfd4db; }
@@ -66,9 +70,12 @@
   <div id="cards"></div>
   <div id="actions" style="display:none">
     <label for="repo">File into repo</label>
-    <input type="text" id="repo" list="repoList" spellcheck="false" autocapitalize="off"
-           placeholder="repo name (e.g. nashcode)" />
-    <datalist id="repoList"></datalist>
+    <div class="repo-field">
+      <input type="text" id="repo" list="repoList" spellcheck="false" autocapitalize="off"
+             placeholder="repo name (e.g. nashcode)" />
+      <datalist id="repoList"></datalist>
+      <div id="repoReason"></div>
+    </div>
     <button class="big primary" id="confirm">Confirm &amp; file transcript</button>
     <button class="big" id="skip">Skip — file with Speaker 1/2 labels</button>
   </div>

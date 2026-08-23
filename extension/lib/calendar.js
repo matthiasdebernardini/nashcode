@@ -72,6 +72,11 @@ export async function findOverlappingEvent(calendarIds, startedAt, endedAt) {
     attendees: (best.attendees || []).map((a) => ({
       name: a.displayName || null,
       email: a.email || null,
+      // Google marks the signed-in account's own row on events read from that
+      // account's calendars. People routing needs to drop you from the invite,
+      // and this says so without asking Chrome who is signed in.
+      self: !!a.self,
     })),
   };
 }
+

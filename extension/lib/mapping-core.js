@@ -213,3 +213,98 @@ export function buildPayload({ session, merged, assignments, calendarEvent, prov
     segments: collapsed.segments,
   };
 }
+
+/// How to call a person on the reason line: the invite's display name, or the
+/// address when the invite carried no name. Pure.
+export function attendeeLabel(attendee) {
+  return (attendee?.name || '').trim() || (attendee?.email || '').trim();
+}
+
+/// The people who actually put this project on top. The route answer says which
+/// of the contacts we sent scored, lowercased and stripped to addresses; the
+/// invite says what those people are called. Contacts matched by phone carry no
+/// email and cannot be named from a calendar invite, so they drop. Empty means
+/// the viewer did not say (an older one) — the caller then counts instead of
+/// naming. Pure.
+export function matchedNames(match, attendees) {
+  const labelByEmail = new Map();
+  for (const a of attendees || []) {
+    const email = (a?.email || '').trim().toLowerCase();
+    if (email && !labelByEmail.has(email)) labelByEmail.set(email, attendeeLabel(a));
+  }
+  const out = [];
+  for (const c of match?.contacts || []) {
+    const label = labelByEmail.get((c?.email || '').trim().toLowerCase());
+    if (label && !out.includes(label)) out.push(label);
+  }
+  return out;
+}
+
+/// `a`, `a or b`, `a, b or c` — one list, read aloud. Pure.
+function orList(items) {
+  if (items.length < 2) return items.join('');
+  return `${items.slice(0, -1).join(', ')} or ${items[items.length - 1]}`;
+}
+
+/// Which repo this meeting files into, and the one line under the box that says
+/// why.
+///
+///   routing     — `GET /people/route`'s answer, `{matches, tie}`, or its
+///                 `unavailable` form, or null when nobody could be asked.
+///   attendees   — the contacts that were sent (the invite minus you). The
+///                 route answer names matched contacts by address; the names
+///                 come from here.
+///   defaultRepo — the settings repo, the fallback all the way through.
+///   hasEvent    — was there a calendar event at all. An event whose attendees
+///                 all filtered out is still an event, and reads as no match.
+///
+/// Returns `{repo, reason, offered}`. `offered` is the tied repos, to put at the
+/// top of the datalist; it is empty in every other case. Pure.
+export function chooseRepo({ routing, attendees, defaultRepo, hasEvent }) {
+  const fallback = (defaultRepo || '').trim();
+  const contacts = attendees || [];
+  // Every dead end lands the same way: keep the settings repo, say which dead
+  // end it was. Only the wording changes, so only the wording is passed in.
+  const fall = (why) => ({
+    repo: fallback,
+    reason: fallback ? `${why}; using the default repo` : `${why}; pick a repo`,
+    offered: [],
+  });
+
+  if (!hasEvent) return fall('no calendar event');
+  if (!contacts.length) return fall('no match on the invite');
+  if (!routing) return fall('routing could not be asked');
+  if (routing.unavailable) return fall('no people file pushed yet');
+
+  const matches = routing.matches || [];
+  if (!matches.length) return fall('no match on the invite');
+
+  if (routing.tie) {
+    // Equal top scores keep file order, so the tied projects are the run of
+    // matches sharing the first one's score. A tied project with no nashcode
+    // repo stays in the sentence — it is one of the answers — but there is
+    // nothing to offer for it.
+    const tied = matches.filter((m) => m.score === matches[0].score);
+    const labels = tied.map((m) => (m.repo ? m.repo : `${m.project} (no nashcode repo)`));
+    return {
+      repo: '',
+      reason: `tie: ${orList(labels)}`,
+      offered: tied.map((m) => m.repo).filter(Boolean),
+    };
+  }
+
+  const top = matches[0];
+  // A project can be GitHub-only. There is then nowhere to file, and saying so
+  // beats silently filing the meeting somewhere else.
+  if (!top.repo) {
+    return { repo: '', reason: `${top.project} has no nashcode repo; pick one`, offered: [] };
+  }
+  const names = matchedNames(top, contacts);
+  return {
+    repo: top.repo,
+    reason: names.length
+      ? `${top.repo} — ${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} on the invite`
+      : `${top.repo} — ${top.score} of ${contacts.length} on the invite match`,
+    offered: [],
+  };
+}

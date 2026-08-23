@@ -29,6 +29,15 @@ the transcript is filed.
 6. **Who's on your mic** — your name first, then anyone sharing your webcam.
 7. Click **Save settings**.
 
+The post-meeting screen fills the repo box from who is on the invite. It sends
+the calendar attendees' addresses, minus your own, to the viewer's
+`/people/route`, which answers from the operator's people file; the line under
+the box names the people who matched — `agstaff — Rob Castro is on the invite`.
+When there is no event, nobody matched, no people file has been pushed, or the
+viewer would not answer, the box keeps the **Repo** setting above and the line
+says which of those happened. Two projects tied: the box is empty and both repos
+come first in the dropdown.
+
 ## What happens
 
 Click the toolbar icon on a meeting tab. A red badge and an in-page pill show
@@ -68,6 +77,7 @@ Raise the target to keep typical meetings single-pass.
 - `mapping.html/js` — transcribe, name the speakers, file to nashcode
 - `options.html/js` — Google sign-in, calendars, viewer URL, repo, xAI key
 - `lib/mapping-core.js` — pure logic (id format, channel merge, prefill rules)
+- `lib/people.js` — asks the viewer which project the invite belongs to
 - `lib/providers/grok.js` + `lib/transcribe.js` — provider plus fallback machine
 - `lib/recorder-db.js` — IndexedDB recording store
 

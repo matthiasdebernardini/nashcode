@@ -11,6 +11,8 @@ import {
   buildPayload,
   parsePeople,
   mergeNames,
+  chooseRepo,
+  matchedNames,
 } from '../lib/mapping-core.js';
 
 const MIC_DEFAULTS = ['Matthias', 'Rob'];
@@ -262,4 +264,179 @@ test('recIdFromDate mirrors the server transcript_id format', () => {
   const d = new Date('2026-06-12T15:00:00Z');
   assert.equal(recIdFromDate(d, 'Weekly Sync: Rob & Matthias'), '2026-06-12-1500-weekly-sync-rob-matthias');
   assert.equal(slugify('!!!'), 'meeting');
+});
+
+// --- chooseRepo: the repo box, decided by who is on the invite --------------
+
+const ROB = { name: 'Rob Castro', email: 'rob@example.com' };
+const JOEY = { name: 'Joey Locker', email: 'joey@example.com' };
+const DANA = { name: 'Dana Poole', email: 'dana@example.com' };
+
+/// The four arguments, with the invite-shaped defaults filled in.
+const choose = (over) =>
+  chooseRepo({ routing: null, attendees: [], defaultRepo: '', hasEvent: true, ...over });
+
+const match = (over) => ({ project: 'agstaff', repo: 'agstaff', score: 1, ...over });
+
+test('matchedNames: only the contacts the viewer scored, named from the invite', () => {
+  const m = match({ contacts: [{ email: 'ROB@example.com' }, { phone: '+15550000000' }] });
+  // The invite spells him "Rob Castro"; the answer only knows the address, and
+  // a contact matched by phone has no name to find here.
+  assert.deepEqual(matchedNames(m, [ROB, JOEY]), ['Rob Castro']);
+  // An older viewer sends no `contacts` at all.
+  assert.deepEqual(matchedNames(match({}), [ROB]), []);
+});
+
+test('chooseRepo: one match names only the people who matched', () => {
+  const routing = {
+    matches: [match({ folder: '~/w/agstaff', people: ['rob'], contacts: [{ email: 'rob@example.com' }] })],
+    tie: false,
+  };
+  // Dana was on the invite and scored for nobody, so Dana is not named.
+  assert.deepEqual(choose({ routing, attendees: [ROB, DANA], defaultRepo: 'fallback' }), {
+    repo: 'agstaff',
+    reason: 'agstaff — Rob Castro is on the invite',
+    offered: [],
+  });
+});
+
+test('chooseRepo: two matched people share one line, with plural grammar', () => {
+  const routing = {
+    matches: [
+      match({ score: 2, people: ['rob', 'joey'], contacts: [{ email: 'rob@example.com' }, { email: 'joey@example.com' }] }),
+    ],
+    tie: false,
+  };
+  assert.equal(
+    choose({ routing, attendees: [ROB, JOEY, DANA] }).reason,
+    'agstaff — Rob Castro, Joey Locker are on the invite',
+  );
+});
+
+test('chooseRepo: an attendee with no display name is named by address', () => {
+  const routing = { matches: [match({ contacts: [{ email: 'rob@example.com' }] })], tie: false };
+  const { reason } = choose({ routing, attendees: [{ name: null, email: 'rob@example.com' }] });
+  assert.equal(reason, 'agstaff — rob@example.com is on the invite');
+});
+
+test('chooseRepo: an older viewer sends no contacts, so the line counts', () => {
+  const routing = { matches: [match({ score: 1 })], tie: false };
+  assert.equal(
+    choose({ routing, attendees: [ROB, JOEY, DANA] }).reason,
+    'agstaff — 1 of 3 on the invite match',
+  );
+});
+
+test('chooseRepo: no match on the invite falls back to the settings repo', () => {
+  assert.deepEqual(choose({ routing: { matches: [], tie: false }, attendees: [ROB], defaultRepo: 'nashcode' }), {
+    repo: 'nashcode',
+    reason: 'no match on the invite; using the default repo',
+    offered: [],
+  });
+  assert.equal(
+    choose({ routing: { matches: [], tie: false }, attendees: [ROB] }).reason,
+    'no match on the invite; pick a repo',
+  );
+});
+
+test('chooseRepo: no calendar event reads differently from no match', () => {
+  assert.deepEqual(choose({ hasEvent: false, defaultRepo: 'nashcode' }), {
+    repo: 'nashcode',
+    reason: 'no calendar event; using the default repo',
+    offered: [],
+  });
+  assert.equal(choose({ hasEvent: false }).reason, 'no calendar event; pick a repo');
+  // An event whose attendees all filtered out (only you on it) is still an
+  // event — nobody matched, which is not the same as nothing to match against.
+  assert.equal(choose({ hasEvent: true, attendees: [] }).reason, 'no match on the invite; pick a repo');
+});
+
+test('chooseRepo: an unpushed people file and an unreachable viewer say so', () => {
+  assert.equal(
+    choose({
+      routing: { matches: [], tie: false, unavailable: 'no people file' },
+      attendees: [ROB],
+      defaultRepo: 'nashcode',
+    }).reason,
+    'no people file pushed yet; using the default repo',
+  );
+  // routeAttendees answers null for a network drop, a 400, or a body that is
+  // not JSON. None of those mean "nobody matched".
+  assert.equal(
+    choose({ routing: null, attendees: [ROB], defaultRepo: 'nashcode' }).reason,
+    'routing could not be asked; using the default repo',
+  );
+  assert.equal(choose({ routing: null, attendees: [ROB] }).reason, 'routing could not be asked; pick a repo');
+});
+
+test('chooseRepo: a tie empties the box and offers both repos', () => {
+  const routing = {
+    matches: [
+      match({ project: 'agstaff', repo: 'agstaff', contacts: [{ email: 'rob@example.com' }] }),
+      match({ project: 'pristine', repo: 'pristine', contacts: [{ email: 'joey@example.com' }] }),
+    ],
+    tie: true,
+  };
+  assert.deepEqual(choose({ routing, attendees: [ROB, JOEY], defaultRepo: 'nashcode' }), {
+    repo: '',
+    reason: 'tie: agstaff or pristine',
+    offered: ['agstaff', 'pristine'],
+  });
+});
+
+test('chooseRepo: a three-way tie reads as a list', () => {
+  const routing = {
+    matches: [
+      match({ project: 'a', repo: 'a' }),
+      match({ project: 'b', repo: 'b' }),
+      match({ project: 'c', repo: 'c' }),
+    ],
+    tie: true,
+  };
+  const out = choose({ routing, attendees: [ROB] });
+  assert.equal(out.reason, 'tie: a, b or c');
+  assert.deepEqual(out.offered, ['a', 'b', 'c']);
+});
+
+test('chooseRepo: a mixed tie keeps the repoless project in the sentence', () => {
+  const routing = {
+    matches: [
+      match({ project: 'bee', repo: 'bee' }),
+      match({ project: 'alpha', repo: null }),
+    ],
+    tie: true,
+  };
+  // Both are answers, so both are named — but only one can be filed into, so
+  // only one is offered.
+  assert.deepEqual(choose({ routing, attendees: [ROB], defaultRepo: 'nashcode' }), {
+    repo: '',
+    reason: 'tie: bee or alpha (no nashcode repo)',
+    offered: ['bee'],
+  });
+});
+
+test('chooseRepo: a matched project with no nashcode repo says so', () => {
+  const routing = {
+    matches: [match({ project: 'pristine', repo: null, folder: '~/w/pristine', people: ['brad'] })],
+    tie: false,
+  };
+  // The settings default must NOT win here: the invite named a project, and
+  // filing this meeting into some other repo would be the wrong answer.
+  assert.deepEqual(choose({ routing, attendees: [ROB], defaultRepo: 'nashcode' }), {
+    repo: '',
+    reason: 'pristine has no nashcode repo; pick one',
+    offered: [],
+  });
+});
+
+test('chooseRepo: only the top score is part of the tie', () => {
+  const routing = {
+    matches: [
+      match({ project: 'agstaff', repo: 'agstaff', score: 2 }),
+      match({ project: 'pristine', repo: 'pristine', score: 2 }),
+      match({ project: 'other', repo: 'other', score: 1 }),
+    ],
+    tie: true,
+  };
+  assert.deepEqual(choose({ routing, attendees: [ROB, JOEY] }).offered, ['agstaff', 'pristine']);
 });

@@ -46,6 +46,12 @@ export const DEFAULTS = {
   segmentSilenceHoldMs: 800,
 };
 
+/// The viewer base with any trailing slashes off, so callers can append their
+/// own path without producing `//brain`. Pure.
+export function viewerRoot(viewerBase) {
+  return String(viewerBase || '').replace(/\/+$/, '');
+}
+
 export async function getConfig() {
   const stored = await chrome.storage.sync.get(Object.keys(DEFAULTS));
   // ponytail: the xAI key lives in chrome.storage.local, never sync — sync would

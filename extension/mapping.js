@@ -7,11 +7,17 @@
 // 4. User confirms (ten seconds) or skips → POST the transcript to the
 //    nashcode viewer, which commits it as markdown; then clean local storage.
 
-import { getConfig } from './lib/config.js';
+import { getConfig, viewerRoot } from './lib/config.js';
 import { getSession, channelSegments, deleteSession } from './lib/recorder-db.js';
 import { transcribeSegmented } from './lib/transcribe.js';
 import { findOverlappingEvent } from './lib/calendar.js';
 import { repoNames } from './lib/brain.js';
+import {
+  routeAttendees,
+  routingContacts,
+  selfFromAttendees,
+  selfFromCalendarIds,
+} from './lib/people.js';
 import {
   mergeChannels,
   prefillSpeakers,
@@ -19,6 +25,7 @@ import {
   buildPayload,
   parsePeople,
   mergeNames,
+  chooseRepo,
 } from './lib/mapping-core.js';
 
 const phase = (t, isErr = false) => {
@@ -166,19 +173,66 @@ function render() {
       : 'no calendar event found — add a title and the names below (or skip)',
   );
   document.getElementById('actions').style.display = 'flex';
-  // Settings prefill; the live repo list from /brain fills the dropdown.
-  document.getElementById('repo').value = state.cfg.repo || '';
-  fetch(`${state.cfg.viewerBase}/brain`, { cache: 'no-store' })
+  // Settings prefill; the live repo list from /brain fills the dropdown, and
+  // people routing then improves on both (or leaves them alone).
+  state.repoNames = [];
+  state.offeredRepos = [];
+  state.repoTouched = false;
+  const repoEl = document.getElementById('repo');
+  repoEl.value = state.cfg.repo || '';
+  // A repo the user typed is an answer. Everything before that is a guess, and
+  // routing may still replace a guess when it lands.
+  repoEl.addEventListener('input', () => {
+    state.repoTouched = true;
+  });
+  fetch(`${viewerRoot(state.cfg.viewerBase)}/brain`, { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : null))
     .then((brain) => {
-      const list = document.getElementById('repoList');
-      for (const name of repoNames(brain)) {
-        const opt = document.createElement('option');
-        opt.value = name;
-        list.appendChild(opt);
-      }
+      state.repoNames = repoNames(brain);
+      renderRepoList();
     })
     .catch(() => {});
+  applyRouting();
+}
+
+// The dropdown, redrawn whenever either source lands. Tied repos come first:
+// they are the answers to the question the box is asking.
+function renderRepoList() {
+  const list = document.getElementById('repoList');
+  list.innerHTML = '';
+  for (const name of mergeNames(state.offeredRepos, state.repoNames)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    list.appendChild(opt);
+  }
+}
+
+// Ask the viewer which project the people on this invite belong to, then set
+// the repo box and the line under it. Every step is best-effort: no event, no
+// people file, or a viewer that never answers all leave the settings default
+// standing, with a line that says which of those happened.
+async function applyRouting() {
+  const { cfg, calendarEvent } = state;
+  const attendees = calendarEvent?.attendees || [];
+  const self = selfFromAttendees(attendees) || selfFromCalendarIds(cfg.calendarIds);
+  // chooseRepo names the people on the reason line, so it needs the same
+  // contacts the route question was built from.
+  const contacts = routingContacts(attendees, self);
+  const routing = await routeAttendees(cfg.viewerBase, contacts, self);
+  const { repo, reason, offered } = chooseRepo({
+    routing,
+    attendees: contacts,
+    defaultRepo: cfg.repo,
+    hasEvent: !!calendarEvent,
+  });
+
+  // The route was in flight while the box was editable; the user wins.
+  if (!state.repoTouched) document.getElementById('repo').value = repo;
+  document.getElementById('repoReason').textContent = reason;
+  if (offered.length) {
+    state.offeredRepos = offered;
+    renderRepoList();
+  }
 }
 
 // The "what was this meeting?" box — only when no calendar event supplied a
@@ -314,6 +368,9 @@ async function file(assignments) {
 
     phase('done');
     document.getElementById('actions').style.display = 'none';
+    // The reason lives outside #actions' display toggle, so clear it by hand or
+    // it outlives the box it was explaining.
+    document.getElementById('repoReason').textContent = '';
     const result = document.getElementById('result');
     // A meeting URL that repeats names the file that is already there: the viewer
     // answers `existing: true` with no commit, and re-filing is not a failure.
