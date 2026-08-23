@@ -302,6 +302,80 @@ back. The list has other sources too; the sync touches only tasks it created.
   is migrated by one commit that moves it to `context/meeting/` and adds `ingested_at`
   and `source` to each file's front matter.
 
+## People
+
+Who belongs to which project, so an inbox routes by who wrote. A client texts, mails,
+and joins a Meet; the calendar, Gmail, and Messages each know *who*. One file on the
+operator's machine joins who to which project, and every consumer reads that file.
+The viewer holds a pushed copy and answers one question: which project. It never sees
+the Mac's file and never hands the copy back out.
+
+### The file
+
+- `~/.nashcode/people.json` (`NASHCODE_PEOPLE` overrides the path), hand-editable, the
+  only source of truth. It is not a git repo: the router and the desktop app read it
+  without a checkout, and the numbers in it are for no mirror.
+- `me` is the operator's own emails and phones. `people` is `[{id, name, phones,
+  emails}]`. `projects` is `[{id, name, folder, repo?, people, chat_ids, imsg: {prompt,
+  enrich, media_only}, email: {account, query?}}]`. `people` on a project lists person
+  ids; `chat_ids` are iMessage group ids. `repo` is the nashcode repo name and may be
+  absent for a GitHub-only client; meetings and email then have nowhere to file, and
+  the consumer says so.
+- Phones are E.164. Emails compare case-insensitively. `id` is the join key: a project
+  naming an id that no person has is refused, by the CLI and by `PUT /people` alike.
+
+### Routing
+
+- One rule, in one Rust module (`viewer/src/people.rs`) that the CLI and the desktop
+  app compile too: `route(contacts) -> matches`. A project scores one point per
+  distinct person matched by any email or phone in the contacts. Projects with a score
+  come back highest first; equal scores keep file order and the answer says `tie:
+  true` when the top score is shared. The operator's own addresses (`me`, plus each
+  project's `email.account`) never score.
+- Chat ids are iMessage-only and are matched in Swift, before participants.
+
+### Viewer
+
+- `PUT /people` stores the body at `NASHCODE_PEOPLE` (default `<mirrors>/people.json`)
+  with the time of the push; the same validation as the CLI, `400` and the reason on
+  failure. Answers `{ok, people, projects, pushed_at}` with the two counts.
+- `GET /people/route?email=&phone=` (both repeatable) answers `{matches: [{project,
+  repo, folder, people: [ids], score}], tie}`. No contacts is `400`. Before any push
+  it answers `404 no people file`.
+- There is no `GET /people`. Client phones and emails stay on the Mac; the viewer only
+  answers "which project". Reads are anonymous on the tailnet today, so the answer is
+  already the least it can say: project ids, repo names, and who matched by id.
+- `GET /brain` gains `people: {projects, people, pushed_at}` once per viewer, not per
+  repo, and `null` before a push.
+- `people` joins `RESERVED_ROUTES` next to `brain` and `context`.
+
+### CLI
+
+- `nashcode people ls` prints projects with their people. `nashcode people route
+  --email … --phone …` prints the ranking the viewer would. `nashcode people push`
+  puts the file. `nashcode people check` names every dangling id, duplicate id,
+  project with no people, and phone that is not E.164, and exits non-zero when it
+  found one. `--json` on each, in the agcli envelope.
+
+### Consumers
+
+- **Meet.** After the extension finds the overlapping calendar event, it asks
+  `GET /people/route` with the attendees minus the signed-in user. One match: the repo
+  box holds that repo and one line says why (`agstaff — Rob Castro is on the
+  invite`). No event, or no match: the box holds the settings default and the line
+  says so. A tie: the box is empty and each tied repo is offered.
+- **Email.** `bin/context-email` reads the file. For each project with a `repo` and an
+  `email.account`, the Gmail query is `(from:(a OR b) OR to:(a OR b))` over the
+  project's people's emails, plus the age bound, unless the project's `email.query`
+  replaces it. `~/.nashcode/context.toml` is gone.
+- **iMessage.** imsg-router reads the file and nothing else for routing. A project's
+  participants are the union of its people's phones. A chat id match wins over a
+  participant match; among participant matches the first project in file order wins.
+  The enrichment config lives in `~/.imsg-router/config.json`.
+- **Desktop.** `nashcode-people` (workspace member `people/`) shows projects and people
+  side by side, edits them, saves the file, and pushes it. The last push time comes
+  from brain.
+
 ## Code browser parity
 
 The tree/blob pages grow toward GitHub's file browser. Order of value: read well first,
