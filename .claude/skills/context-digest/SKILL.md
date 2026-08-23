@@ -90,6 +90,19 @@ For each action item, create or update a card under `tasks/`:
 - Match existing cards by title words. If you are unsure, create nothing and list the
   item under `## Unmatched` in the context file.
 
+A **claim** is first person, and only first person: "action items from me are 1, 2, 3",
+"I will send the quote", "I'll take the migration". The person who said or sent it owns
+that item.
+
+- A claimed item's card gets `assignee: <that speaker or sender's first name,
+  lowercase>` and `top: true`.
+- A mention is not a claim. "Rob should send the quote", "somebody has to call the
+  bank", "we need to migrate" — that card gets no `top` line at all.
+- An existing card that a claim moves gets `top: true` added, and nothing else in the
+  file changes.
+- `top: true` is the whole reason a card reaches the operator's short list. Never write
+  a `gtask:` key; that one belongs to `bin/context-tasks`.
+
 ## 6. Mark it read
 
 Set `digested: true` in the context file's front matter. Change nothing else in that
