@@ -358,7 +358,9 @@ the Mac's file and never hands the copy back out.
   --email … --phone …` prints the ranking the viewer would. `nashcode people push`
   puts the file. `nashcode people check` names every dangling id, duplicate id,
   project with no people, and phone that is not E.164, and exits non-zero when it
-  found one. `--json` on each, in the agcli envelope.
+  found one. `nashcode people sync-folders <dir> [--write]`, `nashcode people suggest
+  [--project <id>]`, and `nashcode people seen <id>` are described under "Sources and
+  order". `--json` on each, in the agcli envelope.
 
 ### Sources and order
 
@@ -374,10 +376,12 @@ the Mac's file and never hands the copy back out.
 - A person may carry `signal: true`: the phone in `phones` is also their Signal
   number. Signal is a third handle kind for a future router, not a third file.
 - Every list of projects or people, in the CLI and in the desktop app, is ordered by
-  frecency: each person and project carries `seen: {count, last}`, which `suggest`,
-  `sync-folders`, and the routers update when they match, and the order is
-  `count` decayed by the age of `last`. Never alphabetical. The file keeps its own
-  order; only the views sort.
+  frecency: each person and project carries `seen: {count, last}`, and the order is
+  `count` decayed by the age of `last` with a 14-day half-life. `nashcode people seen
+  <id>` is the one writer; the email pusher calls it for the project it filed into,
+  the desktop app calls it when a suggestion is accepted, and a router that shells
+  out may call it. `suggest` and `sync-folders` write nothing. Never alphabetical.
+  The file keeps its own order; only the views sort.
 
 ### Consumers
 
