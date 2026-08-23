@@ -18,17 +18,22 @@ use crate::web::{actor, app, repo_ctx, see_other};
 
 path_param!(repo);
 path_param!(comment_id: i64, error = bad_request);
+path_param!(kind);
+path_param!(id);
 path_param!(*rest);
 
-fn json_error(status: StatusCode, message: &str) -> Result<Response> {
-    let body = serde_json::json!({ "error": message }).to_string();
-    let mut response = Response::new(topcoat::router::Body::from(body));
+fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
+    let mut response = Response::new(topcoat::router::Body::from(value.to_string()));
     *response.status_mut() = status;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
-    Ok(response)
+    response
+}
+
+fn json_error(status: StatusCode, message: &str) -> Result<Response> {
+    Ok(json_response(status, serde_json::json!({ "error": message })))
 }
 
 fn op_error(error: OpError) -> Result<Response> {
@@ -339,60 +344,220 @@ async fn board_move(cx: &Cx, Json(input): Json<MoveIn>) -> Result<Response> {
     }
 }
 
-// ---- transcripts -----------------------------------------------------------------
+// ---- context ---------------------------------------------------------------------
 
-/// `POST /{repo}/transcripts` — file a finished meeting transcript as
-/// `transcripts/YYYY/MM/<id>.md` on the default branch, committed as the Tailscale
-/// user and pushed. The id is the UTC start minute plus a slug of the title; a name
-/// already taken at the default-branch tip gets a `-2`, `-3`, … suffix instead of
-/// overwriting the earlier meeting. Responds 201 with the id, path, and commit.
-#[route(POST "/{repo}/transcripts")]
-async fn transcript_post(
-    cx: &Cx,
-    Json(payload): Json<crate::transcripts::TranscriptPayload>,
-) -> Result<Response> {
+/// `POST /{repo}/context/{kind}` — file one item as `context/<kind>/YYYY/MM/<id>.md`
+/// on the default branch, committed as the Tailscale user and pushed.
+///
+/// The id is the UTC minute of `at` plus a slug of the title. With a `source` it ends
+/// in the first 8 hex of `sha256(source)`, and a put whose file is already at the tip
+/// commits nothing and answers `200 {existing: true}` — that is what makes a pusher
+/// safe to re-run after a crash. Without a `source` a name already taken gets a `-2`,
+/// `-3`, … suffix instead of overwriting the earlier item. A new file answers `201`
+/// with the id, path, and commit.
+#[route(POST "/{repo}/context/{kind}")]
+async fn context_post(cx: &Cx, body: topcoat::router::request::Bytes) -> Result<Response> {
     let name = path_param::<Repo>(cx).to_owned();
+    let kind = path_param::<Kind>(cx).to_owned();
+    if !crate::context::known_kind(&kind) {
+        return Err(bad_request(unknown_kind(&kind)).into());
+    }
     let ctx = repo_ctx(cx, &name).await?;
     if !ctx.status.available {
         return json_error(StatusCode::BAD_GATEWAY, "no mirror for this repo yet");
     }
-    if let Err(message) = payload.validate() {
-        return Err(bad_request(message).into());
-    }
+    let payload = match crate::context::Payload::parse(&kind, &body) {
+        Ok(payload) => payload,
+        Err(message) => return Err(bad_request(message).into()),
+    };
 
     let repo = app(cx).mirrors.repo(&name);
     let default_branch = repo.default_branch().await?;
     let tip = repo.tip(&default_branch).await?;
+
+    // A sourced item names one file forever, so a file already there is the same item
+    // arriving twice, not a collision to rename around.
+    if payload.source().is_some() {
+        let (id, path) = crate::context::candidate(&kind, &payload, 1);
+        if repo.show_file(&tip, &path).await?.is_some() {
+            return Ok(json_response(
+                StatusCode::OK,
+                serde_json::json!({ "ok": true, "existing": true, "id": id, "path": path }),
+            ));
+        }
+        return file_context(cx, &name, &kind, &id, &path, &payload).await;
+    }
+
     let mut chosen = None;
     for n in 1..=99 {
-        let (id, path) = crate::transcripts::candidate(&payload, n);
+        let (id, path) = crate::context::candidate(&kind, &payload, n);
         if repo.show_file(&tip, &path).await?.is_none() {
             chosen = Some((id, path));
             break;
         }
     }
     let Some((id, path)) = chosen else {
-        return json_error(StatusCode::CONFLICT, "too many transcripts share this id");
+        return json_error(StatusCode::CONFLICT, "too many context items share this id");
     };
+    file_context(cx, &name, &kind, &id, &path, &payload).await
+}
 
-    let markdown = crate::transcripts::render_markdown(&id, &payload);
+fn unknown_kind(kind: &str) -> String {
+    format!(
+        "no context kind named '{kind}'; the kinds are {}",
+        crate::context::KINDS.join(", ")
+    )
+}
+
+/// Render and commit one item.
+///
+/// `ingested_at` is the server clock read here, at the moment the file is written: it
+/// is the one timestamp a caller cannot choose, which is what lets the list cursor
+/// rest on it while `at` is free to be older than everything around it.
+async fn file_context(
+    cx: &Cx,
+    name: &str,
+    kind: &str,
+    id: &str,
+    path: &str,
+    payload: &crate::context::Payload,
+) -> Result<Response> {
+    let markdown = crate::context::render_markdown(kind, id, &crate::db::now(), payload);
     let who = actor(cx);
-    let message = format!("meeting: {id}");
-    match app(cx).ops.commit_file(&name, &path, &markdown, &message, &who).await {
-        Ok(commit) => {
-            let body =
-                serde_json::json!({ "ok": true, "id": id, "path": path, "commit": commit })
-                    .to_string();
-            let mut response = Response::new(topcoat::router::Body::from(body));
-            *response.status_mut() = StatusCode::CREATED;
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json; charset=utf-8"),
-            );
-            Ok(response)
-        }
+    let message = format!("context: {kind} {id}");
+    match app(cx).ops.commit_file(name, path, &markdown, &message, &who).await {
+        Ok(commit) => Ok(json_response(
+            StatusCode::CREATED,
+            serde_json::json!({ "ok": true, "id": id, "path": path, "commit": commit }),
+        )),
         Err(error) => op_error(error),
     }
+}
+
+#[topcoat::router::query_params(error = bad_request)]
+struct ContextQuery {
+    kind: Option<String>,
+    since: Option<String>,
+}
+
+/// `GET /{repo}/context?kind=&since=` — the items at the default-branch tip, ordered
+/// by `(ingested_at, kind, id)`.
+///
+/// `since` is the opaque `next_since` of a previous answer and is strictly exclusive,
+/// so a poller that keeps handing back what it got never repeats an item and never
+/// misses a backfilled one: `at` may be older than everything around it, the cursor
+/// never is.
+///
+/// ponytail: one `git show` per file, so a listing costs O(n) subprocesses. That is
+/// fine for the hundreds a repo accumulates in a year; when it is not, the upgrade is
+/// one `git cat-file --batch` fed every path at once, not an index in SQLite.
+#[route(GET "/{repo}/context")]
+async fn context_list(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    let ctx = repo_ctx(cx, &name).await?;
+    if !ctx.status.available {
+        return json_error(StatusCode::BAD_GATEWAY, "no mirror for this repo yet");
+    }
+    let query = query_params::<ContextQuery>(cx)?;
+    if let Some(kind) = query.kind.as_deref()
+        && !crate::context::known_kind(kind)
+    {
+        return Err(bad_request(unknown_kind(kind)).into());
+    }
+    let since = query.since.clone().unwrap_or_default();
+
+    let repo = app(cx).mirrors.repo(&name);
+    let default_branch = repo.default_branch().await?;
+    let tip = repo.tip(&default_branch).await?;
+    let prefix = match query.kind.as_deref() {
+        Some(kind) => format!("{}/{kind}/", crate::context::CONTEXT_DIR),
+        None => format!("{}/", crate::context::CONTEXT_DIR),
+    };
+
+    let mut rows: Vec<(String, serde_json::Value)> = Vec::new();
+    for path in repo.list_files(&tip, &prefix).await? {
+        if !path.ends_with(".md") {
+            continue;
+        }
+        let Some(bytes) = repo.show_file(&tip, &path).await? else {
+            continue;
+        };
+        let (front, _) = crate::context::read(&path, &String::from_utf8_lossy(&bytes));
+        let cursor = crate::context::cursor(&front);
+        if cursor <= since {
+            continue;
+        }
+        rows.push((
+            cursor,
+            serde_json::json!({
+                "kind": front.kind,
+                "id": front.id,
+                "path": path,
+                "title": front.title,
+                "at": front.at,
+                "ingested_at": front.ingested_at,
+                "source": front.source,
+                "digested": front.digested,
+                "entities": front.entities,
+            }),
+        ));
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // The cursor of the last item returned. An empty page hands the caller's own
+    // cursor back rather than rewinding it to the beginning of the store.
+    let next_since = rows.last().map(|(cursor, _)| cursor.clone()).unwrap_or(since);
+    let items: Vec<serde_json::Value> = rows.into_iter().map(|(_, item)| item).collect();
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({ "items": items, "next_since": next_since }),
+    ))
+}
+
+/// `GET /{repo}/context/{kind}/{id}` — one filed item at the default-branch tip: its
+/// front-matter fields and the markdown body under them.
+#[route(GET "/{repo}/context/{kind}/{id}")]
+async fn context_get(cx: &Cx) -> Result<Response> {
+    let name = path_param::<Repo>(cx).to_owned();
+    let kind = path_param::<Kind>(cx).to_owned();
+    let id = path_param::<Id>(cx).to_owned();
+    if !crate::context::known_kind(&kind) {
+        return Err(topcoat::router::error::not_found().into());
+    }
+    // The id is a filename. Anything that could climb out of the directory is not one.
+    if id.is_empty() || id.contains('/') || id.contains("..") {
+        return Err(topcoat::router::error::not_found().into());
+    }
+    let ctx = repo_ctx(cx, &name).await?;
+    if !ctx.status.available {
+        return json_error(StatusCode::BAD_GATEWAY, "no mirror for this repo yet");
+    }
+
+    let repo = app(cx).mirrors.repo(&name);
+    let default_branch = repo.default_branch().await?;
+    let tip = repo.tip(&default_branch).await?;
+    // The year and month are in the id, but a file somebody moved by hand is still
+    // findable by name, so the kind's directory is searched rather than computed.
+    let prefix = format!("{}/{kind}/", crate::context::CONTEXT_DIR);
+    let wanted = format!("/{id}.md");
+    let Some(path) = repo
+        .list_files(&tip, &prefix)
+        .await?
+        .into_iter()
+        .find(|path| path.ends_with(&wanted))
+    else {
+        return Err(topcoat::router::error::not_found().into());
+    };
+    let Some(bytes) = repo.show_file(&tip, &path).await? else {
+        return Err(topcoat::router::error::not_found().into());
+    };
+    let (front, body) = crate::context::read(&path, &String::from_utf8_lossy(&bytes));
+    let mut value = serde_json::to_value(&front)?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("path".to_owned(), serde_json::json!(path));
+        object.insert("body".to_owned(), serde_json::json!(body));
+    }
+    Ok(json_response(StatusCode::OK, value))
 }
 
 // ---- branch actions --------------------------------------------------------------

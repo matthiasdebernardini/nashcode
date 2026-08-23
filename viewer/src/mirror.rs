@@ -43,11 +43,15 @@ const POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// cycle open, and the next one is a minute away.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Top-level paths the router owns outright. `/{repo}` is matched after these, so a
-/// repo with one of these names would be shadowed on every page it has — half-served,
-/// and confusingly. Discovery refuses the name and says so; `NASHCODE_REPOS` is the
-/// override for an operator who knows what they are asking for.
-const RESERVED_ROUTES: &[&str] = &["api", "assets", "brain", "bugs", "favicon.svg"];
+/// Paths the router owns outright. `/{repo}` is matched after the top-level ones, so
+/// a repo with one of these names would be shadowed on every page it has —
+/// half-served, and confusingly. `context` is here for the same reason one step down:
+/// the word is a route segment under every repo, and `/context/context/...` is a URL
+/// nobody should have to read twice. Discovery refuses the name and says so;
+/// `NASHCODE_REPOS` is the override for an operator who knows what they are asking
+/// for.
+const RESERVED_ROUTES: &[&str] =
+    &["api", "assets", "brain", "bugs", "context", "favicon.svg"];
 
 /// What the UI needs to know about a mirror's health.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

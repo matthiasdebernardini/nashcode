@@ -106,6 +106,7 @@ async fn a_url_dgit_is_read_from_its_index_page() {
     assert!(served.config.knows_repo("beta"));
     assert!(!served.config.knows_repo("cgit.css"), "navigation links are not repos");
     assert!(!served.config.knows_repo("brain"), "a name the router owns is refused");
+    assert!(!served.config.knows_repo("context"), "and so is the context store's word");
     assert!(served.config.mirror_path("alpha").exists(), "and the mirror cloned over HTTP");
     assert_eq!(dgit.index_auth(), Some("x:sekrit".to_owned()), "the index fetch is authed");
 }
@@ -156,6 +157,7 @@ const INDEX_HTML: &str = "<html><body><table class='list nowrap'>\
     <tr><td><a href='/alpha/'>alpha</a></td><td>first</td><td>me</td><td>2 days</td></tr>\
     <tr><td><a href='/beta/'>beta</a></td><td>[no description]</td><td>me</td><td></td></tr>\
     <tr><td><a href='/brain/'>brain</a></td><td>a route, not a repo</td></tr>\
+    <tr><td><a href='/context/'>context</a></td><td>also a route</td></tr>\
     <tr><td><a href='/cgit.css'>css</a></td></tr>\
     </table></body></html>";
 

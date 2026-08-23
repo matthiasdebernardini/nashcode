@@ -77,6 +77,7 @@ graph LR
     viewer_cli[cli]
     viewer_code[code]
     viewer_config[config]
+    viewer_context[context]
     viewer_db[db]
     viewer_docs[docs]
     viewer_git[git]
@@ -86,7 +87,6 @@ graph LR
     viewer_render[render]
     viewer_stack[stack]
     viewer_traces[traces]
-    viewer_transcripts[transcripts]
     viewer_upstream[upstream]
     viewer_web[web]
   end
@@ -110,6 +110,7 @@ graph LR
   viewer_code --> viewer_db
   viewer_code --> viewer_git
   viewer_code --> viewer_mirror
+  viewer_context --> viewer_docs
   viewer_docs --> viewer_git
   viewer_docs --> viewer_render
   viewer_mirror --> viewer_config
@@ -135,6 +136,7 @@ graph LR
   viewer_web --> viewer_ci
   viewer_web --> viewer_code
   viewer_web --> viewer_config
+  viewer_web --> viewer_context
   viewer_web --> viewer_db
   viewer_web --> viewer_docs
   viewer_web --> viewer_git
@@ -143,7 +145,6 @@ graph LR
   viewer_web --> viewer_render
   viewer_web --> viewer_stack
   viewer_web --> viewer_traces
-  viewer_web --> viewer_transcripts
   viewer_web --> viewer_upstream
 ```
 <!-- arch:end -->
