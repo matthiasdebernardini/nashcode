@@ -157,7 +157,11 @@ digest_checkout() { # <dir> <label> <pull:yes|no>
       say "$label: $id produced no changes"
       continue
     fi
-    git add context brain tasks 2>/dev/null || true
+    # Everything, because check_paths has already proved every changed path is inside
+    # context/, brain/ and tasks/. Naming the three directories instead fails with
+    # exit 128 and an empty index the moment one of them does not exist yet — which is
+    # the ordinary first run in a repo with no tasks/.
+    git add -A .
     git commit -q -m "context: digest $id"
     say "$label: committed context: digest $id"
   done
