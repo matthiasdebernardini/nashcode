@@ -14,12 +14,14 @@ use serde::{Deserialize, Serialize};
 pub struct PeopleFile {
     /// The operator's own emails and phones. They never score, so a thread the
     /// operator is on does not match every project they belong to.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub me: Vec<String>,
     /// Directory names `sync-folders` passes over. An exact name, or one `*`:
     /// `deploy-*`, `*-backups`. Compared without case, because the operator types
     /// these and the disk under them does not care either.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skip: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub people: Vec<Person>,
     pub projects: Vec<Project>,
     /// Keys nothing here models. See [`Person::extra`].
@@ -66,7 +68,9 @@ pub struct Person {
     pub id: String,
     pub name: String,
     /// E.164, e.g. `+15550001111`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub phones: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub emails: Vec<String>,
     /// The first number in `phones` is also this person's Signal number. Signal is a
     /// third handle kind for a router that does not exist yet, not a third list: the
@@ -98,12 +102,18 @@ pub struct Project {
     pub folder: String,
     /// The nashcode repo. Absent for a GitHub-only client: meetings and email then
     /// have nowhere to file, and the consumer says so rather than guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
     /// Person ids, in the order they were written.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub people: Vec<String>,
     /// iMessage group ids. Matched in Swift, before participants; nothing here reads
     /// them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chat_ids: Vec<String>,
+    /// Written only when it says something the default does not, because a block that
+    /// repeats the default is a block the operator has to read and skip.
+    #[serde(skip_serializing_if = "Imsg::is_default")]
     pub imsg: Imsg,
     pub email: Email,
     /// How often this project has been the answer, and when last.
@@ -126,6 +136,16 @@ pub struct Imsg {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+impl Imsg {
+    /// Is this the block a project with no `imsg` key gets anyway?
+    ///
+    /// serde needs a path rather than a closure, and it hands the field by reference,
+    /// which is why this is a method and not `|imsg| imsg == &Imsg::default()`.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// Enrichment on, media-only off: the settings a new project wants, so a project
 /// added by hand with no `imsg` block behaves like the ones already there.
 impl Default for Imsg {
@@ -144,9 +164,11 @@ impl Default for Imsg {
 #[serde(default)]
 pub struct Email {
     /// The mailbox to search. It is the operator's own address, so it never scores.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     /// A hand-written Gmail query that replaces the one built from the project's
     /// people.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     /// Keys nothing here models. See [`Person::extra`].
     #[serde(flatten)]
@@ -534,11 +556,51 @@ mod tests {
     #[test]
     fn the_keys_nobody_set_are_not_written_at_all() {
         // An untouched file gains no `signal`, no `seen`, no `skip`: a key that means
-        // "false" or "never" is noise in a file a person edits by hand.
+        // "false" or "never" is noise in a file a person edits by hand. Nor an empty
+        // list, nor a `null`, nor an `imsg` block that only repeats the default.
         let text = crate::route::tests::fixture().to_pretty_json();
         assert!(!text.contains("\"signal\""), "{text}");
         assert!(!text.contains("\"seen\""), "{text}");
         assert!(!text.contains("\"skip\""), "{text}");
+        assert!(!text.contains("\"chat_ids\""), "{text}");
+        assert!(!text.contains("\"imsg\""), "{text}");
+        assert!(!text.contains("\"query\""), "{text}");
+        assert!(!text.contains("[]"), "no empty list: {text}");
+        assert!(!text.contains("null"), "and no null: {text}");
+        // What is set is still written, in full.
+        assert!(text.contains("\"repo\": \"agstaff\""), "{text}");
+        assert!(text.contains("\"account\": \"matthias@example.com\""), "{text}");
+        assert_eq!(PeopleFile::parse(&text).expect("round trip"), crate::route::tests::fixture());
+    }
+
+    #[test]
+    fn an_imsg_block_is_written_only_when_it_says_something() {
+        let mut file = crate::route::tests::fixture();
+        file.projects[0].imsg.enrich = false;
+        let text = file.to_pretty_json();
+        assert!(text.contains("\"enrich\": false"), "{text}");
+        assert_eq!(PeopleFile::parse(&text).expect("round trip"), file);
+
+        // A block that only holds a key this code does not model is still a block
+        // somebody typed, so it survives.
+        let mut kept = crate::route::tests::fixture();
+        kept.projects[0].imsg.extra.insert("attachments".to_owned(), serde_json::json!(true));
+        assert!(kept.to_pretty_json().contains("\"attachments\""), "{}", kept.to_pretty_json());
+    }
+
+    #[test]
+    fn a_seen_keeps_no_key_but_its_own_two() {
+        // `Seen` is two numbers and carries no `extra`: a stray key on it is dropped
+        // rather than parked, which every other type here would do.
+        let file = PeopleFile::parse(
+            r#"{ "people": [ { "id": "rob", "emails": ["rob@example.com"],
+                               "seen": { "count": 2, "last": "2026-08-23T09:00:00Z",
+                                         "source": "imsg" } } ],
+                 "projects": [] }"#,
+        )
+        .expect("a stray key on `seen` is not an error");
+        assert_eq!(file.people[0].seen.as_ref().map(|seen| seen.count), Some(2));
+        assert!(!file.to_pretty_json().contains("source"), "{}", file.to_pretty_json());
     }
 
     #[test]

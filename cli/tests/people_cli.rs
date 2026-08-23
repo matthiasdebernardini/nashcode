@@ -364,7 +364,9 @@ fn sync_folders_adds_one_project_per_client_folder_and_writes_only_when_told() {
     let file = people_file(temp.path());
 
     let clients = temp.path().join("clients");
-    for name in ["Blue Barn", "acres-backups"] {
+    // The third has a name no id can be made of; it is not a project and it was not
+    // skipped either, so it gets its own line.
+    for name in ["Blue Barn", "acres-backups", "---"] {
         std::fs::create_dir_all(clients.join(name)).unwrap();
     }
     std::fs::create_dir_all(clients.join("Blue Barn").join(".git")).unwrap();
@@ -392,6 +394,12 @@ fn sync_folders_adds_one_project_per_client_folder_and_writes_only_when_told() {
     assert_eq!(value["result"]["added"][0]["name"], "Blue Barn");
     assert_eq!(value["result"]["added"][0]["repo"], "blue-barn");
     assert_eq!(value["result"]["skipped"], serde_json::json!(["acres-backups"]));
+    assert_eq!(value["result"]["unnameable"], serde_json::json!(["---"]));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no id can be made of these names"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "a dry run wrote to the file");
 
     // And with --write the project is in the file, beside the one already there.
@@ -502,6 +510,113 @@ esac"#,
 }
 
 #[test]
+fn suggest_reports_a_gmail_error_that_came_back_with_a_zero_exit() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = write_config(temp.path(), 1);
+    let file = people_file(temp.path());
+
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // No chats, so Gmail is the only source with anything to say.
+    stub(&bin, "imsg", "printf ''");
+    // What a dead token looks like: Google's error envelope, printed, exit 0.
+    stub(
+        &bin,
+        "gws",
+        r#"echo '{"error":{"code":401,"message":"Invalid Credentials","status":"UNAUTHENTICATED"}}'
+exit 0"#,
+    );
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+
+    let out = nashcode_with_path(
+        &config,
+        &path,
+        &["people", "suggest", "--file", file.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(envelope(&out)["result"]["candidates"], serde_json::json!([]));
+
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("401"), "the code: {said}");
+    assert!(said.contains("Invalid Credentials"), "and what it said: {said}");
+    // A mailbox that refused to answer must not read like a quiet week.
+    assert!(!said.contains("agstaff — nobody new\n"), "{said}");
+}
+
+#[test]
+fn suggest_reads_a_hundred_gmail_messages_in_a_run_and_names_who_it_did_not_ask_about() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = write_config(temp.path(), 1);
+    // Six projects, twenty-five messages each: the budget runs out after the fourth.
+    let file = temp.path().join("people.json");
+    let projects: Vec<String> = (1..=6)
+        .map(|n| {
+            format!(
+                "{{ \"id\": \"p{n}\", \"name\": \"p{n}\", \"folder\": \"~/x/p{n}\", \
+                 \"people\": [\"rob\"] }}"
+            )
+        })
+        .collect();
+    std::fs::write(
+        &file,
+        format!(
+            "{{ \"people\": [ {{ \"id\": \"rob\", \"name\": \"Rob\", \
+             \"emails\": [\"rob@example.com\"] }} ], \"projects\": [{}] }}",
+            projects.join(", ")
+        ),
+    )
+    .unwrap();
+
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    stub(&bin, "imsg", "printf ''");
+    let log = temp.path().join("gws.log");
+    stub(
+        &bin,
+        "gws",
+        &format!(
+            r#"printf '%s\n' "$4" >> {log}
+case "$4" in
+  list)
+    ids=''
+    n=1
+    while [ $n -le 25 ]; do
+      ids="$ids{{\"id\":\"m$n\"}},"
+      n=$((n + 1))
+    done
+    echo "{{\"messages\":[${{ids%,}}]}}"
+    ;;
+  get) echo '{{"payload":{{"headers":[{{"name":"From","value":"Dana <dana@example.com>"}}]}}}}' ;;
+esac"#,
+            log = log.display()
+        ),
+    );
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+
+    let out = nashcode_with_path(
+        &config,
+        &path,
+        &["people", "suggest", "--file", file.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // Exactly the budget, and no listing for the projects it had nothing left to read.
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(calls.lines().filter(|line| *line == "get").count(), 100, "{calls}");
+    assert_eq!(calls.lines().filter(|line| *line == "list").count(), 4, "{calls}");
+
+    let value = envelope(&out);
+    assert_eq!(value["result"]["gmail_messages_per_project"], 25);
+    assert_eq!(value["result"]["gmail_messages_per_run"], 100);
+    assert_eq!(value["result"]["gmail_unasked"], serde_json::json!(["p5", "p6"]));
+
+    // And the operator is told which projects to run it again for.
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("p5, p6"), "{said}");
+    assert!(said.contains("--project"), "{said}");
+}
+
+#[test]
 fn suggest_without_the_tools_says_so_and_still_succeeds() {
     let temp = tempfile::tempdir().unwrap();
     let config = write_config(temp.path(), 1);
@@ -516,9 +631,10 @@ fn suggest_without_the_tools_says_so_and_still_succeeds() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(envelope(&out)["result"]["candidates"], serde_json::json!([]));
+    // One short clause per tool, naming the tool and what it cost.
     let notes = String::from_utf8_lossy(&out.stderr);
-    assert!(notes.contains("imsg did not run"), "{notes}");
-    assert!(notes.contains("gws did not run"), "{notes}");
+    assert!(notes.contains("imsg is not on PATH, so that source is empty"), "{notes}");
+    assert!(notes.contains("gws is not on PATH, so that source is empty"), "{notes}");
 }
 
 #[test]

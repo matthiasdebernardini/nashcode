@@ -16,11 +16,16 @@ use crate::model::{PeopleFile, Project};
 
 /// What one sync did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SyncReport {
     /// The ids of the projects this run added, in the order the directory was read.
     pub added: Vec<String>,
     /// The directory names the `skip` list matched.
     pub skipped: Vec<String>,
+    /// Directory names that yield no id at all — `---`, `...` — kept apart from
+    /// [`SyncReport::skipped`] because the operator asked for those and did not ask
+    /// for this. A folder here is one they have to rename or add to `skip`.
+    pub unnameable: Vec<String>,
     /// Directories that already had a project. Nothing about them was touched.
     pub kept: usize,
 }
@@ -38,13 +43,18 @@ impl PeopleFile {
     /// The error is the directory that could not be read; a child that cannot be
     /// stat'd is skipped in silence, because an unreadable entry among thirty is not
     /// worth failing the other twenty-nine.
+    ///
+    /// A symlink is not followed, whatever it points at. The entry's own type is what
+    /// is read, so a link to a client folder is passed over rather than added a second
+    /// time under the link's name — and a link out of the clients directory cannot put
+    /// a project anywhere the operator did not put a folder.
     pub fn sync_folders(&mut self, dir: &Path) -> Result<SyncReport, String> {
         let entries =
             std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
         let mut names: Vec<(String, std::path::PathBuf)> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -74,8 +84,9 @@ impl PeopleFile {
                 self.projects.iter().any(|project| project.id == candidate)
             });
             if id.is_empty() {
-                // A name with no letters and no digits in it — `---` — is no id.
-                report.skipped.push(name);
+                // A name with no letters and no digits in it — `---` — is no id. It
+                // is not "skipped": nobody asked for it to be passed over.
+                report.unnameable.push(name);
                 continue;
             }
             self.projects.push(Project {
@@ -233,9 +244,11 @@ fn host_of(url: &str) -> Option<&str> {
         Some((_, rest)) => rest,
         None => {
             // scp-style: `git@host:path`. A Windows drive or an absolute path is not.
+            // A dot is what makes it a host rather than a drive letter or a path:
+            // everything before the first colon can hold no colon of its own.
             let (before, _) = url.split_once(':')?;
             let host = before.rsplit('@').next()?;
-            return Some(host).filter(|host| host.contains('.') || host.contains(':'));
+            return Some(host).filter(|host| host.contains('.'));
         }
     };
     let authority = rest.split(['/', '?']).next()?;
@@ -339,6 +352,7 @@ mod tests {
 
         assert_eq!(report.added, ["agstaff", "pristine-acres"]);
         assert_eq!(report.skipped, ["acres-backups", "deploy-scripts"]);
+        assert!(report.unnameable.is_empty(), "{report:?}");
         assert_eq!(report.kept, 0);
 
         let agstaff = &file.projects[0];
@@ -385,6 +399,46 @@ mod tests {
         let report = file.sync_folders(&root).expect("the directory reads");
         assert_eq!(report.added, ["acres-2"]);
         assert_eq!(file.projects.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_whose_name_is_no_id_is_reported_apart_from_the_skipped_ones() {
+        let root = std::env::temp_dir().join(format!("people-core-noid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for name in ["---", "Acres", "old-logs"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+
+        let mut file =
+            PeopleFile { skip: vec!["old-*".to_owned()], ..PeopleFile::default() };
+        let report = file.sync_folders(&root).expect("the directory reads");
+
+        assert_eq!(report.added, ["acres"]);
+        // `old-logs` was asked for by the `skip` list. `---` was not asked for by
+        // anybody: it is a folder the operator has to rename.
+        assert_eq!(report.skipped, ["old-logs"]);
+        assert_eq!(report.unnameable, ["---"]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_client_folder_is_not_a_second_project() {
+        let root = std::env::temp_dir().join(format!("people-core-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("acres")).unwrap();
+        // Both kinds: a link inside the clients directory, and one pointing out of it.
+        std::os::unix::fs::symlink(root.join("acres"), root.join("acres-again")).unwrap();
+        std::os::unix::fs::symlink(std::env::temp_dir(), root.join("elsewhere")).unwrap();
+
+        let mut file = PeopleFile::default();
+        let report = file.sync_folders(&root).expect("the directory reads");
+
+        assert_eq!(report.added, ["acres"], "the link is not followed: {report:?}");
+        assert_eq!(file.projects.len(), 1);
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -2275,19 +2275,28 @@ An unreadable `last` scores zero rather than "fresh", so a broken stamp sinks in
 floating to the top of every list. `seen` lives in `people.json` and not in a database
 beside it because the file is the only thing every consumer already reads: the routers,
 the CLI, and the desktop app learn what is warm from the same three lines, and copying
-the file copies the order. `suggest` sends the project's *name* to Gmail as the search
+the file copies the order. It has exactly one writer, `nashcode people seen`, which
+a router calls when it files a message and `bin/context-email` calls once per project
+that filed one; nothing else touches the two numbers, so there is one place a count can
+be wrong. `suggest` sends the project's *name* to Gmail as the search
 query and nothing else — no number, no address, nothing else out of the file — and sends
 nothing at all to Messages, which `imsg` reads locally; both answers are compared against
-the file on this machine. It writes nothing: accepting a suggestion is the operator's
-act.
+the file on this machine. One run reads at most 25 Gmail messages per project and 100
+over the whole run, and names the projects it had no budget left to ask about, because
+thirty-five clients at twenty-five each is nearly nine hundred round trips for one
+command. It writes nothing: accepting a suggestion is the operator's act.
 
 **The model keeps the keys it does not know.** `PeopleFile`, `Person`, `Project`, `Imsg`
 and `Email` each carry a `#[serde(flatten)] extra`, so a hand-added `"notes"` on a
 project or a `"schema_version"` at the top survives load → save → load. An empty map
 serialises to nothing, so a file that never had a stray key never gains one. The price is
 `Eq`: `serde_json::Value` is `PartialEq` only, so that derive is gone from those types
-and from `Pushed`. `signal` and `seen` are skipped when they are false and absent for the
-same reason — a file a person edits should not fill up with keys that mean "no".
+and from `Pushed`. Every key that means "no" is left out on save — `signal` when it is
+false, `seen` when nothing has matched, a `null` `repo`, `account` or `query`, an empty
+`me`, `skip`, `people`, `phones`, `emails` or `chat_ids`, and an `imsg` block that only
+repeats the default — because a file a person edits should not fill up with keys that
+say nothing. `Seen` is the one type here with no `extra`: it is two numbers, so a stray
+key on it is dropped rather than kept.
 
 **`push` sends no credential.** The viewer authenticates through Tailscale's identity
 headers, the way every other viewer call in this CLI does, and the profile's token is

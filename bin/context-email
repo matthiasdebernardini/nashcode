@@ -324,6 +324,20 @@ while IFS=$'\x1f' read -r -d '' -u 3 project repo account legacy query; do
     fi
   done <<< "$ids"
 
+  # Mail that landed is a match, and `seen` is what orders every list of projects the
+  # operator reads. One call per project per run, not one per message: the count says
+  # "this client was live today", not how chatty they were.
+  #
+  # `--file=`, like every other flag here: a value bound to its own flag cannot be
+  # read as the next flag. The path is passed because this script may have been
+  # pointed at a people file the CLI would not find on its own.
+  if [ "$filed" -gt 0 ]; then
+    if ! nashcode people seen "$project" --file="$PEOPLE" >/dev/null 2>&1; then
+      # The order is worth less than the mail. Say it and go on.
+      note "$project: nashcode people seen failed, so its warmth is a run behind"
+    fi
+  fi
+
   say "$repo: $filed filed, $skipped under $MIN_WORDS words"
 done 3< "$sources_file"
 

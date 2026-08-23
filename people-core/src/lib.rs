@@ -32,9 +32,11 @@ pub mod route;
 
 #[cfg(feature = "client")]
 pub mod client;
+#[cfg(feature = "client")]
+pub mod suggest;
 
 pub use folders::{SyncReport, slug, unique_id};
-pub use frecency::{HALF_LIFE_DAYS, by_frecency, frecency};
+pub use frecency::{HALF_LIFE_DAYS, by_frecency, frecency, seen_label};
 pub use io::{Pushed, default_path};
 pub use map::{ContactKind, ContactRow, contact_map};
 pub use model::{Email, Finding, Imsg, PeopleFile, Person, Project, Seen, is_e164};
@@ -42,3 +44,5 @@ pub use route::{Contact, Match, Routing, normalize};
 
 #[cfg(feature = "client")]
 pub use client::{PushReply, push, pushed_at};
+#[cfg(feature = "client")]
+pub use suggest::{Candidate, candidates_for};

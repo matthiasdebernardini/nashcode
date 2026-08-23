@@ -52,6 +52,41 @@ pub fn by_frecency<'a, T>(
     scored.into_iter().map(|(item, _)| item).collect()
 }
 
+/// `3× · 2d ago`, or nothing when it has never matched.
+///
+/// The one spelling of warmth, so `nashcode people ls` and the desktop card under a
+/// name say the same words about the same `seen`. It sits beside [`frecency`] because
+/// it reads the same two numbers: a label that disagreed with the order would be worse
+/// than no label.
+///
+/// A stamp neither this nor [`frecency`] can read survives as itself rather than as
+/// "now": the operator wrote it, and hiding it would hide the typo.
+pub fn seen_label(seen: Option<&Seen>, now: &str) -> Option<String> {
+    let seen = seen?;
+    let age = match (parse_rfc3339(&seen.last), parse_rfc3339(now)) {
+        (Some(then), Some(now)) => short_age(now - then),
+        _ => match seen.last.trim() {
+            "" => "undated".to_owned(),
+            written => written.to_owned(),
+        },
+    };
+    Some(format!("{}× · {age}", seen.count))
+}
+
+/// An age in one word, because it sits at the end of a line that already has three
+/// things on it.
+fn short_age(seconds: i64) -> String {
+    match seconds {
+        s if s < 0 => "ahead".to_owned(),
+        s if s < 60 => "now".to_owned(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s if s < 7 * 86_400 => format!("{}d ago", s / 86_400),
+        s if s < 365 * 86_400 => format!("{}w ago", s / (7 * 86_400)),
+        s => format!("{}y ago", s / (365 * 86_400)),
+    }
+}
+
 /// Days from 1970-01-01 to a proleptic-Gregorian date. Hinnant's algorithm.
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -94,8 +129,10 @@ fn parse_rfc3339(stamp: &str) -> Option<i64> {
         let sign = if tail.starts_with('-') { -1 } else { 1 };
         let (hours, minutes) = match rest.split_once(':') {
             Some((h, m)) => (h.parse::<i64>().ok()?, m.parse::<i64>().ok()?),
-            None if rest.len() >= 4 => (rest[..2].parse().ok()?, rest[2..4].parse().ok()?),
-            _ => return None,
+            // `+HHMM`. Cut with `get`, not with a range: the stamp is whatever the
+            // operator typed, and `+€9x` has no character boundary at byte two —
+            // slicing it would panic where garbage should simply score nothing.
+            None => (rest.get(..2)?.parse().ok()?, rest.get(2..4)?.parse().ok()?),
         };
         seconds -= sign * (hours * 3600 + minutes * 60);
     }
@@ -179,6 +216,40 @@ mod tests {
     }
 
     #[test]
+    fn warmth_reads_as_a_count_and_one_word_of_age() {
+        assert_eq!(seen_label(None, NOW), None);
+        assert_eq!(seen_label(Some(&seen(3, NOW)), NOW).as_deref(), Some("3× · now"));
+        assert_eq!(
+            seen_label(Some(&seen(1, "2026-08-23T10:00:00Z")), NOW).as_deref(),
+            Some("1× · 2h ago")
+        );
+        assert_eq!(
+            seen_label(Some(&seen(7, "2026-08-21T12:00:00Z")), NOW).as_deref(),
+            Some("7× · 2d ago")
+        );
+        assert_eq!(
+            seen_label(Some(&seen(2, "2026-08-02T12:00:00Z")), NOW).as_deref(),
+            Some("2× · 3w ago")
+        );
+        assert_eq!(
+            seen_label(Some(&seen(2, "2024-08-02T12:00:00Z")), NOW).as_deref(),
+            Some("2× · 2y ago")
+        );
+    }
+
+    #[test]
+    fn a_stamp_the_label_cannot_read_survives_as_the_operator_wrote_it() {
+        let broken = seen(3, "whenever");
+        assert_eq!(seen_label(Some(&broken), NOW).as_deref(), Some("3× · whenever"));
+        assert_eq!(seen_label(Some(&seen(3, "  ")), NOW).as_deref(), Some("3× · undated"));
+        // A clock behind the file's is not a bonus here either.
+        assert_eq!(
+            seen_label(Some(&seen(1, "2027-01-01T00:00:00Z")), NOW).as_deref(),
+            Some("1× · ahead")
+        );
+    }
+
+    #[test]
     fn the_parser_reads_what_the_file_holds_and_refuses_what_it_does_not() {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2026-08-18T00:00:00Z"), Some(1_787_011_200));
@@ -187,5 +258,22 @@ mod tests {
         assert_eq!(parse_rfc3339("2026-08-18T25:00:00Z"), None);
         assert_eq!(parse_rfc3339("2026-08-18"), None);
         assert_eq!(parse_rfc3339(""), None);
+    }
+
+    #[test]
+    fn a_stamp_with_a_multibyte_character_in_it_scores_nothing_rather_than_panicking() {
+        // The offset the operator typed is not two digits and is not even two bytes
+        // wide. Reading it must cost the row its score, not the process.
+        assert_eq!(parse_rfc3339("2026-08-18T00:00:00+€9x"), None);
+        assert_eq!(parse_rfc3339("2026-08-18T00:00:00-€9x"), None);
+        assert_eq!(parse_rfc3339("2026-08-18T00:00:00+1"), None, "half an offset is none");
+        assert_eq!(parse_rfc3339("€2026-08-18T00:00:00Z"), None, "and a leading one too");
+        assert_eq!(frecency(Some(&seen(99, "2026-08-18T00:00:00+€9x")), NOW), 0.0);
+        assert_eq!(frecency(Some(&seen(99, "€2026-08-18T00:00:00Z")), NOW), 0.0);
+        // The label still shows the operator what they wrote, so the typo is visible.
+        assert_eq!(
+            seen_label(Some(&seen(2, "2026-08-18T00:00:00+€9x")), NOW).as_deref(),
+            Some("2× · 2026-08-18T00:00:00+€9x")
+        );
     }
 }

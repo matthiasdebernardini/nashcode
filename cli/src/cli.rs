@@ -1612,11 +1612,14 @@ fn people_command() -> Command {
             Command::new(
                 "suggest",
                 "Who else writes about a project, from where they already wrote.\n\n\
-                 Two sources, and it writes nothing: a Messages chat whose name \
-                 contains the project's name or id offers its participants, and the \
-                 newest 25 Gmail messages of the last year that name the project \
+                 Two sources, and it writes nothing: a Messages chat whose name holds \
+                 the project's name or id as a whole word offers its participants, and \
+                 the newest 25 Gmail messages of the last year that name the project \
                  offer their From: addresses. Anybody already in the file, and every \
                  address of your own, is left out.\n\n\
+                 One run reads at most 25 Gmail messages per project and 100 in all. \
+                 When the 100 are spent it names the projects it did not ask about, so \
+                 you can run it again with --project for those.\n\n\
                  The Gmail search sends the project's NAME as the query and nothing \
                  else — no number and no address leaves this machine. Messages is \
                  read locally by `imsg`. A missing `imsg` or `gws` empties that one \

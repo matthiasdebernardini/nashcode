@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use people_core::{Contact, Email, Imsg, PeopleFile, Person, Project, Seen, slug, unique_id};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::Ctx;
@@ -61,8 +61,10 @@ pub fn ls(ctx: &Ctx, args: &PeopleLsArgs) -> Result<Value> {
             project.id,
             project.repo.as_deref().unwrap_or("no repo"),
             project.folder,
-            seen_label(project.seen.as_ref()).map(|it| format!(" · {it}")).unwrap_or_default(),
-            describe(&members)
+            people_core::seen_label(project.seen.as_ref(), &now)
+                .map(|it| format!(" · {it}"))
+                .unwrap_or_default(),
+            describe(&members, &now)
         ));
         projects.push(json!({
             "id": project.id,
@@ -81,7 +83,7 @@ pub fn ls(ctx: &Ctx, args: &PeopleLsArgs) -> Result<Value> {
         .map(|person| json!({ "id": person.id, "name": person.name }))
         .collect();
     if !loose.is_empty() {
-        ctx.out.step(format!("in no project: {}", describe(&loose)));
+        ctx.out.step(format!("in no project: {}", describe(&loose, &now)));
     }
 
     // The viewer's copy is a different thing from this file, so say how old it is.
@@ -378,11 +380,20 @@ pub fn sync_folders(ctx: &Ctx, args: &PeopleSyncFoldersArgs) -> Result<Value> {
     if !report.skipped.is_empty() {
         ctx.out.step(format!("skipped by `skip`: {}", report.skipped.join(", ")));
     }
+    // Its own line, because it is the operator's to fix: `skip` turned those away on
+    // purpose, and these have a name no id can be made of.
+    if !report.unnameable.is_empty() {
+        ctx.out.step(format!(
+            "no id can be made of these names, so they are not projects: {}",
+            report.unnameable.join(", ")
+        ));
+    }
     ctx.out.step(format!(
-        "{} new, {} already there, {} skipped",
+        "{} new, {} already there, {} skipped, {} unnameable",
         report.added.len(),
         report.kept,
-        report.skipped.len()
+        report.skipped.len(),
+        report.unnameable.len()
     ));
 
     if args.write {
@@ -412,6 +423,7 @@ pub fn sync_folders(ctx: &Ctx, args: &PeopleSyncFoldersArgs) -> Result<Value> {
         "written": args.write,
         "added": added,
         "skipped": report.skipped,
+        "unnameable": report.unnameable,
         "kept": report.kept,
     }))
 }
@@ -452,90 +464,68 @@ pub fn seen(ctx: &Ctx, args: &PeopleSeenArgs) -> Result<Value> {
     }))
 }
 
-/// The newest Gmail messages `suggest` reads per project. A cap, not a page size: a
-/// client with a thousand threads is not worth a thousand round trips to find the
-/// four people on them.
-const GMAIL_MESSAGES: usize = 25;
-
-/// How far back `suggest` looks in Gmail.
-const GMAIL_WINDOW: &str = "newer_than:365d";
-
-/// One person a source has seen writing about a project, who is not in the file yet.
-#[derive(Debug, Clone, Serialize)]
-struct Candidate {
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    email: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    phone: Option<String>,
-    /// Where the operator can go and look, in their own words: a chat's name, a
-    /// message's date.
-    where_seen: String,
-    /// When that source last saw them, as the source spelled it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last: Option<String>,
-}
-
-impl Candidate {
-    /// The address, whichever kind it is.
-    fn address(&self) -> &str {
-        self.email.as_deref().or(self.phone.as_deref()).unwrap_or_default()
-    }
-}
-
 /// `nashcode people suggest [--project <id>]` — who else writes about this project.
 ///
-/// Reads two places the operator already has open and writes nothing. Accepting a
-/// suggestion is the operator's act, in the desktop app or by hand.
-///
-/// - **Messages**, through `imsg chats --limit 300 --json`: a chat whose name contains
-///   the project's name or id offers its participants.
-/// - **Gmail**, through `gws`: the newest 25 messages of the last year whose search
-///   matches the project name offer their `From:` addresses.
-///
-/// **What leaves this machine.** The Gmail search sends the project's *name* as the
-/// query and nothing else — no phone number, no address, nothing from `people.json`.
-/// The Messages side sends nothing at all: `imsg` reads the local database. Everything
-/// the two answer with is compared against the file here, on this machine.
-///
-/// A missing `imsg` or `gws` is not a failure: that source comes back empty with one
-/// note on stderr, because the other source is still worth having.
+/// The discovery itself is [`people_core::suggest`], which the desktop inspector's
+/// "Suggested" section calls too: a name the terminal offers and a name the window
+/// offers have to be the same name, found the same way. This command is the printing
+/// and the envelope around it, and it writes nothing — accepting a suggestion is the
+/// operator's act, in the desktop app or by hand.
 pub fn suggest(ctx: &Ctx, args: &PeopleSuggestArgs) -> Result<Value> {
     let (path, file) = load(args.file.as_deref())?;
     let now = crate::timefmt::now_rfc3339();
 
-    let wanted: Vec<&Project> = match args.project.as_deref() {
+    let wanted: Vec<Project> = match args.project.as_deref() {
         Some(id) => vec![
-            file.projects.iter().find(|project| project.id == id).ok_or_else(|| {
-                classed(Class::NotFound, format!("no project has the id {id:?}"))
-            })?,
+            file.projects
+                .iter()
+                .find(|project| project.id == id)
+                .cloned()
+                .ok_or_else(|| {
+                    classed(Class::NotFound, format!("no project has the id {id:?}"))
+                })?,
         ],
-        None => people_core::by_frecency(&file.projects, |p| p.seen.as_ref(), &now),
+        None => people_core::by_frecency(&file.projects, |p| p.seen.as_ref(), &now)
+            .into_iter()
+            .cloned()
+            .collect(),
     };
 
-    // Everything already written down: the people's own addresses, the operator's own,
-    // and every project's mail account. A candidate is by definition none of these.
-    let known = known_addresses(&file);
-
-    let imsg = Tool::new(ctx, "imsg");
-    let gws = Tool::new(ctx, "gws");
-    // One call for every project: `imsg chats` does not take a search.
-    let chats = imsg.run(&["chats", "--limit", "300", "--json"]);
     ctx.out.step(format!(
-        "Gmail: the newest {GMAIL_MESSAGES} messages of the last year per project"
+        "Gmail: the newest {} messages of the last year per project, and {} in the whole \
+         run",
+        people_core::suggest::GMAIL_MESSAGES,
+        people_core::suggest::GMAIL_MESSAGE_BUDGET
     ));
 
     let mut rows: Vec<Value> = Vec::new();
-    for project in wanted {
-        let mut found: Vec<Candidate> = Vec::new();
-        if let Some(chats) = &chats {
-            found.extend(chat_candidates(chats, project, &known));
+    // The projects whose mail the run had no budget left to read. Messages costs
+    // nothing — it is one local read, already done — so those projects are still
+    // asked; only Gmail stops.
+    let mut unasked: Vec<&str> = Vec::new();
+    for project in &wanted {
+        let had_budget = people_core::suggest::gmail_reads_left() > 0;
+        let found = people_core::candidates_for(project, &file);
+        if !had_budget {
+            unasked.push(project.id.as_str());
         }
-        found.extend(gmail_candidates(&gws, project, &known));
-        dedupe(&mut found);
+        // A source that could not answer says so once, on stderr, next to the project
+        // that first asked it — not thirty-five times at the end.
+        let notes = people_core::suggest::take_notes();
+        let answered = notes.is_empty();
+        for note in notes {
+            ctx.out.warn(note);
+        }
 
         if found.is_empty() {
-            ctx.out.step(format!("{} — nobody new", project.id));
+            // A source that could not answer is not an empty inbox. The two must not
+            // read the same, or a dead token looks like a quiet week.
+            ctx.out.step(match answered {
+                true => format!("{} — nobody new", project.id),
+                false => {
+                    format!("{} — nobody new, and a source above did not answer", project.id)
+                }
+            });
         } else {
             ctx.out.step(format!("{} — {} candidate(s)", project.id, found.len()));
             for candidate in &found {
@@ -554,239 +544,23 @@ pub fn suggest(ctx: &Ctx, args: &PeopleSuggestArgs) -> Result<Value> {
         }
     }
 
+    if !unasked.is_empty() {
+        ctx.out.warn(format!(
+            "the run's {} Gmail messages were spent before {}; ask about those with \
+             --project",
+            people_core::suggest::GMAIL_MESSAGE_BUDGET,
+            unasked.join(", ")
+        ));
+    }
+
     Ok(json!({
         "ok": true,
         "file": path.display().to_string(),
-        "gmail_messages_per_project": GMAIL_MESSAGES,
+        "gmail_messages_per_project": people_core::suggest::GMAIL_MESSAGES,
+        "gmail_messages_per_run": people_core::suggest::GMAIL_MESSAGE_BUDGET,
+        "gmail_unasked": unasked,
         "candidates": rows,
     }))
-}
-
-/// Every address the file already knows, normalised: the people's, the operator's own
-/// `me` entries, and every project's mail account.
-fn known_addresses(file: &PeopleFile) -> BTreeSet<String> {
-    let people = file
-        .people
-        .iter()
-        .flat_map(|person| person.phones.iter().chain(person.emails.iter()))
-        .map(String::as_str);
-    let accounts = file.projects.iter().filter_map(|project| project.email.account.as_deref());
-    people
-        .chain(file.me.iter().map(String::as_str))
-        .chain(accounts)
-        .map(people_core::normalize)
-        .filter(|value| !value.is_empty())
-        .collect()
-}
-
-/// The same person twice — a chat and a mail thread — is one candidate. The first
-/// sighting wins, because the sources are asked in the order the operator trusts them.
-fn dedupe(found: &mut Vec<Candidate>) {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    found.retain(|candidate| seen.insert(people_core::normalize(candidate.address())));
-}
-
-/// The participants of every Messages chat whose name names this project.
-///
-/// `imsg chats --json` answers NDJSON: one chat per line, `{id, display_name,
-/// participants, last_message_at}`. A line that is not a chat is skipped rather than
-/// failing the run — a tool that prints a banner should not cost the operator the
-/// whole source.
-fn chat_candidates(ndjson: &str, project: &Project, known: &BTreeSet<String>) -> Vec<Candidate> {
-    // An empty needle is inside every string, so a project with no name is matched by
-    // its id alone, and one with neither matches nothing.
-    let needles: Vec<String> = [project.name.as_str(), project.id.as_str()]
-        .iter()
-        .map(|needle| needle.trim().to_lowercase())
-        .filter(|needle| !needle.is_empty())
-        .collect();
-
-    let mut found = Vec::new();
-    for line in ndjson.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(chat) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let name = chat["display_name"].as_str().unwrap_or_default();
-        let haystack = name.to_lowercase();
-        if !needles.iter().any(|needle| haystack.contains(needle.as_str())) {
-            continue;
-        }
-        let last = chat["last_message_at"].as_str().map(str::to_owned);
-        for handle in chat["participants"].as_array().into_iter().flatten() {
-            let Some(handle) = handle.as_str().map(str::trim).filter(|h| !h.is_empty()) else {
-                continue;
-            };
-            if known.contains(&people_core::normalize(handle)) {
-                continue;
-            }
-            // An Apple ID handle is an email; everything else is a number.
-            let (email, phone) = match handle.contains('@') {
-                true => (Some(handle.to_owned()), None),
-                false => (None, Some(handle.to_owned())),
-            };
-            found.push(Candidate {
-                // Messages knows the handle, not the human. The operator names them.
-                name: handle.to_owned(),
-                email,
-                phone,
-                where_seen: format!("Messages chat {name:?}"),
-                last: last.clone(),
-            });
-        }
-    }
-    found
-}
-
-/// The `From:` of the newest Gmail messages that name this project.
-fn gmail_candidates(gws: &Tool<'_>, project: &Project, known: &BTreeSet<String>) -> Vec<Candidate> {
-    let query = project.name.trim();
-    let query = if query.is_empty() { project.id.trim() } else { query };
-    if query.is_empty() {
-        return Vec::new();
-    }
-    // The project's NAME is the whole query. Nothing out of the file goes with it.
-    let list = json!({
-        "userId": "me",
-        "q": format!("{query} {GMAIL_WINDOW}"),
-        "maxResults": GMAIL_MESSAGES,
-    })
-    .to_string();
-    let Some(answer) = gws.run(&["gmail", "users", "messages", "list", "--params", &list]) else {
-        return Vec::new();
-    };
-    let Ok(answer) = serde_json::from_str::<Value>(&answer) else {
-        return Vec::new();
-    };
-
-    let ids: Vec<String> = answer["messages"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|message| message["id"].as_str())
-        .take(GMAIL_MESSAGES)
-        .map(str::to_owned)
-        .collect();
-
-    let mut found = Vec::new();
-    for id in ids {
-        let get = json!({
-            "userId": "me",
-            "id": id,
-            "format": "metadata",
-            "metadataHeaders": ["From", "Date"],
-        })
-        .to_string();
-        let Some(text) = gws.run(&["gmail", "users", "messages", "get", "--params", &get]) else {
-            break;
-        };
-        let Ok(message) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        if let Some(candidate) = message_candidate(&message, known) {
-            found.push(candidate);
-        }
-    }
-    found
-}
-
-/// One Gmail message as a candidate, or `None` when its sender is already known.
-///
-/// Only `From` and `Date` are asked for, so the subject is not there to name: the
-/// sighting is the date, which is what the operator would search their own mailbox by.
-fn message_candidate(message: &Value, known: &BTreeSet<String>) -> Option<Candidate> {
-    let from = header(message, "from")?;
-    let (name, address) = parse_from(from);
-    if address.is_empty() || known.contains(&people_core::normalize(&address)) {
-        return None;
-    }
-    let date = header(message, "date").unwrap_or("an undated message");
-    Some(Candidate {
-        name: if name.is_empty() { address.clone() } else { name },
-        email: Some(address),
-        phone: None,
-        where_seen: format!("Gmail: message from {date}"),
-        last: header(message, "date").map(str::to_owned),
-    })
-}
-
-/// One header of a `format=metadata` message, by name, without case.
-fn header<'a>(message: &'a Value, name: &str) -> Option<&'a str> {
-    let headers = match message["payload"]["headers"].as_array() {
-        Some(headers) => headers,
-        None => message["headers"].as_array()?,
-    };
-    headers
-        .iter()
-        .find(|header| header["name"].as_str().is_some_and(|it| it.eq_ignore_ascii_case(name)))
-        .and_then(|header| header["value"].as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-/// `Rob Castro <rob@example.com>` -> `("Rob Castro", "rob@example.com")`.
-///
-/// A bare address has no name; a quoted name keeps its comma and loses its quotes.
-/// Anything with no `@` in it is not an address, and comes back empty rather than as a
-/// candidate nobody can write to.
-fn parse_from(value: &str) -> (String, String) {
-    let value = value.trim();
-    let (name, address) = match (value.rfind('<'), value.rfind('>')) {
-        (Some(open), Some(close)) if close > open => (&value[..open], &value[open + 1..close]),
-        _ => ("", value),
-    };
-    let name = name.trim().trim_matches('"').trim();
-    let address = address.trim();
-    if !address.contains('@') {
-        return (name.to_owned(), String::new());
-    }
-    (name.to_owned(), address.to_owned())
-}
-
-/// A binary this command shells out to, which may not be installed.
-///
-/// One note per tool per run, not one per project: thirty-five "gws is not on PATH"
-/// lines say nothing the first one did not.
-struct Tool<'a> {
-    ctx: &'a Ctx,
-    bin: &'static str,
-    told: std::cell::Cell<bool>,
-}
-
-impl<'a> Tool<'a> {
-    fn new(ctx: &'a Ctx, bin: &'static str) -> Self {
-        Self { ctx, bin, told: std::cell::Cell::new(false) }
-    }
-
-    /// Its standard output, or `None` with one note on stderr.
-    fn run(&self, args: &[&str]) -> Option<String> {
-        let bin = self.bin;
-        match std::process::Command::new(bin).args(args).output() {
-            Err(error) => {
-                self.say(format!("{bin} did not run ({error}), so that source is empty"));
-                None
-            }
-            Ok(output) if !output.status.success() => {
-                let why = String::from_utf8_lossy(&output.stderr);
-                self.say(format!(
-                    "{bin} exited {}: {}",
-                    output.status.code().unwrap_or(-1),
-                    why.trim()
-                ));
-                None
-            }
-            Ok(output) => Some(String::from_utf8_lossy(&output.stdout).into_owned()),
-        }
-    }
-
-    fn say(&self, note: String) {
-        if !self.told.replace(true) {
-            self.ctx.out.warn(note);
-        }
-    }
 }
 
 // ---- the old files ---------------------------------------------------------
@@ -885,7 +659,11 @@ fn expand_home(path: &str) -> PathBuf {
 
 /// `Rob Castro (1 phone/1 email) · 3× · 2d ago`, joined. Empty reads as "nobody"
 /// rather than as an empty line nobody can interpret.
-fn describe(members: &[Value]) -> String {
+///
+/// `now` is passed in rather than read here so that one listing dates every row
+/// against one instant: two rows measured a second apart would be a warmth order the
+/// numbers beside it did not agree with.
+fn describe(members: &[Value], now: &str) -> String {
     if members.is_empty() {
         return "nobody".to_owned();
     }
@@ -895,8 +673,9 @@ fn describe(members: &[Value]) -> String {
             let id = member["id"].as_str().unwrap_or_default();
             let name = member["name"].as_str().filter(|name| !name.trim().is_empty()).unwrap_or(id);
             let seen: Option<Seen> = serde_json::from_value(member["seen"].clone()).ok().flatten();
-            let warmth =
-                seen_label(seen.as_ref()).map(|it| format!(" · {it}")).unwrap_or_default();
+            let warmth = people_core::seen_label(seen.as_ref(), now)
+                .map(|it| format!(" · {it}"))
+                .unwrap_or_default();
             match (member["phones"].as_u64(), member["emails"].as_u64()) {
                 (Some(phones), Some(emails)) => {
                     format!("{name} ({phones} phone/{emails} email){warmth}")
@@ -906,28 +685,6 @@ fn describe(members: &[Value]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// `3× · 2d ago`, or nothing when it has never matched.
-fn seen_label(seen: Option<&Seen>) -> Option<String> {
-    let seen = seen?;
-    let age = crate::timefmt::seconds_since(&seen.last)
-        .map_or_else(|| seen.last.clone(), short_age);
-    Some(format!("{}× · {age}", seen.count))
-}
-
-/// An age in one word, because it sits at the end of a line that already has four
-/// things on it. `crate::timefmt::ago` is the long form, for a line of its own.
-fn short_age(seconds: i64) -> String {
-    match seconds {
-        s if s < 0 => "ahead".to_owned(),
-        s if s < 60 => "now".to_owned(),
-        s if s < 3600 => format!("{}m ago", s / 60),
-        s if s < 86_400 => format!("{}h ago", s / 3600),
-        s if s < 7 * 86_400 => format!("{}d ago", s / 86_400),
-        s if s < 365 * 86_400 => format!("{}w ago", s / (7 * 86_400)),
-        s => format!("{}y ago", s / (365 * 86_400)),
-    }
 }
 
 /// The project folder of a route folder: `~/Projects/agstaff/imsg-inbox` is the inbox
@@ -1003,128 +760,25 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_named_after_a_project_offers_everyone_on_it_but_the_people_already_known() {
-        // What `imsg chats --json` prints: one chat per line. The last line is not a
-        // chat at all, which must not cost the source the two above it.
-        let ndjson = r#"{"id":"7","display_name":"AgStaff crew","participants":["+15550001111","+15550003333","new@example.com"],"last_message_at":"2026-08-22T18:04:00Z"}
-{"id":"8","display_name":"Book club","participants":["+15550009999"],"last_message_at":"2026-08-01T10:00:00Z"}
-not json at all"#;
-        let project = Project {
-            id: "agstaff".to_owned(),
-            name: "AgStaff".to_owned(),
-            ..Project::default()
-        };
-        let known: BTreeSet<String> = ["+15550001111".to_owned()].into_iter().collect();
-
-        let found = chat_candidates(ndjson, &project, &known);
-        assert_eq!(found.len(), 2, "{found:?}");
-        assert_eq!(found[0].phone.as_deref(), Some("+15550003333"));
-        assert_eq!(found[0].name, "+15550003333", "Messages knows the handle, not the human");
-        assert_eq!(found[0].where_seen, "Messages chat \"AgStaff crew\"");
-        assert_eq!(found[0].last.as_deref(), Some("2026-08-22T18:04:00Z"));
-        // An Apple ID handle is an address, not a number.
-        assert_eq!(found[1].email.as_deref(), Some("new@example.com"));
-        assert_eq!(found[1].phone, None);
-    }
-
-    #[test]
-    fn a_chat_matches_the_project_id_as_well_as_its_name_and_ignores_case() {
-        let line = "{\"id\":\"1\",\"display_name\":\"re: PRISTINE-ACRES fencing\",\"participants\":[\"+15550004444\"]}";
-        let project = Project {
-            id: "pristine-acres".to_owned(),
-            name: "Pristine Acres".to_owned(),
-            ..Project::default()
-        };
-        assert_eq!(chat_candidates(line, &project, &BTreeSet::new()).len(), 1);
-
-        // A project with no name and no id matches nothing, rather than everything:
-        // an empty needle is inside every string.
-        let anonymous = Project::default();
-        assert!(chat_candidates(line, &anonymous, &BTreeSet::new()).is_empty());
-    }
-
-    #[test]
-    fn a_from_header_is_a_name_and_an_address_or_just_an_address() {
-        assert_eq!(
-            parse_from("Rob Castro <rob@example.com>"),
-            ("Rob Castro".to_owned(), "rob@example.com".to_owned())
-        );
-        assert_eq!(
-            parse_from("\"Castro, Rob\" <rob@example.com>"),
-            ("Castro, Rob".to_owned(), "rob@example.com".to_owned())
-        );
-        assert_eq!(parse_from("  <rob@example.com> "), (String::new(), "rob@example.com".to_owned()));
-        assert_eq!(parse_from("rob@example.com"), (String::new(), "rob@example.com".to_owned()));
-        // Nothing to write to is nobody to suggest.
-        assert_eq!(parse_from("Mailer Daemon"), ("".to_owned(), String::new()));
-    }
-
-    #[test]
-    fn a_gmail_message_becomes_one_candidate_unless_its_sender_is_already_known() {
-        let message = json!({
-            "id": "18f2a0b1",
-            "payload": { "headers": [
-                { "name": "From", "value": "Joey Locker <joey@example.com>" },
-                { "name": "Date", "value": "Tue, 4 Aug 2026 09:12:00 -0500" },
-            ] },
-        });
-        let candidate = message_candidate(&message, &BTreeSet::new()).expect("a new sender");
-        assert_eq!(candidate.name, "Joey Locker");
-        assert_eq!(candidate.email.as_deref(), Some("joey@example.com"));
-        assert_eq!(candidate.where_seen, "Gmail: message from Tue, 4 Aug 2026 09:12:00 -0500");
-        assert_eq!(candidate.last.as_deref(), Some("Tue, 4 Aug 2026 09:12:00 -0500"));
-
-        let known: BTreeSet<String> = ["joey@example.com".to_owned()].into_iter().collect();
-        assert!(message_candidate(&message, &known).is_none());
-        // No From at all: nothing to suggest, and nothing to crash on.
-        assert!(message_candidate(&json!({ "payload": { "headers": [] } }), &known).is_none());
-    }
-
-    #[test]
-    fn one_person_seen_in_two_places_is_one_candidate() {
-        let mut found = vec![
-            Candidate {
-                name: "Joey".to_owned(),
-                email: Some("Joey@Example.com".to_owned()),
-                phone: None,
-                where_seen: "Messages chat \"agstaff\"".to_owned(),
-                last: None,
-            },
-            Candidate {
-                name: "Joey Locker".to_owned(),
-                email: Some("joey@example.com".to_owned()),
-                phone: None,
-                where_seen: "Gmail: message from Tue, 4 Aug 2026".to_owned(),
-                last: None,
-            },
-        ];
-        dedupe(&mut found);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].where_seen, "Messages chat \"agstaff\"", "the first sighting wins");
-    }
-
-    #[test]
-    fn warmth_reads_as_a_count_and_one_word_of_age() {
-        assert_eq!(seen_label(None), None);
-        assert_eq!(short_age(30), "now");
-        assert_eq!(short_age(2 * 3600), "2h ago");
-        assert_eq!(short_age(2 * 86_400), "2d ago");
-        assert_eq!(short_age(3 * 7 * 86_400), "3w ago");
-        // An unreadable stamp survives as itself rather than as "now".
-        let broken = Seen { count: 3, last: "whenever".to_owned() };
-        assert_eq!(seen_label(Some(&broken)).as_deref(), Some("3× · whenever"));
-    }
-
-    #[test]
     fn describe_names_a_person_by_their_name_and_falls_back_to_their_id() {
         let members = vec![
             json!({ "id": "rob", "name": "Rob Castro", "phones": 1, "emails": 1 }),
             json!({ "id": "agstaff-2", "name": "", "phones": 1, "emails": 0 }),
         ];
         assert_eq!(
-            describe(&members),
+            describe(&members, "2026-08-23T12:00:00Z"),
             "Rob Castro (1 phone/1 email), agstaff-2 (1 phone/0 email)"
         );
-        assert_eq!(describe(&[]), "nobody");
+        assert_eq!(describe(&[], "2026-08-23T12:00:00Z"), "nobody");
+
+        // And the warmth beside a name is people-core's one spelling of it.
+        let warm = vec![json!({
+            "id": "rob", "name": "Rob", "phones": 1, "emails": 0,
+            "seen": { "count": 3, "last": "2026-08-21T12:00:00Z" },
+        })];
+        assert_eq!(
+            describe(&warm, "2026-08-23T12:00:00Z"),
+            "Rob (1 phone/0 email) · 3× · 2d ago"
+        );
     }
 }
