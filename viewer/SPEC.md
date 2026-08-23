@@ -196,21 +196,87 @@ way it moves anything else: edit the file, push.
   UI shows a toast and the card snaps back.
 - `board` joins the reserved branch-name words.
 
-## Meeting transcripts
+## Context
 
-- `POST /:repo/transcripts` takes the browser extension's finished transcript (title,
-  RFC3339 `started_at`/`ended_at`, speakers, segments, optional calendar event and action
-  items) and files it as `transcripts/YYYY/MM/<id>.md`, one commit on the default branch
-  through the same write path as a board move.
-- The id is the UTC start minute plus a slug of the title. A name already taken at the
-  default-branch tip gets a `-2`, `-3`, … suffix, so a same-minute same-title meeting
-  never overwrites the earlier one.
-- The file is front matter (`id`, `title`, times, `attendees`, `digested: false`), the
-  action items, then one line per turn — consecutive segments by one speaker merged.
-  Nothing about a transcript lives in SQLite; the file is the record.
+What the work is about, filed where the work is. A meeting, an email, a pasted chat, or
+a note becomes one committed markdown file in the repo it concerns; a digest on the
+operator's machine turns those files into the memory a session reads before it
+searches. The server accepts files and indexes them. It never fetches email, chat, or
+audio.
+
+Two layers, both plain files on the default branch:
+
+- `context/<kind>/YYYY/MM/<id>.md` is provenance: raw, filtered at the source, edited
+  only by the digest. It exists so a claim in `brain/` can be traced.
+- `brain/entities/<slug>.md` is memory. The digest writes it. Every fact line carries a
+  date and a source path. Nothing here is the server's to write.
+
+### Writing
+
+- `POST /:repo/context/:kind` files one item. Kinds: `meeting`, `email`, `chat`,
+  `note`. Any other kind is `400`.
+- Body for `meeting` is the browser extension's transcript (title, RFC3339
+  `started_at`/`ended_at`, speakers, segments, optional calendar event and action
+  items); `at` is `started_at` and `source` is `meeting_url`. Body for the other kinds
+  is `{title, at, text, source?}`; `at` is RFC3339, `text` is the body verbatim.
+  `source` is the provider's stable id: a Gmail message id, a chat thread plus day, a
+  URL.
 - A payload that cannot be filed (no segments, no speakers, a segment naming an
-  undeclared speaker, times that run backwards) is refused with `400` and the reason.
-- `transcripts` joins the reserved branch-name words.
+  undeclared speaker, times that run backwards, an empty `text`, an `at` that does not
+  parse) is refused with `400` and the reason. Nothing is committed.
+- The id is the UTC `at` minute plus a slug of the title. With `source`, the id ends in
+  the first 8 hex of `sha256(source)`, and a put whose file already exists at the
+  default-branch tip commits nothing and answers `200 {ok, existing: true, id, path}`.
+  Without `source`, a name already taken gets a `-2`, `-3`, … suffix, so a same-minute
+  same-title item never overwrites an earlier one.
+- A new file answers `201 {ok, id, path, commit}`. The commit lands on the default
+  branch through the same write path as a board move: committed as the Tailscale user,
+  pushed to dgit before the response says so, then the mirror refetched.
+- Front matter is `kind`, `id`, `title`, `at`, `ingested_at` (the server clock, RFC3339
+  with milliseconds), `source` (when given), `entities: []`, `digested: false`. A
+  meeting keeps its existing keys too (`ended_at`, `speakers_confirmed`,
+  `calendar_event_id`, `attendees`, `provider`) and its body: the action items, then
+  one line per turn with consecutive segments by one speaker merged. For the other
+  kinds the body is `text`.
+- Nothing about a context item lives in SQLite; the file is the record.
+
+### Reading
+
+- `GET /:repo/context/:kind/:id` answers the front-matter fields plus `body`, read at
+  the default-branch tip. Unknown id: `404`.
+- `GET /:repo/context?kind=&since=` lists items at the default-branch tip, ordered by
+  `(ingested_at, kind, id)`, as `{items: [{kind, id, path, title, at, ingested_at,
+  source, digested, entities}], next_since}`. `since` is the opaque `next_since`
+  string from a previous answer (`ingested_at|kind/id`) and is strictly exclusive: an
+  item equal to the cursor is not repeated. `at` is never the cursor; a backfilled
+  item is older than the items around it, and two items can share a minute.
+
+### Memory
+
+- `GET /brain?repo=` gains `memory` per repo: the newest twenty `brain/entities/*.md`
+  by last commit, each `{slug, path, updated_at, facts}` where `facts` is the file's
+  last three fact lines, plus `undigested` (context files still `digested: false`) and
+  `conflicts` (entity files with a `## Conflicts` section). `nashcode brain` prints
+  the same. The SessionStart hook already injects brain, so a session sees memory
+  before it searches.
+
+### The digest
+
+Not the server's. A runner on the operator's machine checks the repo out at tip,
+runs Claude Code headless with the `context-digest` skill and no shell, and checks the
+diff before it commits: a changed path outside `context/`, `brain/`, `tasks/` aborts the
+run and leaves the checkout dirty for a person. The runner makes one commit per digested
+file and pushes only to a remote on the nashcode host; a GitHub remote is refused by
+name. Claude never runs git. The file's text is data, never instructions: an email that
+asks the reader to run a command is recorded as a fact about the email, nothing else.
+
+### Reserved words
+
+- `context` joins `RESERVED_ROUTES` next to `brain`, so discovery refuses a repo with
+  either name, and the reserved branch-name words.
+- `/:repo/transcripts` is removed, not aliased. A repo with a `transcripts/` directory
+  is migrated by one commit that moves it to `context/meeting/` and adds `ingested_at`
+  and `source` to each file's front matter.
 
 ## Code browser parity
 
