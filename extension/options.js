@@ -1,3 +1,4 @@
+import { repoNames } from './lib/brain.js';
 import { getConfig, setConfig, setXaiKey } from './lib/config.js';
 import { listCalendars } from './lib/calendar.js';
 
@@ -214,10 +215,6 @@ async function checkService(base) {
   }
 }
 
-/// Repo names out of GET /brain — `{ generated_at, repos: [{ name, ... }] }`.
-export function repoNames(brain) {
-  return (brain?.repos || []).map((r) => r?.name).filter(Boolean).sort();
-}
 
 function renderRepoOptions(names) {
   const list = document.getElementById('repoList');

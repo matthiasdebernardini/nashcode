@@ -11,6 +11,7 @@ import { getConfig } from './lib/config.js';
 import { getSession, channelSegments, deleteSession } from './lib/recorder-db.js';
 import { transcribeSegmented } from './lib/transcribe.js';
 import { findOverlappingEvent } from './lib/calendar.js';
+import { repoNames } from './lib/brain.js';
 import {
   mergeChannels,
   prefillSpeakers,
@@ -165,6 +166,19 @@ function render() {
       : 'no calendar event found — add a title and the names below (or skip)',
   );
   document.getElementById('actions').style.display = 'flex';
+  // Settings prefill; the live repo list from /brain fills the dropdown.
+  document.getElementById('repo').value = state.cfg.repo || '';
+  fetch(`${state.cfg.viewerBase}/brain`, { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((brain) => {
+      const list = document.getElementById('repoList');
+      for (const name of repoNames(brain)) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        list.appendChild(opt);
+      }
+    })
+    .catch(() => {});
 }
 
 // The "what was this meeting?" box — only when no calendar event supplied a
@@ -272,14 +286,17 @@ async function file(assignments) {
     manualTitle,
   });
 
-  if (!cfg.repo) {
-    phase('no nashcode repo set — open nashmeet Settings and pick one, then reload', true);
+  // Each meeting is filed in the repo it concerns, so the repo is chosen here,
+  // per meeting. Settings only prefill the box.
+  const repo = document.getElementById('repo').value.trim().replace(/^\/+|\/+$/g, '');
+  if (!repo) {
+    phase('pick the nashcode repo this meeting belongs to', true);
     return;
   }
 
   try {
     phase('filing transcript…');
-    const r = await fetch(`${cfg.viewerBase}/${encodeURIComponent(cfg.repo)}/context/meeting`, {
+    const r = await fetch(`${cfg.viewerBase}/${encodeURIComponent(repo)}/context/meeting`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
@@ -304,9 +321,9 @@ async function file(assignments) {
       ? `Already filed: ${filed.path}`
       : `Filed: ${filed.path} (commit ${String(filed.commit || '').slice(0, 7)})`;
     const link = document.createElement('a');
-    link.href = `${cfg.viewerBase}/${encodeURIComponent(cfg.repo)}`;
+    link.href = `${cfg.viewerBase}/${encodeURIComponent(repo)}`;
     link.target = '_blank';
-    link.textContent = `open ${cfg.repo} in nashcode`;
+    link.textContent = `open ${repo} in nashcode`;
     result.appendChild(document.createElement('br'));
     result.appendChild(link);
   } catch (e) {

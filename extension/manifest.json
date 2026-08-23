@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyzJ0mj3Pe/Qml4KV7iFjgfYFPPTdOeGrTe5bNh/5hctn+WFIUlgxaU1tmWLP/05Ch6csVVuom33gaqX2j3fjRJGm1AsvtBg6ySZUGcdZBUXsV1CZJrtIlviqbRzftBQKaOqm10cIborQiL8Ml27i6GSKbbjpwREyWYoBPfLARg1oUJs9ZQuYPdOPIfZzJU4T8tcRtuDG1xa3fGvXWhFyMpfF3h08ujiA1E4xxNMWZHJMZnsH3vQqtJNqA3Z/vD9kk8+sSL3WAo0k61m0QTgCYvxNA3KqaZpK95w1HX2TyhE1YjMkfaJYt9LIqUXVTaWKBdAG8bsQITGhSCnmghGsuQIDAQAB",
   "name": "nashmeet",
   "version": "0.1.0",
   "description": "Records a meeting's tab + mic, transcribes it, labels speakers from Google Calendar — filed as a markdown transcript into a nashcode repo.",

@@ -16,15 +16,13 @@ the transcript is filed.
 
 1. Open chrome://extensions and turn on Developer mode.
 2. Click "Load unpacked" and select this directory.
-3. Copy the extension ID that Chrome assigns.
-4. Add that ID to the Google OAuth client at https://console.cloud.google.com/auth/clients — the client ID in `manifest.json` is the `agmeet` one and it is reused here.
-5. Reload the extension at chrome://extensions.
-6. Open the extension options and fill them in (below).
+3. Remove `agmeet` first if it is installed: `manifest.json` carries agmeet's `key`, so nashmeet gets the same extension ID as the Web Store item (`cabdfdffhdiepaabipojbcgakhiimdhk`), and Chrome refuses two extensions with one ID. Same ID means the existing Google OAuth client already matches; nothing to change in the Google console.
+4. Open the extension options and fill them in (below).
 
 ## Options
 
 1. **nashcode viewer URL** — defaults to https://nashcode.tail76ec53.ts.net:8443. Green means reachable.
-2. **Repo** — the nashcode repo to file into. The field offers the live repo list from the viewer.
+2. **Repo** — the default repo to file into. Optional: the post-meeting screen asks which repo each meeting belongs to, prefilled with this.
 3. **xAI API key** — get one at https://console.x.ai. Required. It stays on this computer.
 4. **Grant microphone access** — click it once. Chrome only lets this page ask.
 5. **Sign in with Google** — then tick the calendars to search for the meeting event.

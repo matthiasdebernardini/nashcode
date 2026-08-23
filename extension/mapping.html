@@ -65,6 +65,10 @@
   <div id="context"></div>
   <div id="cards"></div>
   <div id="actions" style="display:none">
+    <label for="repo">File into repo</label>
+    <input type="text" id="repo" list="repoList" spellcheck="false" autocapitalize="off"
+           placeholder="repo name (e.g. nashcode)" />
+    <datalist id="repoList"></datalist>
     <button class="big primary" id="confirm">Confirm &amp; file transcript</button>
     <button class="big" id="skip">Skip — file with Speaker 1/2 labels</button>
   </div>
