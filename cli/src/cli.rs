@@ -312,16 +312,23 @@ and projects. A person has an id, a name, phones in E.164, and emails. A project
 has an id, a folder, an optional nashcode repo, and the ids of the people who ask
 about it. Nothing else joins a phone number to a project.
 
-  ls      every project, who is in it, and who is in no project.
-  route   which project these contacts are about, best first.
-  push    give the viewer a copy, so the meeting extension can ask too.
-  check   everything wrong with the file. Non-zero when there is anything.
-  import  build the file once from the old per-inbox lists. One-shot.
+  ls            every project, who is in it, and who is in no project.
+  route         which project these contacts are about, best first.
+  sync-folders  one project per client folder under a directory.
+  suggest       who else writes about a project, from Messages and Gmail.
+  seen          count one match against a person or a project.
+  push          give the viewer a copy, so the meeting extension can ask too.
+  check         everything wrong with the file. Non-zero when there is anything.
+  import        build the file once from the old per-inbox lists. One-shot.
 
 Routing is one rule: a project scores one point per distinct person any contact
 matches, by email or by phone. Equal scores keep file order and come back with
 tie: true, which means nothing here decides — ask a human. Your own addresses
 never score.
+
+Every list is ordered by frecency, never alphabetically: each person and project
+carries seen: {count, last}, and the order is the count halved for every two
+weeks since it last matched. `seen` writes that; `ls` reads it.
 
 The file stays on this machine. `push` sends the viewer a copy so a browser can
 ask the same question; the viewer has no route that hands it back.";
@@ -651,6 +658,25 @@ pub struct PeopleCheckArgs {
 pub struct PeopleImportArgs {
     pub routes: Option<String>,
     pub context: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct PeopleSyncFoldersArgs {
+    pub dir: String,
+    pub write: bool,
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct PeopleSuggestArgs {
+    pub project: Option<String>,
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct PeopleSeenArgs {
+    pub id: String,
+    pub file: Option<String>,
 }
 
 // --- the handler boundary ---------------------------------------------------
@@ -1536,6 +1562,112 @@ fn people_command() -> Command {
                         "nashcode people push",
                         "Give the viewer the file it will answer from",
                     )))
+                })
+            }),
+        )
+        .subcommand(
+            Command::new(
+                "sync-folders",
+                "One project per child directory, so the client folders are the \
+                 project list.\n\n\
+                 Each directory gives a project its id (the slug of the name), its \
+                 name, its folder, and its repo when the folder's git origin is on \
+                 the forge — a GitHub origin gives no repo, because this file is for \
+                 the private one. The `skip` list in the file passes over names like \
+                 `deploy-*` and `*-backups`. Nothing is ever removed and nothing \
+                 already written is changed, so re-run it whenever a client folder \
+                 appears.\n\n\
+                 Without --write it prints what it would add and writes nothing.",
+            )
+            .usage("nashcode people sync-folders <dir> [--write] [--file <path>]")
+            .handler(|req, _ctx| {
+                let ctx = context(req);
+                let args = PeopleSyncFoldersArgs {
+                    dir: req.arg(0).unwrap_or_default().to_string(),
+                    write: on(req, "write"),
+                    file: text(req, "file"),
+                };
+                Box::pin(async move {
+                    if args.dir.trim().is_empty() {
+                        return Err(misuse(
+                            "name the directory the client folders are in",
+                            "nashcode people sync-folders ~/NashvilleAutomation",
+                        ));
+                    }
+                    let wrote = args.write;
+                    let value = people::sync_folders(&ctx, &args)
+                        .map_err(|e| oops(e, "nashcode people ls"))?;
+                    Ok(CommandOutput::new(value).next_action(NextAction::new(
+                        if wrote { "nashcode people suggest" } else { "nashcode people check" },
+                        if wrote {
+                            "Find the people who already write about the new projects"
+                        } else {
+                            "Read the list, then run it again with --write"
+                        },
+                    )))
+                })
+            }),
+        )
+        .subcommand(
+            Command::new(
+                "suggest",
+                "Who else writes about a project, from where they already wrote.\n\n\
+                 Two sources, and it writes nothing: a Messages chat whose name \
+                 contains the project's name or id offers its participants, and the \
+                 newest 25 Gmail messages of the last year that name the project \
+                 offer their From: addresses. Anybody already in the file, and every \
+                 address of your own, is left out.\n\n\
+                 The Gmail search sends the project's NAME as the query and nothing \
+                 else — no number and no address leaves this machine. Messages is \
+                 read locally by `imsg`. A missing `imsg` or `gws` empties that one \
+                 source and says so on stderr.\n\n\
+                 Accepting a suggestion is yours to do: add the person with an \
+                 editor or in the desktop app.",
+            )
+            .usage("nashcode people suggest [--project <id>] [--file <path>]")
+            .handler(|req, _ctx| {
+                let ctx = context(req);
+                let args = PeopleSuggestArgs {
+                    project: text(req, "project"),
+                    file: text(req, "file"),
+                };
+                Box::pin(async move {
+                    let value = people::suggest(&ctx, &args)
+                        .map_err(|e| oops(e, "nashcode people ls"))?;
+                    Ok(CommandOutput::new(value).next_action(NextAction::new(
+                        "nashcode people check",
+                        "Add the ones you recognise to the file, then check it",
+                    )))
+                })
+            }),
+        )
+        .subcommand(
+            Command::new(
+                "seen",
+                "Count one match against a person or a project, and save.\n\n\
+                 This is what makes every list warmest first: `seen` is a count and \
+                 the time of the last match, and the order is the count halved for \
+                 every two weeks since. The routers call this when they file a \
+                 message. A person id and a project id are different names, so an id \
+                 that is both bumps both.",
+            )
+            .usage("nashcode people seen <person-or-project-id> [--file <path>]")
+            .handler(|req, _ctx| {
+                let ctx = context(req);
+                let args = PeopleSeenArgs {
+                    id: req.arg(0).unwrap_or_default().to_string(),
+                    file: text(req, "file"),
+                };
+                Box::pin(async move {
+                    if args.id.trim().is_empty() {
+                        return Err(misuse(
+                            "name a person or a project",
+                            "nashcode people seen agstaff",
+                        ));
+                    }
+                    let value =
+                        people::seen(&ctx, &args).map_err(|e| oops(e, "nashcode people ls"))?;
+                    Ok(CommandOutput::new(value))
                 })
             }),
         )

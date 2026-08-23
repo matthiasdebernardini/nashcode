@@ -5,18 +5,62 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 /// The whole file.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Eq` is gone from this family of types because [`Person::extra`] holds arbitrary
+/// JSON and a JSON number is a float: two files still compare with `==`, they just do
+/// not promise reflexivity over a `NaN` somebody typed by hand.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PeopleFile {
     /// The operator's own emails and phones. They never score, so a thread the
     /// operator is on does not match every project they belong to.
     pub me: Vec<String>,
+    /// Directory names `sync-folders` passes over. An exact name, or one `*`:
+    /// `deploy-*`, `*-backups`. Compared without case, because the operator types
+    /// these and the disk under them does not care either.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skip: Vec<String>,
     pub people: Vec<Person>,
     pub projects: Vec<Project>,
+    /// Keys nothing here models. See [`Person::extra`].
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// How often something was the answer, and when it last was.
+///
+/// It lives in the file rather than in a database beside it because the file is the
+/// only thing every consumer already reads: the routers, the CLI, and the desktop app
+/// each learn what is warm from the same three lines, and a machine that copies
+/// `people.json` copies the order with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Seen {
+    /// How many times it has matched.
+    pub count: u64,
+    /// RFC 3339, the last time it did.
+    pub last: String,
+}
+
+impl Seen {
+    /// One more match, now.
+    ///
+    /// Takes the slot rather than the value so a caller with `Option<Seen>` — which is
+    /// every caller, because a thing nobody has seen yet has no `seen` key — does not
+    /// write the "first time" branch again.
+    pub fn bump(slot: &mut Option<Self>, now: &str) {
+        match slot {
+            Some(seen) => {
+                seen.count = seen.count.saturating_add(1);
+                seen.last = now.to_owned();
+            }
+            None => *slot = Some(Self { count: 1, last: now.to_owned() }),
+        }
+    }
 }
 
 /// One human. `id` is the join key a project refers to.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Person {
     pub id: String,
@@ -24,11 +68,29 @@ pub struct Person {
     /// E.164, e.g. `+15550001111`.
     pub phones: Vec<String>,
     pub emails: Vec<String>,
+    /// The first number in `phones` is also this person's Signal number. Signal is a
+    /// third handle kind for a router that does not exist yet, not a third list: the
+    /// number is already written down, and this says what else it reaches.
+    #[serde(skip_serializing_if = "is_false")]
+    pub signal: bool,
+    /// How often this person has been matched, and when last. Absent until something
+    /// matches them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seen: Option<Seen>,
+    /// Every key on this person that nothing here models, kept as it was written.
+    ///
+    /// The file is hand-editable, so it is allowed to carry more than the code knows
+    /// about — a `"notes"` on a project, a `"schema_version"` at the top. A save that
+    /// dropped those would punish the operator for writing them, so they are parked
+    /// here on load and written back on save. An empty map serialises to nothing, so a
+    /// file that never had a stray key never gains one.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// One project: a folder to file into, the people who ask about it, and what each
 /// inbox needs to know.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Project {
     pub id: String,
@@ -44,27 +106,41 @@ pub struct Project {
     pub chat_ids: Vec<String>,
     pub imsg: Imsg,
     pub email: Email,
+    /// How often this project has been the answer, and when last.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seen: Option<Seen>,
+    /// Keys nothing here models. See [`Person::extra`].
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// What the iMessage router needs per project.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Imsg {
     pub prompt: String,
     pub enrich: bool,
     pub media_only: bool,
+    /// Keys nothing here models. See [`Person::extra`].
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Enrichment on, media-only off: the settings a new project wants, so a project
 /// added by hand with no `imsg` block behaves like the ones already there.
 impl Default for Imsg {
     fn default() -> Self {
-        Self { prompt: String::new(), enrich: true, media_only: false }
+        Self {
+            prompt: String::new(),
+            enrich: true,
+            media_only: false,
+            extra: serde_json::Map::new(),
+        }
     }
 }
 
 /// What the email pusher needs per project.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Email {
     /// The mailbox to search. It is the operator's own address, so it never scores.
@@ -72,6 +148,9 @@ pub struct Email {
     /// A hand-written Gmail query that replaces the one built from the project's
     /// people.
     pub query: Option<String>,
+    /// Keys nothing here models. See [`Person::extra`].
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// One thing wrong with the file, in a sentence a person can act on.
@@ -141,6 +220,16 @@ impl PeopleFile {
                         label(&person.id, &person.name)
                     )));
                 }
+            }
+            // Signal says "the number in `phones` is also Signal". With no number it
+            // says nothing at all, and it will keep saying nothing after a Signal
+            // router exists.
+            if person.signal && person.phones.is_empty() {
+                findings.push(Finding::warn(format!(
+                    "{:?} is marked signal: true but has no phone; Signal marks the number in \
+                     `phones`, so give them one or drop the flag",
+                    label(&person.id, &person.name)
+                )));
             }
         }
 
@@ -220,10 +309,38 @@ impl PeopleFile {
         findings
     }
 
+    /// One more match for this person, now. `false` when no person has that id.
+    pub fn bump_person(&mut self, id: &str, now: &str) -> bool {
+        match self.people.iter_mut().find(|person| person.id == id) {
+            Some(person) => {
+                Seen::bump(&mut person.seen, now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// One more match for this project, now. `false` when no project has that id.
+    pub fn bump_project(&mut self, id: &str, now: &str) -> bool {
+        match self.projects.iter_mut().find(|project| project.id == id) {
+            Some(project) => {
+                Seen::bump(&mut project.seen, now);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The file as it is written to disk: two-space JSON, fields in struct order.
     pub fn to_pretty_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_owned())
     }
+}
+
+/// `false` is the absence of a flag, so it is not written down. serde needs a path,
+/// not a closure, which is why this is a function and not `|flag| !flag`.
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 /// `^\+[1-9]\d{1,14}$`, checked by hand rather than by pulling in a regex engine for
@@ -401,9 +518,84 @@ mod tests {
 
     #[test]
     fn the_written_file_reads_back_the_same() {
-        let file = crate::route::tests::fixture();
+        let mut file = crate::route::tests::fixture();
+        file.skip = vec!["deploy-*".to_owned(), "*-backups".to_owned()];
+        file.people[0].signal = true;
+        file.people[0].seen = Some(Seen { count: 3, last: "2026-08-21T09:00:00Z".to_owned() });
+        file.projects[0].seen = Some(Seen { count: 9, last: "2026-08-23T09:00:00Z".to_owned() });
+
         let text = file.to_pretty_json();
         assert!(text.contains("  \"me\": ["), "two-space indent: {text}");
+        assert!(text.contains("\"signal\": true"), "{text}");
+        assert!(text.contains("\"count\": 3"), "{text}");
         assert_eq!(PeopleFile::parse(&text).expect("round trip"), file);
+    }
+
+    #[test]
+    fn the_keys_nobody_set_are_not_written_at_all() {
+        // An untouched file gains no `signal`, no `seen`, no `skip`: a key that means
+        // "false" or "never" is noise in a file a person edits by hand.
+        let text = crate::route::tests::fixture().to_pretty_json();
+        assert!(!text.contains("\"signal\""), "{text}");
+        assert!(!text.contains("\"seen\""), "{text}");
+        assert!(!text.contains("\"skip\""), "{text}");
+    }
+
+    #[test]
+    fn a_key_nothing_here_models_survives_load_and_save() {
+        // The file is hand-editable, so it is allowed to say more than this code
+        // reads. Dropping the extra on save would teach the operator not to write in
+        // their own file.
+        let written = r#"{
+          "schema_version": 2,
+          "people": [ { "id": "rob", "name": "Rob Castro", "emails": ["rob@example.com"],
+                        "birthday": "1990-01-01" } ],
+          "projects": [ { "id": "agstaff", "people": ["rob"], "notes": "pays late",
+                          "imsg": { "prompt": "file it", "attachments": true },
+                          "email": { "account": "me@example.com", "label": "clients" } } ]
+        }"#;
+        let file = PeopleFile::parse(written).expect("stray keys are not an error");
+        assert_eq!(file.extra["schema_version"], serde_json::json!(2));
+        assert_eq!(file.people[0].extra["birthday"], serde_json::json!("1990-01-01"));
+        assert_eq!(file.projects[0].extra["notes"], serde_json::json!("pays late"));
+        assert_eq!(file.projects[0].imsg.extra["attachments"], serde_json::json!(true));
+        assert_eq!(file.projects[0].email.extra["label"], serde_json::json!("clients"));
+
+        let again = PeopleFile::parse(&file.to_pretty_json()).expect("and it is still a file");
+        assert_eq!(again, file, "load -> save -> load kept every key");
+        assert!(file.to_pretty_json().contains("\"pays late\""));
+    }
+
+    #[test]
+    fn a_signal_flag_with_no_number_marks_nothing() {
+        let file = PeopleFile::parse(
+            r#"{ "people": [ { "id": "david", "name": "David Reed", "signal": true,
+                               "emails": ["david@example.com"] } ],
+                 "projects": [ { "id": "p", "people": ["david"] } ] }"#,
+        )
+        .expect("it loads; the flag is merely empty");
+        let findings = file.validate();
+        assert!(
+            findings
+                .iter()
+                .any(|f| !f.fatal && f.text.contains("signal: true") && f.text.contains("David Reed")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_bump_counts_the_first_match_and_every_one_after_it() {
+        let mut file = crate::route::tests::fixture();
+        assert!(file.bump_person("rob", "2026-08-20T10:00:00Z"));
+        assert_eq!(file.people[0].seen, Some(Seen { count: 1, last: "2026-08-20T10:00:00Z".into() }));
+        assert!(file.bump_person("rob", "2026-08-23T10:00:00Z"));
+        assert_eq!(file.people[0].seen, Some(Seen { count: 2, last: "2026-08-23T10:00:00Z".into() }));
+
+        assert!(file.bump_project("acres", "2026-08-23T10:00:00Z"));
+        assert_eq!(file.projects[1].seen.as_ref().map(|seen| seen.count), Some(1));
+
+        // An id nobody has says so rather than inventing a row.
+        assert!(!file.bump_person("nobody", "2026-08-23T10:00:00Z"));
+        assert!(!file.bump_project("nobody", "2026-08-23T10:00:00Z"));
     }
 }

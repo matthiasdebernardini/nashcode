@@ -23,6 +23,8 @@
 //! match — means the file loads and something in it will never do its job.
 //! `nashcode people check` prints both and exits non-zero for either.
 
+pub mod folders;
+pub mod frecency;
 pub mod io;
 pub mod map;
 pub mod model;
@@ -31,9 +33,11 @@ pub mod route;
 #[cfg(feature = "client")]
 pub mod client;
 
+pub use folders::{SyncReport, slug, unique_id};
+pub use frecency::{HALF_LIFE_DAYS, by_frecency, frecency};
 pub use io::{Pushed, default_path};
 pub use map::{ContactKind, ContactRow, contact_map};
-pub use model::{Email, Finding, Imsg, PeopleFile, Person, Project, is_e164};
+pub use model::{Email, Finding, Imsg, PeopleFile, Person, Project, Seen, is_e164};
 pub use route::{Contact, Match, Routing, normalize};
 
 #[cfg(feature = "client")]

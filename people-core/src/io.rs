@@ -29,7 +29,7 @@ impl PeopleFile {
 ///
 /// The viewer stores the wrapper rather than the bare file so that `/brain` can say
 /// how fresh its copy is without a second file to keep in step with the first.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Pushed {
     /// RFC3339, the moment of the push.

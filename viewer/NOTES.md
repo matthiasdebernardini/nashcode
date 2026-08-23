@@ -2265,6 +2265,30 @@ is the slug of it — the id is ours to choose, the repo name was chosen at push
 has the same problem one layer down: the typed query accessor deserializes one value per
 key, so `/people/route` parses the query string as a list of pairs.
 
+**Frecency's half-life is fourteen days, `seen` lives in the file, and `suggest` sends
+one word.** Every list of people and projects orders by `count` halved for every
+fortnight since `last` — never alphabetically, because with thirty-five client folders
+alphabetical buries the client who wrote this morning. Fourteen days is the interval a
+client goes quiet over without being gone; nothing is tuned to a corpus, because there
+is no corpus, and an order a person has to trust is one they can predict in their head.
+An unreadable `last` scores zero rather than "fresh", so a broken stamp sinks instead of
+floating to the top of every list. `seen` lives in `people.json` and not in a database
+beside it because the file is the only thing every consumer already reads: the routers,
+the CLI, and the desktop app learn what is warm from the same three lines, and copying
+the file copies the order. `suggest` sends the project's *name* to Gmail as the search
+query and nothing else — no number, no address, nothing else out of the file — and sends
+nothing at all to Messages, which `imsg` reads locally; both answers are compared against
+the file on this machine. It writes nothing: accepting a suggestion is the operator's
+act.
+
+**The model keeps the keys it does not know.** `PeopleFile`, `Person`, `Project`, `Imsg`
+and `Email` each carry a `#[serde(flatten)] extra`, so a hand-added `"notes"` on a
+project or a `"schema_version"` at the top survives load → save → load. An empty map
+serialises to nothing, so a file that never had a stray key never gains one. The price is
+`Eq`: `serde_json::Value` is `PartialEq` only, so that derive is gone from those types
+and from `Pushed`. `signal` and `seen` are skipped when they are false and absent for the
+same reason — a file a person edits should not fill up with keys that mean "no".
+
 **`push` sends no credential.** The viewer authenticates through Tailscale's identity
 headers, the way every other viewer call in this CLI does, and the profile's token is
 dgit's. `people_core::push` takes a token for the day that changes and sends it as the
