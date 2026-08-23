@@ -8,6 +8,10 @@
 # changed path outside context/, brain/ or tasks/ aborts the run and leaves the
 # checkout dirty for a person.
 #
+# After the digest and before the push, still inside the lock, `bin/context-tasks`
+# mirrors the claimed cards to the operator's Google Tasks list and the list back to
+# the cards, so its commits travel with the digest's.
+#
 # The push is fenced by `host` in the config, which is the only host this will ever
 # push to. github.com is refused by name: client code lives there, and context/ and
 # brain/ are exactly what must not.
@@ -27,6 +31,7 @@ NASHCODE_HOME="${NASHCODE_HOME:-$HOME/.nashcode}"
 CONFIG="$NASHCODE_HOME/context.toml"
 CHECKOUTS="$NASHCODE_HOME/checkouts"
 STATE="$NASHCODE_HOME/state"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die() { printf 'context-digest: %s\n' "$*" >&2; exit 1; }
 say() { printf 'context-digest: %s\n' "$*"; }
@@ -183,6 +188,21 @@ digest_checkout() { # <dir> <label> <pull:yes|no>
   done
 }
 
+# The Google Tasks mirror, after the digest and before the push, inside this run's
+# lock. Its commits ride out on the same push. It failing is a nonzero exit for the
+# run and nothing more: the digest's commits are already made, and holding them back
+# because a task list could not be read would leave the checkout ahead of the server
+# for as long as Google was unhappy.
+sync_tasks() { # <dir> <label>
+  local dir="$1" label="$2"
+  cd "$dir"
+  if [ ! -x "$HERE/context-tasks" ]; then
+    say "$label: $HERE/context-tasks is missing, so no cards were mirrored"
+    return 1
+  fi
+  "$HERE/context-tasks" "$dir" "$label"
+}
+
 push_checkout() { # <dir> <label>
   cd "$1"
   local label="$2" url host
@@ -227,7 +247,10 @@ run_repo() { # <repo>
   # otherwise clone into the same directory at the same time.
   dir="$(ensure_checkout "$repo")"
   digest_checkout "$dir" "$repo" yes
+  local tasks=0
+  sync_tasks "$dir" "$repo" || tasks=1
   push_checkout "$dir" "$repo"
+  return "$tasks"
 }
 
 # --- what to run -------------------------------------------------------------------
@@ -246,8 +269,10 @@ if [ -n "$target" ] && [ -d "$target/.git" ]; then
     exit 0
   fi
   digest_checkout "$dir" "$label" no
+  tasks=0
+  sync_tasks "$dir" "$label" || tasks=1
   push_checkout "$dir" "$label"
-  exit 0
+  exit "$tasks"
 fi
 
 [ -f "$CONFIG" ] || die "no config at $CONFIG"
