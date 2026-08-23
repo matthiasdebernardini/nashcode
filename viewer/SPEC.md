@@ -341,8 +341,8 @@ the Mac's file and never hands the copy back out.
   with the time of the push; the same validation as the CLI, `400` and the reason on
   failure. Answers `{ok, people, projects, pushed_at}` with the two counts.
 - `GET /people/route?email=&phone=` (both repeatable) answers `{matches: [{project,
-  repo, folder, people: [ids], score}], tie}`. No contacts is `400`. Before any push
-  it answers `404 no people file`.
+  repo, folder, people: [ids], contacts: [the ones that matched], score}], tie}`. No
+  contacts is `400`. Before any push it answers `404 no people file`.
 - There is no `GET /people`. Client phones and emails stay on the Mac; the viewer only
   answers "which project". Reads are anonymous on the tailnet today, so the answer is
   already the least it can say: project ids, repo names, and who matched by id.
@@ -373,9 +373,12 @@ the Mac's file and never hands the copy back out.
   `me`, `tasklist`, `max_open`, `stale_days`), and the digest runner takes its repo
   list from the projects that have a `repo`.
 - **iMessage.** imsg-router reads the file and nothing else for routing. A project's
-  participants are the union of its people's phones. A chat id match wins over a
-  participant match; among participant matches the first project in file order wins.
-  The enrichment config lives in `~/.imsg-router/config.json`.
+  participants are the union of its people's phones and emails (an Apple ID handle is
+  an email), compared case-insensitively, minus anything in `me`. A chat id match
+  (the chat's row id in Messages) wins over a participant match; among participant
+  matches the first project in file order wins. A message that arrives before the file
+  exists waits; it is not marked handled. The enrichment config lives in
+  `~/.imsg-router/config.json`.
 - **Desktop.** `nashcode-people` (workspace member `people/`) shows projects and people
   side by side, edits them, saves the file, and pushes it. The last push time comes
   from brain. A third view is the contact map: every phone and email in the file, the
