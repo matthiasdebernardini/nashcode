@@ -2021,6 +2021,10 @@ caught up.
 everything but the path: the slug names the file, and `brain/entities/<slug>.md` is the
 whole of the mapping. Same rule the plan digest follows when it drops `summary`.
 
+**`updated_at` is the file's last author date, re-spelled in UTC.** `git log %aI` prints
+the author's own offset, and the runner commits in whatever zone the Mac is in; the
+newest-first sort compares the strings, so they are all normalised to `Z` first.
+
 **`facts` are the last three `- ` lines outside `## Conflicts`.** The conflicts section
 holds both sides of a disagreement the digest refused to settle; quoting one of them in
 `memory` as though it were a fact would be exactly the silent pick the digest avoided.

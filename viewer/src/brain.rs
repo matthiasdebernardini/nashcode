@@ -264,7 +264,8 @@ async fn memory_json(repo: &crate::git::Repo, tip: &str) -> serde_json::Value {
         }
         // Staleness is `git log` on the file, the way the plan asks: no stored date to
         // drift away from the commit that actually changed the fact.
-        let updated_at = repo.last_touched(tip, &path).await.ok().flatten().unwrap_or_default();
+        let updated_at =
+            utc(&repo.last_touched(tip, &path).await.ok().flatten().unwrap_or_default());
         let slug = path
             .rsplit('/')
             .next()
@@ -314,6 +315,16 @@ async fn memory_json(repo: &crate::git::Repo, tip: &str) -> serde_json::Value {
 
 const ENTITIES_DIR: &str = "brain/entities/";
 const CONTEXT_PREFIX: &str = "context/";
+
+/// Git prints the author's own offset (`%aI`); the brain speaks UTC everywhere else,
+/// and the newest-first sort compares these as strings, so they must share one offset.
+fn utc(stamp: &str) -> String {
+    use time::format_description::well_known::Rfc3339;
+    time::OffsetDateTime::parse(stamp, &Rfc3339)
+        .ok()
+        .and_then(|t| t.to_offset(time::UtcOffset::UTC).format(&Rfc3339).ok())
+        .unwrap_or_else(|| stamp.to_owned())
+}
 
 /// An entity file's last few fact lines, and whether it carries a `## Conflicts`
 /// section.

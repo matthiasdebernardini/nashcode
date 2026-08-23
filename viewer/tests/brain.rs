@@ -243,7 +243,11 @@ async fn memory_reports_the_entities_the_digest_wrote_and_what_is_still_undigest
     assert_eq!(entities.len(), 1, "{memory}");
     assert_eq!(entities[0]["slug"], "postgres-migration");
     assert_eq!(entities[0]["path"], "brain/entities/postgres-migration.md");
-    assert!(entities[0]["updated_at"].as_str().is_some_and(|at| at.contains('T')), "{memory}");
+    // UTC, whatever offset the committer was in: the sort compares these as strings.
+    assert!(
+        entities[0]["updated_at"].as_str().is_some_and(|at| at.contains('T') && at.ends_with('Z')),
+        "{memory}"
+    );
 
     // The last three facts, and nothing from `## Conflicts`: the digest refused to
     // pick a side there, so neither line is a fact to quote.
