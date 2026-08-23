@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Push filtered email into a nashcode repository as context.
 #
-# One [[source]] per client in ~/.nashcode/context.toml: which repo the mail is about,
-# which Google account to read it from, and the gws query that decides what counts.
-# Filtering happens here, at the source — the server never fetches mail, and a repo
-# full of everything is a repo nobody reads.
+# The projects in ~/.nashcode/people.json say what to read (NASHCODE_PEOPLE moves the
+# file). A project with a `repo` and an `email.account` is a source: mail is read from
+# that account and filed into that repo, and the query is built from the addresses of
+# the project's people unless the project's `email.query` names one instead. Filtering
+# happens here, at the source — the server never fetches mail, and a repo full of
+# everything is a repo nobody reads.
 #
 # Each message becomes one `nashcode context put email --source <gmail message id>`.
 # The source id makes the put idempotent, so a crash before the marker is written
@@ -13,12 +15,12 @@
 # This only lists and reads. It never sends mail, and it never replies to one.
 #
 # Usage:
-#   bin/context-email            every [[source]] in the config
-#   bin/context-email <repo>     just the sources for that repository
+#   bin/context-email            every project that names a repo and an email account
+#   bin/context-email <repo>     just the projects that file into that repository
 set -euo pipefail
 
 NASHCODE_HOME="${NASHCODE_HOME:-$HOME/.nashcode}"
-CONFIG="$NASHCODE_HOME/context.toml"
+PEOPLE="${NASHCODE_PEOPLE:-$NASHCODE_HOME/people.json}"
 STATE="$NASHCODE_HOME/state"
 
 # A message shorter than this is a "thanks", a calendar blip, or an auto-reply. It
@@ -31,25 +33,124 @@ FIRST_RUN_LOOKBACK=$((7 * 24 * 3600))
 
 die() { printf 'context-email: %s\n' "$*" >&2; exit 1; }
 say() { printf 'context-email: %s\n' "$*"; }
+# What the config did, and what it will ask Gmail. Neither is a result, so neither
+# belongs in the run's output.
+note() { printf 'context-email: %s\n' "$*" >&2; }
 
 command -v gws >/dev/null 2>&1 || die "gws is not on PATH"
 command -v nashcode >/dev/null 2>&1 || die "nashcode is not on PATH"
 command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH"
-[ -f "$CONFIG" ] || die "no config at $CONFIG"
+[ -f "$PEOPLE" ] || die "no people file at $PEOPLE"
 
 # --- config ------------------------------------------------------------------------
 
-sources() { # -> repo<TAB>account<TAB>query, one per line
-  python3 - "$CONFIG" <<'PY'
-import pathlib, sys, tomllib
+sources() { # -> project US repo US account US legacy US query, NUL after each record
+  python3 - "$PEOPLE" <<'PY'
+import json, pathlib, re, sys
 
-data = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
-for source in data.get("source", []):
-    repo = str(source.get("repo", "")).strip()
-    account = str(source.get("account", "")).strip()
-    query = str(source.get("query", "")).strip()
-    if repo and account and query:
-        print("\t".join((repo, account, query)))
+# A file that will not parse is a failure, not a run with no projects. One line, not
+# a traceback: this runs under launchd, and a hand-edited file is where the comma
+# goes missing.
+path = pathlib.Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text())
+except json.JSONDecodeError as problem:
+    print(f"context-email: {path} is not JSON: {problem}", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data, dict):
+    print(f"context-email: {path} is not a JSON object", file=sys.stderr)
+    sys.exit(1)
+
+# A plain local@domain and nothing else. A space, a parenthesis, a quote or a bare
+# OR would not narrow the query — it would rewrite it, and a rewritten query files
+# somebody else's mail into this repo.
+ADDRESS = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
+
+
+def strings(value):  # any list may be absent, and a blank entry is not an address
+    return [item.strip() for item in value or [] if isinstance(item, str) and item.strip()]
+
+
+def note(text):
+    print(f"context-email: {text}", file=sys.stderr)
+
+
+def control(value):  # a tab or a newline would split a record or name a file
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+
+
+# The operator's own addresses. They are on both sides of every thread, so they
+# select nothing and would only widen the query.
+mine = {address.lower() for address in strings(data.get("me"))}
+
+by_id = {}
+for person in data.get("people") or []:
+    person_id = str(person.get("id") or "").strip()
+    if person_id:
+        by_id[person_id] = strings(person.get("emails"))
+
+rows = []
+for project in data.get("projects") or []:
+    name = str(project.get("id") or project.get("name") or "(unnamed project)").strip()
+    repo = str(project.get("repo") or "").strip()
+    block = project.get("email") or {}
+    account = str(block.get("account") or "").strip()
+    # A project may be GitHub-only, or have no mailbox worth reading. Say which, and
+    # go on: the other projects are still owed their run.
+    if not repo:
+        note(f"{name}: no repo, skipping")
+        continue
+    if not account:
+        note(f"{name}: no email account, skipping")
+        continue
+    # The id names a marker file and the repo travels in a --repo=, so a control
+    # character in either is refused rather than written to disk.
+    if control(name) or control(repo) or control(account):
+        note(f"{name!r}: a tab or a newline in its id, repo or account, skipping")
+        continue
+    if "/" in name or name in (".", ".."):
+        note(f"{name}: its id is not a filename, skipping")
+        continue
+
+    query = str(block.get("query") or "").strip()
+    if not query:
+        ours = mine | {account.lower()}
+        members = strings(project.get("people"))
+        if not members:
+            note(f"{name}: no people with an email address, skipping")
+            continue
+        addresses, seen = [], set()
+        for person_id in members:
+            for address in by_id.get(person_id, []):
+                key = address.lower()  # Gmail does not care about case; a duplicate does
+                if key in ours or key in seen:
+                    continue
+                seen.add(key)
+                if not ADDRESS.match(address):
+                    note(f"{name}: {person_id} has {address!r}, which is not a "
+                         "plain local@domain, skipping it")
+                    continue
+                addresses.append(address)
+        if not addresses:
+            note(f"{name}: none of its people have an email address, skipping")
+            continue
+        both = " OR ".join(addresses)
+        query = f"(from:({both}) OR to:({both}))"
+    rows.append((name, repo, account, query))
+
+# The marker used to be named after the repo. A project may inherit that file only
+# when it is the one source for the repo: two projects cannot both take one marker.
+alone = {}
+for _, repo, _, _ in rows:
+    alone[repo] = alone.get(repo, 0) + 1
+
+for name, repo, account, query in rows:
+    legacy = repo if alone[repo] == 1 else ""
+    # NUL between records and US (0x1f) between fields, because the operator's own
+    # text is in here. A tab would not do: bash folds a run of tab-separated empty
+    # fields into one, so an empty `legacy` would hand `query` to the wrong name —
+    # and an empty query asks Gmail for the whole mailbox.
+    sys.stdout.write("\x1f".join((name, repo, account, legacy, query)) + "\0")
 PY
 }
 
@@ -116,7 +217,8 @@ PY
 list_ids() { # <account> <query>
   local params
   params="$(python3 -c 'import json,sys; print(json.dumps({"userId": sys.argv[1], "q": sys.argv[2], "maxResults": 100}))' "$1" "$2")"
-  gws gmail users messages list --params "$params" --format json | python3 -c "$LIST_IDS_PY"
+  gws gmail users messages list --params "$params" --format json </dev/null \
+    | python3 -c "$LIST_IDS_PY"
 }
 
 # One message, split into the four things a put needs. The body lands in a file so no
@@ -124,7 +226,7 @@ list_ids() { # <account> <query>
 read_message() { # <account> <id> <body-file> -> subject / rfc3339 / epoch / words
   local params
   params="$(python3 -c 'import json,sys; print(json.dumps({"userId": sys.argv[1], "id": sys.argv[2], "format": "raw"}))' "$1" "$2")"
-  gws gmail users messages get --params "$params" --format json \
+  gws gmail users messages get --params "$params" --format json </dev/null \
     | python3 -c "$READ_MESSAGE_PY" "$3"
 }
 
@@ -135,23 +237,44 @@ mkdir -p "$STATE"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
+# To a file, not a variable: the records are NUL-separated and command substitution
+# drops NUL bytes. A file also keeps the exit code, which a process substitution would
+# throw away — and a people file that would not parse must not read as a run with no
+# work.
+sources_file="$scratch/sources"
+sources > "$sources_file" || die "the people file at $PEOPLE could not be read"
+
 # Set by any source that gave up part way. The run still tries the other sources — one
 # dead mailbox must not stop the rest — but it exits nonzero so launchd's log says so.
 trouble=0
+# So `bin/context-email <repo>` that names nothing can say so instead of exiting 0.
+matched=0
 
-while IFS=$'\t' read -r repo account query; do
+# On fd 3, so nothing the body reads can swallow the next source.
+while IFS=$'\x1f' read -r -d '' -u 3 project repo account legacy query; do
   [ -n "$repo" ] || continue
   if [ -n "$only" ] && [ "$only" != "$repo" ]; then
     continue
   fi
+  matched=$((matched + 1))
 
-  marker_file="$STATE/$repo-email.since"
+  # One marker per project, not per repo. Two projects may file into one repo, and a
+  # shared marker lets whichever runs first carry the other one past its own mail.
+  marker_file="$STATE/$project-email.since"
+  if [ -n "$legacy" ] && [ ! -e "$marker_file" ] && [ -s "$STATE/$legacy-email.since" ]; then
+    mv "$STATE/$legacy-email.since" "$marker_file"
+    note "$project: took over the old $legacy-email.since marker"
+  fi
   if [ -s "$marker_file" ]; then
     marker="$(cat "$marker_file")"
   else
     marker=$(( $(date +%s) - FIRST_RUN_LOOKBACK ))
     say "$repo: no marker yet, looking back seven days"
   fi
+
+  # The query the project produced, before it is asked. It is the one thing here a
+  # person cannot see any other way, and a wrong one is silent: it files nothing.
+  note "$project: $query after:$marker"
 
   # Listed first, not streamed from a process substitution: a substitution throws its
   # exit code away, so a gws that died would read as an empty mailbox.
@@ -202,6 +325,11 @@ while IFS=$'\t' read -r repo account query; do
   done <<< "$ids"
 
   say "$repo: $filed filed, $skipped under $MIN_WORDS words"
-done < <(sources)
+done 3< "$sources_file"
+
+# Naming a repo that no project files into is a typo, not an empty inbox.
+if [ -n "$only" ] && [ "$matched" -eq 0 ]; then
+  die "no project files into $only"
+fi
 
 exit "$trouble"

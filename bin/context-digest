@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Digest filed context into brain memory, on the operator's machine.
 #
-# For each repository in ~/.nashcode/context.toml: take a lock, pull the checkout to
-# the default-branch tip, and run Claude Code headless with the context-digest skill
-# once per undigested file. Claude gets Read, Edit and Write and no shell, so it never
+# For each project with a repo in ~/.nashcode/people.json: take a lock, pull the
+# checkout to the default-branch tip, and run Claude Code headless with the
+# context-digest skill once per undigested file. Claude gets Read, Edit and Write and no shell, so it never
 # runs git; this script owns git. Before every commit the working tree is checked: a
 # changed path outside context/, brain/ or tasks/ aborts the run and leaves the
 # checkout dirty for a person.
@@ -17,7 +17,7 @@
 # brain/ are exactly what must not.
 #
 # Usage:
-#   bin/context-digest                 every repository in the config
+#   bin/context-digest                 every project with a repo in the people file
 #   bin/context-digest <repo>          just that one
 #   bin/context-digest /path/to/repo   an existing checkout, for testing; no clone,
 #                                      no pull, and `host` still gates the push
@@ -29,6 +29,7 @@ set -euo pipefail
 
 NASHCODE_HOME="${NASHCODE_HOME:-$HOME/.nashcode}"
 CONFIG="$NASHCODE_HOME/context.toml"
+PEOPLE="${NASHCODE_PEOPLE:-$NASHCODE_HOME/people.json}"
 CHECKOUTS="$NASHCODE_HOME/checkouts"
 STATE="$NASHCODE_HOME/state"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,19 +46,35 @@ command -v flock >/dev/null 2>&1 || die "flock is not on PATH (brew install util
 # --- config ------------------------------------------------------------------------
 # tomllib is stdlib from Python 3.11, so the config needs no third-party parser.
 
-read_config() { # <expression>
-  python3 - "$CONFIG" "$1" <<'PY'
-import pathlib, sys, tomllib
+# `host` is the runner's, in context.toml. Which repositories get a digest is the
+# people file's: every project with a `repo`, in file order.
 
-path, want = pathlib.Path(sys.argv[1]), sys.argv[2]
-data = tomllib.loads(path.read_text()) if path.exists() else {}
+read_config() { # <expression>
+  python3 - "$CONFIG" "$PEOPLE" "$1" <<'PY'
+import json, pathlib, sys, tomllib
+
+config, people, want = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 if want == "host":
+    data = tomllib.loads(config.read_text()) if config.exists() else {}
     host = data.get("host", "")
     print(host.strip() if isinstance(host, str) else "")
 elif want == "repos":
+    # One line and a nonzero exit, never a traceback and never an empty list: a
+    # people file nobody can read must stop the run, not read as no work.
+    if not people.exists():
+        print(f"context-digest: no people file at {people}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        data = json.loads(people.read_text())
+    except json.JSONDecodeError as problem:
+        print(f"context-digest: {people} is not JSON: {problem}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(data, dict):
+        print(f"context-digest: {people} is not a JSON object", file=sys.stderr)
+        sys.exit(1)
     seen = []
-    for source in data.get("source", []):
-        repo = str(source.get("repo", "")).strip()
+    for project in data.get("projects") or []:
+        repo = str(project.get("repo") or "").strip()
         if repo and repo not in seen:
             seen.append(repo)
     print("\n".join(seen))
@@ -73,7 +90,8 @@ ensure_checkout() { # <repo> -> prints the path
   if [ ! -d "$dir/.git" ]; then
     [ -n "$HOST" ] || die "no clone URL: ~/.nashcode/context.toml has no top-level host"
     mkdir -p "$CHECKOUTS"
-    git clone "https://$HOST/$repo.git" "$dir" >&2
+    git clone "https://$HOST/$repo.git" "$dir" >&2 \
+      || die "$repo: clone from $HOST failed"
   fi
   printf '%s\n' "$dir"
 }
@@ -130,7 +148,11 @@ check_paths() {
 
 digest_checkout() { # <dir> <label> <pull:yes|no>
   local dir="$1" label="$2" pull="$3"
-  cd "$dir"
+  # Checked, every time. `( run_repo )` turns errexit off inside the subshell, so a
+  # cd that failed would leave Claude and `git commit` running in the caller's
+  # checkout — this repository's digest, committed to whatever repository you were
+  # standing in.
+  cd "$dir" || die "$label: cannot enter $dir"
 
   if [ "$pull" = "yes" ]; then
     git pull --ff-only >&2 || die "$label: pull failed; fix the checkout and run again"
@@ -195,7 +217,7 @@ digest_checkout() { # <dir> <label> <pull:yes|no>
 # for as long as Google was unhappy.
 sync_tasks() { # <dir> <label>
   local dir="$1" label="$2"
-  cd "$dir"
+  cd "$dir" || die "$label: cannot enter $dir"
   if [ ! -x "$HERE/context-tasks" ]; then
     say "$label: $HERE/context-tasks is missing, so no cards were mirrored"
     return 1
@@ -204,8 +226,8 @@ sync_tasks() { # <dir> <label>
 }
 
 push_checkout() { # <dir> <label>
-  cd "$1"
   local label="$2" url host
+  cd "$1" || die "$label: cannot enter $1"
   url="$(git remote get-url origin 2>/dev/null || true)"
   [ -n "$url" ] || die "$label: no origin remote, so there is nowhere to push"
   host="$(remote_host "$url")"
@@ -245,7 +267,10 @@ run_repo() { # <repo>
   fi
   # The clone is inside the lock. Two runs that both found the checkout missing would
   # otherwise clone into the same directory at the same time.
-  dir="$(ensure_checkout "$repo")"
+  # Checked: `die` inside a command substitution ends the substitution's subshell and
+  # nothing more, so a clone that failed would come back as an empty path and the run
+  # would carry on into `cd ""`.
+  dir="$(ensure_checkout "$repo")" || die "$repo: there is no checkout to digest"
   digest_checkout "$dir" "$repo" yes
   local tasks=0
   sync_tasks "$dir" "$repo" || tasks=1
@@ -261,7 +286,7 @@ if [ -n "$target" ] && [ -d "$target/.git" ]; then
   # A checkout named by path: this is the test shape. No clone and no pull — there may
   # be no reachable remote at all — but `host` still decides whether the push happens.
   label="$(basename "$target")"
-  dir="$(cd "$target" && pwd)"
+  dir="$(cd "$target" && pwd)" || die "$label: cannot enter $target"
   mkdir -p "$STATE"
   exec 9>"$STATE/$label.lock"
   if ! flock -n 9; then
@@ -281,11 +306,15 @@ repos=()
 if [ -n "$target" ]; then
   repos=("$target")
 else
+  # Captured, not streamed from a process substitution: a substitution throws its
+  # exit code away, so an unreadable people file would read as nothing to digest.
+  listed="$(read_config repos)" || die "the people file at $PEOPLE could not be read"
   while IFS= read -r repo; do
-    [ -n "$repo" ] && repos+=("$repo")
-  done < <(read_config repos)
+    [ -n "$repo" ] || continue
+    repos+=("$repo")
+  done <<< "$listed"
 fi
-[ "${#repos[@]}" -gt 0 ] || die "$CONFIG names no [[source]] repositories"
+[ "${#repos[@]}" -gt 0 ] || die "no project in $PEOPLE has a repo, so there is nothing to digest"
 
 # A subshell each, so one repository that cannot be cloned, pulled, digested or pushed
 # is one nonzero exit at the end rather than the end of the run.
