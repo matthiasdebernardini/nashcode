@@ -11,7 +11,9 @@
 //! has never heard of celld, so the root tree explains the architecture before
 //! it lists commands.
 
-use crate::commands::{Ctx, brain, card, code, doctor, grep, invite, plan, profiles, repo, setup};
+use crate::commands::{
+    Ctx, brain, card, code, context, doctor, grep, invite, plan, profiles, repo, setup,
+};
 use crate::exit::{Class, class_of};
 use crate::output::Out;
 use agcli::{AgentCli, Command, CommandError, CommandOutput, CommandRequest, ExitCode, NextAction};
@@ -276,6 +278,29 @@ brings those comments back as a bounded list of rows.
 
 It reads GET /<repo>/comments from the viewer, which is a different service
 from dgit and has its own URL. The profile must therefore have a viewer URL;
+`nashcode setup --viewer` records one.";
+
+const CONTEXT_DOC: &str = "\
+File and read what the work is about.
+
+A meeting, an email, a pasted chat, or a note becomes one committed markdown
+file in the repository it concerns, at context/<kind>/YYYY/MM/<id>.md on the
+default branch. Four kinds: meeting, email, chat, note. The server accepts files
+and indexes them; it never fetches email, chat, or audio.
+
+  put   file one item. The text is the named file, or standard input.
+  ls    walk what is filed, oldest ingest first.
+  get   read one item back: front matter and body.
+
+Put is safe to re-run. With --source — the provider's stable id, a Gmail message
+id or a chat thread plus day or a URL — the same item always names the same
+file, so a pusher that died before it wrote its marker gets `existing: true`
+next run instead of a second copy.
+
+A digest on the operator's machine turns these files into brain/entities/, the
+memory `nashcode brain` prints before a session searches. Nothing here runs it.
+
+Context lives in the viewer, so the profile needs a viewer URL:
 `nashcode setup --viewer` records one.";
 
 const BRAIN_DOC: &str = "\
@@ -552,6 +577,31 @@ pub struct CommentsArgs {
     pub repo: Option<String>,
 }
 
+#[derive(Debug, Default)]
+pub struct ContextPutArgs {
+    pub kind: String,
+    /// The file to file. Standard input when absent.
+    pub file: Option<String>,
+    pub title: Option<String>,
+    pub at: Option<String>,
+    pub source: Option<String>,
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct ContextLsArgs {
+    pub kind: Option<String>,
+    pub since: Option<String>,
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct ContextGetArgs {
+    pub kind: String,
+    pub id: String,
+    pub repo: Option<String>,
+}
+
 // --- the handler boundary ---------------------------------------------------
 
 /// What every command gets from the request: the profile it acts on and whether
@@ -643,6 +693,7 @@ pub fn build() -> AgentCli {
         .command(index_command())
         .command(comments_command())
         .command(brain_command())
+        .command(context_command())
         .command(ready_command())
         .command(claim_command())
         .command(grep_command())
@@ -1188,6 +1239,120 @@ fn brain_command() -> Command {
                 Ok(CommandOutput::new(brain::run(&ctx, &args)))
             })
         })
+}
+
+fn context_command() -> Command {
+    Command::new("context", CONTEXT_DOC)
+        .subcommand(
+            Command::new(
+                "put",
+                "File one item into the repository it is about.\n\n\
+                 The text comes from the named file, or from standard input when no \
+                 file is named. `--at` defaults to now. A `meeting` is the browser \
+                 extension's transcript JSON and carries its own title and times, so \
+                 the flags are ignored for it.\n\n\
+                 `--source` is the provider's stable id — a Gmail message id, a chat \
+                 thread plus day, a URL. It makes the put idempotent: the same source \
+                 always names the same file, and a second put of it commits nothing \
+                 and answers `existing: true`.",
+            )
+            .usage(
+                "nashcode context put <meeting|email|chat|note> [<file>] --title <title> \
+                 [--at <rfc3339>] [--source <id>] [--repo <name>] [--profile <name>]",
+            )
+            .handler(|req, _ctx| {
+                let ctx = context(req);
+                let args = ContextPutArgs {
+                    kind: req.arg(0).unwrap_or_default().to_string(),
+                    file: req.arg(1).map(str::to_string),
+                    title: text(req, "title"),
+                    at: text(req, "at"),
+                    source: text(req, "source"),
+                    repo: text(req, "repo"),
+                };
+                Box::pin(async move {
+                    if args.kind.is_empty() {
+                        return Err(misuse(
+                            "no kind named",
+                            "nashcode context put email --title \"Re: invoice\" < msg.txt",
+                        ));
+                    }
+                    let kind = args.kind.clone();
+                    let value = context::put(&ctx, &args)
+                        .map_err(|e| oops(e, "nashcode setup --viewer   # context lives in the viewer"))?;
+                    let id = value["id"].as_str().unwrap_or_default().to_string();
+                    Ok(CommandOutput::new(value).next_action(NextAction::new(
+                        format!("nashcode context get {kind} {id}"),
+                        "Read the filed item back",
+                    )))
+                })
+            }),
+        )
+        .subcommand(
+            Command::new(
+                "ls",
+                "List what is filed, oldest ingest first.\n\n\
+                 `--since` takes the `next_since` of a previous answer and is strictly \
+                 exclusive, so handing it back is the whole polling loop: nothing \
+                 repeats, and a backfilled item — one whose `at` is older than \
+                 everything around it — still arrives.",
+            )
+            .usage(
+                "nashcode context ls [--kind <kind>] [--since <cursor>] [--repo <name>] \
+                 [--profile <name>]",
+            )
+            .handler(|req, _ctx| {
+                let ctx = context(req);
+                let args = ContextLsArgs {
+                    kind: text(req, "kind"),
+                    since: text(req, "since"),
+                    repo: text(req, "repo"),
+                };
+                let echo = args.kind.clone();
+                Box::pin(async move {
+                    let value = context::ls(&ctx, &args)
+                        .map_err(|e| oops(e, "nashcode setup --viewer   # context lives in the viewer"))?;
+                    let mut poll = "nashcode context ls".to_string();
+                    if let Some(kind) = &echo {
+                        poll.push_str(&format!(" --kind={kind}"));
+                    }
+                    if let Some(next) = value["next_since"].as_str().filter(|s| !s.is_empty()) {
+                        poll.push_str(&format!(" --since={next}"));
+                    }
+                    Ok(CommandOutput::new(value).next_action(NextAction::new(
+                        poll,
+                        "Poll again: --since is exclusive, so this returns only what was \
+                         filed after the items above",
+                    )))
+                })
+            }),
+        )
+        .subcommand(
+            Command::new("get", "Read one filed item: its front matter and its body.")
+                .usage(
+                    "nashcode context get <meeting|email|chat|note> <id> [--repo <name>] \
+                     [--profile <name>]",
+                )
+                .handler(|req, _ctx| {
+                    let ctx = context(req);
+                    let args = ContextGetArgs {
+                        kind: req.arg(0).unwrap_or_default().to_string(),
+                        id: req.arg(1).unwrap_or_default().to_string(),
+                        repo: text(req, "repo"),
+                    };
+                    Box::pin(async move {
+                        if args.kind.is_empty() || args.id.is_empty() {
+                            return Err(misuse(
+                                "name a kind and an id",
+                                "nashcode context get email 2026-06-13-0905-re-invoice-18f2a0b1",
+                            ));
+                        }
+                        let value = context::get(&ctx, &args)
+                            .map_err(|e| oops(e, "nashcode context ls"))?;
+                        Ok(CommandOutput::new(value))
+                    })
+                }),
+        )
 }
 
 fn ready_command() -> Command {
