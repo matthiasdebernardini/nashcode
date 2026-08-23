@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# Digest filed context into brain memory, on the operator's machine.
+#
+# For each repository in ~/.nashcode/context.toml: take a lock, pull the checkout to
+# the default-branch tip, and run Claude Code headless with the context-digest skill
+# once per undigested file. Claude gets Read, Edit and Write and no shell, so it never
+# runs git; this script owns git. Before every commit the working tree is checked: a
+# changed path outside context/, brain/ or tasks/ aborts the run and leaves the
+# checkout dirty for a person.
+#
+# The push is fenced by `host` in the config, which is the only host this will ever
+# push to. github.com is refused by name: client code lives there, and context/ and
+# brain/ are exactly what must not.
+#
+# Usage:
+#   bin/context-digest                 every repository in the config
+#   bin/context-digest <repo>          just that one
+#   bin/context-digest /path/to/repo   an existing checkout, for testing; no clone,
+#                                      no pull, and `host` still gates the push
+#
+# Not CI. CI checks out a historical commit detached, with no push identity, and quick
+# pushes queue stale jobs. The digest needs the current tip, a push identity, and one
+# run at a time.
+set -euo pipefail
+
+NASHCODE_HOME="${NASHCODE_HOME:-$HOME/.nashcode}"
+CONFIG="$NASHCODE_HOME/context.toml"
+CHECKOUTS="$NASHCODE_HOME/checkouts"
+STATE="$NASHCODE_HOME/state"
+
+die() { printf 'context-digest: %s\n' "$*" >&2; exit 1; }
+say() { printf 'context-digest: %s\n' "$*"; }
+
+command -v claude >/dev/null 2>&1 || die "claude is not on PATH"
+command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH"
+# No lock, no run. Two digests in one checkout would race on the same files, and a
+# missing tool is not a reason to find out what that looks like.
+command -v flock >/dev/null 2>&1 || die "flock is not on PATH (brew install util-linux)"
+
+# --- config ------------------------------------------------------------------------
+# tomllib is stdlib from Python 3.11, so the config needs no third-party parser.
+
+read_config() { # <expression>
+  python3 - "$CONFIG" "$1" <<'PY'
+import pathlib, sys, tomllib
+
+path, want = pathlib.Path(sys.argv[1]), sys.argv[2]
+data = tomllib.loads(path.read_text()) if path.exists() else {}
+if want == "host":
+    host = data.get("host", "")
+    print(host.strip() if isinstance(host, str) else "")
+elif want == "repos":
+    seen = []
+    for source in data.get("source", []):
+        repo = str(source.get("repo", "")).strip()
+        if repo and repo not in seen:
+            seen.append(repo)
+    print("\n".join(seen))
+PY
+}
+
+HOST="$(read_config host)"
+
+# --- the checkout ------------------------------------------------------------------
+
+ensure_checkout() { # <repo> -> prints the path
+  local repo="$1" dir="$CHECKOUTS/$repo"
+  if [ ! -d "$dir/.git" ]; then
+    [ -n "$HOST" ] || die "no clone URL: ~/.nashcode/context.toml has no top-level host"
+    mkdir -p "$CHECKOUTS"
+    git clone "https://$HOST/$repo.git" "$dir" >&2
+  fi
+  printf '%s\n' "$dir"
+}
+
+# The host a remote URL points at: https://host/path and git@host:path both.
+remote_host() { # <url>
+  local url="$1"
+  case "$url" in
+    *://*)
+      url="${url#*://}"
+      url="${url#*@}"
+      printf '%s\n' "${url%%[:/]*}"
+      ;;
+    *@*:*)
+      url="${url#*@}"
+      printf '%s\n' "${url%%:*}"
+      ;;
+    *) printf '\n' ;;
+  esac
+}
+
+# Every path git reports as changed, tracked or not, one per line.
+changed_paths() {
+  git -c core.quotepath=false status --porcelain -uall | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    local path="${line:3}"
+    # A rename reads "old -> new"; the destination is the one that matters.
+    case "$path" in *' -> '*) path="${path##* -> }" ;; esac
+    path="${path%\"}"
+    path="${path#\"}"
+    printf '%s\n' "$path"
+  done
+}
+
+# Refuse the whole run when Claude wrote outside the three directories it was given.
+# Dirty on purpose: a person reads the diff and decides, and a `git checkout .` here
+# would throw away the evidence of what went wrong.
+check_paths() {
+  local stray="" path
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      context/*|brain/*|tasks/*) ;;
+      *) stray="$stray  $path"$'\n' ;;
+    esac
+  done < <(changed_paths)
+  if [ -n "$stray" ]; then
+    printf 'context-digest: the digest changed paths outside context/, brain/ and tasks/:\n%s' "$stray" >&2
+    die "nothing committed; the checkout is left dirty for you to read"
+  fi
+}
+
+# --- one repository ----------------------------------------------------------------
+
+digest_checkout() { # <dir> <label> <pull:yes|no>
+  local dir="$1" label="$2" pull="$3"
+  cd "$dir"
+
+  if [ "$pull" = "yes" ]; then
+    git pull --ff-only >&2 || die "$label: pull failed; fix the checkout and run again"
+  fi
+
+  local files=()
+  while IFS= read -r file; do
+    [ -n "$file" ] && files+=("$file")
+  done < <(grep -rl --include='*.md' -F 'digested: false' context 2>/dev/null | sort)
+
+  if [ "${#files[@]}" -eq 0 ]; then
+    say "$label: nothing undigested"
+    return 0
+  fi
+
+  local file id
+  for file in "${files[@]}"; do
+    id="$(basename "$file" .md)"
+    say "$label: digesting $file"
+    # Read, Edit, Write and nothing else. No Bash: Claude never runs git, and the
+    # file's own text — an email that asks the reader to run something — has no shell
+    # to reach for even if the skill's rules were ignored.
+    claude -p "Run the context-digest skill on: $file" \
+      --allowedTools Read,Edit,Write \
+      --permission-mode acceptEdits >&2 || die "$label: claude failed on $file"
+
+    check_paths
+    if [ -z "$(git status --porcelain)" ]; then
+      say "$label: $id produced no changes"
+      continue
+    fi
+    git add context brain tasks 2>/dev/null || true
+    git commit -q -m "context: digest $id"
+    say "$label: committed context: digest $id"
+  done
+}
+
+push_checkout() { # <dir> <label>
+  cd "$1"
+  local label="$2" url host
+  url="$(git remote get-url origin 2>/dev/null || true)"
+  [ -n "$url" ] || die "$label: no origin remote, so there is nowhere to push"
+  host="$(remote_host "$url")"
+
+  if [ "$host" = "github.com" ]; then
+    die "$label: origin is github.com — context/ and brain/ are private and are never pushed there"
+  fi
+  [ -n "$HOST" ] || die "$label: ~/.nashcode/context.toml sets no top-level host, so no push is allowed"
+  [ "$host" = "$HOST" ] || die "$label: origin is $host, and the only host this pushes to is $HOST"
+
+  git push origin HEAD >&2
+  say "$label: pushed to $host"
+}
+
+run_repo() { # <repo>
+  local repo="$1" dir lock
+  dir="$(ensure_checkout "$repo")"
+  mkdir -p "$STATE"
+  lock="$STATE/$repo.lock"
+  exec 9>"$lock"
+  if ! flock -n 9; then
+    say "$repo: another run holds $lock; skipping"
+    return 0
+  fi
+  ( digest_checkout "$dir" "$repo" yes )
+  ( push_checkout "$dir" "$repo" )
+  exec 9>&-
+}
+
+# --- what to run -------------------------------------------------------------------
+
+target="${1:-}"
+
+if [ -n "$target" ] && [ -d "$target/.git" ]; then
+  # A checkout named by path: this is the test shape. No clone and no pull — there may
+  # be no reachable remote at all — but `host` still decides whether the push happens.
+  label="$(basename "$target")"
+  dir="$(cd "$target" && pwd)"
+  mkdir -p "$STATE"
+  exec 9>"$STATE/$label.lock"
+  if ! flock -n 9; then
+    say "$label: another run holds the lock; skipping"
+    exit 0
+  fi
+  ( digest_checkout "$dir" "$label" no )
+  ( push_checkout "$dir" "$label" )
+  exit 0
+fi
+
+[ -f "$CONFIG" ] || die "no config at $CONFIG"
+
+repos=()
+if [ -n "$target" ]; then
+  repos=("$target")
+else
+  while IFS= read -r repo; do
+    [ -n "$repo" ] && repos+=("$repo")
+  done < <(read_config repos)
+fi
+[ "${#repos[@]}" -gt 0 ] || die "$CONFIG names no [[source]] repositories"
+
+for repo in "${repos[@]}"; do
+  run_repo "$repo"
+done

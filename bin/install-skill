@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Install this repo's Claude Code skill into ~/.claude/skills, overwriting.
+#
+# The digest runs headless from bin/context-digest, which finds the skill where Claude
+# Code looks for it rather than where this repo keeps it. Run this after any edit to
+# .claude/skills/context-digest/SKILL.md.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+src="$here/.claude/skills/context-digest"
+dst="${CLAUDE_SKILLS:-$HOME/.claude/skills}"
+
+[ -d "$src" ] || { printf 'install-skill: no skill at %s\n' "$src" >&2; exit 1; }
+
+mkdir -p "$dst"
+# `--delete` so a file dropped from the skill is dropped from the install too; an
+# instruction that lives on only in ~/.claude is the worst kind of stale.
+rsync -a --delete "$src/" "$dst/context-digest/"
+printf 'install-skill: %s -> %s/context-digest\n' "$src" "$dst"
