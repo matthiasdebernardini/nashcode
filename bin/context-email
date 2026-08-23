@@ -61,10 +61,14 @@ PY
 LIST_IDS_PY=$(cat <<'PY'
 import json, sys
 
+# A document that will not parse is a failure, not an empty mailbox: exit nonzero so
+# the caller stops rather than reporting a cheerful "0 filed". One line, not a
+# traceback — this runs under launchd every fifteen minutes.
 try:
     data = json.load(sys.stdin)
-except json.JSONDecodeError:
-    sys.exit(0)
+except json.JSONDecodeError as problem:
+    print(f"gws did not answer with JSON: {problem}", file=sys.stderr)
+    sys.exit(1)
 ids = [m.get("id") for m in data.get("messages") or [] if m.get("id")]
 # Gmail answers newest first, and the marker can only be advanced in order.
 print("\n".join(reversed(ids)))
@@ -149,6 +153,14 @@ while IFS=$'\t' read -r repo account query; do
     say "$repo: no marker yet, looking back seven days"
   fi
 
+  # Listed first, not streamed from a process substitution: a substitution throws its
+  # exit code away, so a gws that died would read as an empty mailbox.
+  if ! ids="$(list_ids "$account" "$query after:$marker")"; then
+    say "$repo: gws could not list the mailbox; the marker stays where it is"
+    trouble=1
+    continue
+  fi
+
   filed=0
   skipped=0
   while IFS= read -r id; do
@@ -172,8 +184,12 @@ while IFS=$'\t' read -r repo account query; do
       continue
     fi
 
+    # `--flag=value`, never `--flag value`. A subject is a stranger's text, and a
+    # pending `--title` whose next token starts with `--` resolves to boolean true —
+    # so a subject of `--repo=victim` would file the mail into another repository.
+    # The `=` form binds the value to its own flag whatever it looks like.
     if nashcode context put email \
-      --repo "$repo" --title "$subject" --at "$at" --source "$id" < "$body" >/dev/null; then
+      --repo="$repo" --title="$subject" --at="$at" --source="$id" < "$body" >/dev/null; then
       # Only now. A put that failed must be retried, and `existing: true` exits 0, so
       # a retry of one already filed costs nothing.
       printf '%s\n' "$epoch" > "$marker_file"
@@ -183,7 +199,7 @@ while IFS=$'\t' read -r repo account query; do
       trouble=1
       break
     fi
-  done < <(list_ids "$account" "$query after:$marker")
+  done <<< "$ids"
 
   say "$repo: $filed filed, $skipped under $MIN_WORDS words"
 done < <(sources)
