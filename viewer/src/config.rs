@@ -24,6 +24,10 @@ pub struct Config {
     pub ci_logs: PathBuf,
     /// Directory holding raw trace transcripts.
     pub traces: PathBuf,
+    /// The pushed copy of the operator's `people.json`, written by `PUT /people`.
+    /// `NASHCODE_PEOPLE`, the same variable the CLI reads, so a viewer and a CLI on
+    /// one box can be pointed at one file.
+    pub people_path: PathBuf,
     /// Event name -> webhook URLs.
     pub webhooks: BTreeMap<String, Vec<String>>,
     /// `ANTHROPIC_API_KEY`. `/brain/ask` answers 404 without it.
@@ -239,6 +243,11 @@ impl Config {
             &mirrors.join("traces").to_string_lossy(),
         ));
 
+        let people_path = PathBuf::from(env_or(
+            "NASHCODE_PEOPLE",
+            &mirrors.join("people.json").to_string_lossy(),
+        ));
+
         let webhooks = match std::env::var("NASHCODE_WEBHOOKS") {
             Ok(path) if !path.trim().is_empty() => load_webhooks(Path::new(path.trim())),
             _ => BTreeMap::new(),
@@ -302,6 +311,7 @@ impl Config {
             db_path,
             ci_logs,
             traces,
+            people_path,
             webhooks,
             anthropic_key: std::env::var("ANTHROPIC_API_KEY")
                 .ok()

@@ -57,6 +57,7 @@ impl Brain {
         }
         serde_json::json!({
             "generated_at": crate::db::now(),
+            "people": people_json(config),
             "repos": repos,
         })
     }
@@ -144,6 +145,24 @@ impl Brain {
             }
         }
         value
+    }
+}
+
+/// The people stanza: how big the pushed copy is and when it arrived, or `null`
+/// before any push.
+///
+/// Read from disk on every `/brain`, outside every cache in this module. The file is
+/// one small object, and the cache key next door is a set of branch tips — a push that
+/// moved no branch would hide behind it, which is exactly the push this stanza is for.
+fn people_json(config: &Config) -> serde_json::Value {
+    match crate::people::Pushed::read(&config.people_path) {
+        None => serde_json::Value::Null,
+        Some(pushed) => serde_json::json!({
+            "projects": pushed.file.projects.len(),
+            "people": pushed.file.people.len(),
+            "pushed_at": pushed.pushed_at,
+            "pushed_by": pushed.pushed_by,
+        }),
     }
 }
 

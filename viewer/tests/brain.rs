@@ -112,6 +112,7 @@ fn asking_bed(root: tempfile::TempDir, stub_url: &str, key: Option<&str>) -> com
         db_path: root.path().join("nashcode.db"),
         ci_logs: root.path().join("ci-logs"),
         traces: root.path().join("traces"),
+        people_path: root.path().join("people.json"),
         webhooks: BTreeMap::new(),
         anthropic_key: key.map(str::to_owned),
         anthropic_url: stub_url.to_owned(),

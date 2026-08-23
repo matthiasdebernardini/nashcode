@@ -14,6 +14,10 @@ pub mod git;
 pub mod hooks;
 pub mod mirror;
 pub mod ops;
+/// Who belongs to which project. The model, the validation, and the routing rule are
+/// `people-core`, so the CLI and the desktop app run the same code without building a
+/// server; the routes over it are in [`web::api`].
+pub use people_core as people;
 pub mod render;
 pub mod stack;
 pub mod traces;

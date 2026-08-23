@@ -560,6 +560,92 @@ async fn context_get(cx: &Cx) -> Result<Response> {
     Ok(json_response(StatusCode::OK, value))
 }
 
+// ---- people ----------------------------------------------------------------------
+
+/// `PUT /people` — take the operator's `people.json` and keep a copy.
+///
+/// The body is the file itself. It is validated exactly as the CLI validates it, so a
+/// dangling person id is a `400` here and not a wrong answer later. What lands on disk
+/// is `{pushed_at, pushed_by, file}`: the copy, the moment it arrived, and the
+/// Tailscale login it arrived from, which is what `/brain` reports.
+///
+/// The viewer never reads the operator's machine and never hands the copy back out —
+/// see the missing `GET /people`.
+#[route(PUT "/people")]
+async fn people_put(cx: &Cx, body: topcoat::router::request::Bytes) -> Result<Response> {
+    let text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => return json_error(StatusCode::BAD_REQUEST, "the file is not UTF-8"),
+    };
+    let file = match crate::people::PeopleFile::parse(text) {
+        Ok(file) => file,
+        Err(why) => return json_error(StatusCode::BAD_REQUEST, &why),
+    };
+    let pushed = crate::people::Pushed {
+        pushed_at: crate::db::now(),
+        pushed_by: actor(cx).login,
+        file,
+    };
+    if let Err(why) = pushed.write(&app(cx).config.people_path) {
+        // The reason names a path on the server's disk, which is the operator's
+        // business and not the caller's. It goes to the log; the answer says what
+        // happened.
+        tracing::error!(error = %why, "storing the people file failed");
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "could not store the people file");
+    }
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "ok": true,
+            "people": pushed.file.people.len(),
+            "projects": pushed.file.projects.len(),
+            "pushed_at": pushed.pushed_at,
+            "pushed_by": pushed.pushed_by,
+        }),
+    ))
+}
+
+/// `GET /people/route?email=&phone=` — which project these contacts are about.
+///
+/// Both keys repeat: one meeting has many attendees. The answer is project ids, repo
+/// names, folders, and the person ids that matched — never an address or a number, so
+/// an anonymous read on the tailnet learns nothing it did not already ask with.
+#[route(GET "/people/route")]
+async fn people_route(cx: &Cx) -> Result<Response> {
+    let contacts = query_contacts(cx)?;
+    if contacts.is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "ask about somebody: /people/route?email=rob@example.com or ?phone=%2B15550001111",
+        );
+    }
+    let Some(pushed) = crate::people::Pushed::read(&app(cx).config.people_path) else {
+        return json_error(StatusCode::NOT_FOUND, "no people file");
+    };
+    let routing = pushed.file.route(&contacts);
+    Ok(json_response(StatusCode::OK, serde_json::to_value(&routing)?))
+}
+
+/// The `email` and `phone` pairs of the query string, in the order they were written.
+///
+/// Read as a list of pairs rather than through `query_params`, because the typed
+/// accessor deserializes one value per key and a repeated key would quietly become
+/// whichever attendee was last.
+fn query_contacts(cx: &Cx) -> Result<Vec<crate::people::Contact>> {
+    let query = request::uri(cx).query().unwrap_or_default();
+    let pairs: Vec<(String, String)> = serde_urlencoded::from_str(query)
+        .map_err(|error| bad_request(format!("the query string does not parse: {error}")))?;
+    Ok(pairs
+        .into_iter()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .filter_map(|(key, value)| match key.as_str() {
+            "email" => Some(crate::people::Contact::email(&value)),
+            "phone" => Some(crate::people::Contact::phone(&value)),
+            _ => None,
+        })
+        .collect())
+}
+
 // ---- branch actions --------------------------------------------------------------
 
 #[derive(Debug, Default, Deserialize)]

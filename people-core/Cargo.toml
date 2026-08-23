@@ -1,0 +1,23 @@
+[package]
+name = "people-core"
+version = "0.1.0"
+edition = "2024"
+description = "Who belongs to which project: the people.json model, its validation, and the one routing rule, shared by the viewer, the CLI, and the desktop app."
+license = "Apache-2.0"
+
+[lib]
+name = "people_core"
+path = "src/lib.rs"
+
+[features]
+# The HTTP side: push the file to a viewer and ask when it last arrived. Off by
+# default, because the server that answers those requests never makes them.
+client = ["dep:ureq", "dep:base64"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Feature `client` only. Same HTTP client the CLI already speaks, so a nashcode
+# install gains no second transport.
+ureq = { version = "3", features = ["rustls"], optional = true }
+base64 = { version = "0.22", optional = true }

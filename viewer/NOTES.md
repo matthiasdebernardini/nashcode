@@ -2207,3 +2207,65 @@ Google rejects, and that card would have failed its insert on every run for ever
 due date and nothing else. The same rule applies to a task's `updated`: unreadable and
 "not old yet" have to be different answers, or an unparseable date is silently a fresh
 one for ever.
+
+## People
+
+**The shared code is a workspace crate, `people-core`, not a file three crates include.**
+Three binaries answer the same question — the viewer over HTTP, the CLI on the operator's
+machine, the desktop app next to it — and a copied rule is a rule that drifts. The crate
+depends on `serde` and `serde_json` and on nothing else, so the CLI and the app compile it
+without building a server. The HTTP helpers (`push`, `pushed_at`) sit behind a `client`
+feature because the viewer answers those two requests and never makes them. That is a
+smaller guarantee than it sounds: cargo unifies features across a workspace build, so
+`cargo build --workspace` compiles `client` into the copy the viewer links, because the
+CLI in the same build asked for it. Only `cargo build -p nashcode` leaves it out — which
+is the build that ships the server. The viewer re-exports the crate as `crate::people`,
+which is why the routes read `crate::people::PeopleFile`.
+
+**On disk the viewer keeps `{pushed_at, pushed_by, file}`, not the bare file.** `/brain` has to say
+how fresh the copy is, and a second file holding the timestamp is a second file to keep in
+step. `pushed_by` is the Tailscale login the push arrived on (`local` for a request with
+no identity headers): one viewer answers for the whole tailnet, and a copy that decides
+where work is filed should say whose it is. `Pushed::read` treats an unreadable or
+half-written copy as no copy at all: the route then answers `404 no people file`, which
+every caller already handles, rather than a 500 nobody planned for. A store that fails
+answers "could not store the people file" and logs the reason, because the reason names a
+path on the server's disk and the caller has no business with it. Writes go to a temporary
+name beside the target — pid *and* a process-wide counter, since two requests in one
+viewer share a pid — and are renamed over it, because the desktop app saves while the
+router and the CLI read.
+
+**`check` refuses a broken join and merely reports a broken address.** A duplicate id, a
+project naming an id no person has, or a blank id breaks the key the whole file is joined
+on, so `parse` refuses the file and `PUT /people` answers 400 — routing over a broken join
+files a client's work in the wrong folder and says nothing. A project with nobody in it, a
+phone that is not E.164, a person with neither a phone nor an email: the file loads and
+that part of it will never do its job, so it is a warning. `nashcode people check` prints
+both and exits 2 for either, because both need a person. It is the one reader that does
+not call `parse`: reporting a fatal finding is its whole purpose.
+
+**`import` names people `<project>-<n>`, checks its own work, and writes nothing.** `routes.json` holds phone
+numbers and a folder; it never knew which number is whose. Inventing a name would be a
+guess the operator then has to hunt for, so every person arrives with an empty name, the
+id says which project it came from, and stderr lists them all. The result goes into the
+envelope rather than onto disk: the operator reads it, fills the names in, and saves it
+with `nashcode people import | jq .result.file > ~/.nashcode/people.json`. The subcommand
+is one-shot and is deleted once it has run. It also runs `validate` on what it built and
+prints every finding, because the old files carry placeholders — a phone number nobody
+ever filled in is still in there — and the first person to see that should be the operator
+reading the import, not a client whose message went nowhere. Two routes inside one project
+folder get ids `agstaff` and `agstaff-2`: a repeated id is a broken join key, and a
+one-shot import that produces a file the CLI refuses has wasted the one shot. The
+project's `repo` is the directory as it is spelled on disk, `PristineAcres`, while the id
+is the slug of it — the id is ours to choose, the repo name was chosen at push time.
+
+**A repeated flag is read from the raw argv.** agcli keeps flags in a map, so
+`--email a --email b` arrives as `b` alone. A meeting has many attendees, so
+`nashcode people route` reads `raw_args()` for every `--email` and `--phone`. The viewer
+has the same problem one layer down: the typed query accessor deserializes one value per
+key, so `/people/route` parses the query string as a list of pairs.
+
+**`push` sends no credential.** The viewer authenticates through Tailscale's identity
+headers, the way every other viewer call in this CLI does, and the profile's token is
+dgit's. `people_core::push` takes a token for the day that changes and sends it as the
+same basic credential the rest of nashcode uses.

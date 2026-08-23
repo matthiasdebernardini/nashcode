@@ -709,6 +709,7 @@ fn asking_bed(url: &str) -> common::TestBed {
         db_path: root.path().join("nashcode.db"),
         ci_logs: root.path().join("ci-logs"),
         traces: root.path().join("traces"),
+        people_path: root.path().join("people.json"),
         webhooks: Default::default(),
         anthropic_key: Some("test-key".to_owned()),
         anthropic_url: url.to_owned(),

@@ -71,6 +71,7 @@ fn fixture() -> Fixture {
         db_path: root.path().join("nashcode.db"),
         ci_logs: root.path().join("ci-logs"),
         traces: root.path().join("traces"),
+        people_path: root.path().join("people.json"),
         webhooks: BTreeMap::new(),
         anthropic_key: None,
         anthropic_url: "http://127.0.0.1:1".to_owned(),

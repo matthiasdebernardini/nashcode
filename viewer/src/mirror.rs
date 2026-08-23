@@ -47,11 +47,12 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// a repo with one of these names would be shadowed on every page it has —
 /// half-served, and confusingly. `context` is here for the same reason one step down:
 /// the word is a route segment under every repo, and `/context/context/...` is a URL
-/// nobody should have to read twice. Discovery refuses the name and says so;
+/// nobody should have to read twice. `people` is the same again: it is the viewer's
+/// own route for who belongs to which project. Discovery refuses the name and says so;
 /// `NASHCODE_REPOS` is the override for an operator who knows what they are asking
 /// for.
 const RESERVED_ROUTES: &[&str] =
-    &["api", "assets", "brain", "bugs", "context", "favicon.svg"];
+    &["api", "assets", "brain", "bugs", "context", "favicon.svg", "people"];
 
 /// What the UI needs to know about a mirror's health.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -485,6 +486,7 @@ mod tests {
             db_path: dir.path().join("db.sqlite"),
             ci_logs: dir.path().join("logs"),
             traces: dir.path().join("traces"),
+            people_path: dir.path().join("people.json"),
             webhooks: Default::default(),
             anthropic_key: None,
             anthropic_url: "https://api.anthropic.com".to_owned(),
