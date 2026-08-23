@@ -133,6 +133,9 @@ fn repo_digest(repo: &Value) -> Value {
     if let Some(code) = code_digest(repo) {
         out["code"] = code;
     }
+    if let Some(memory) = memory_digest(repo) {
+        out["memory"] = memory;
+    }
     let plans = plans_digest(repo);
     if !plans.is_empty() {
         out["plans"] = json!(plans);
@@ -207,6 +210,57 @@ fn code_digest(repo: &Value) -> Option<Value> {
         out["age"] = json!(age_of(at));
     }
     Some(out)
+}
+
+/// What the digest has written into `brain/entities/`, and how much is waiting.
+///
+/// This is the section a session reads before its first search, so the entities keep
+/// their fact lines verbatim: a slug and a date alone would send every agent straight
+/// back to `grep`, which is the read this whole stanza exists to save.
+///
+/// Absent when the viewer has nothing to say — no entities, nothing undigested,
+/// nothing disputed — the same rule the other sections follow. `path` is dropped: the
+/// slug names the file, and `brain/entities/<slug>.md` is the whole of the mapping.
+fn memory_digest(repo: &Value) -> Option<Value> {
+    let memory = repo.get("memory")?;
+    let number = |key: &str| memory.get(key).and_then(Value::as_i64).unwrap_or(0);
+    let entities: Vec<Value> = memory
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|entity| {
+                    let slug = entity.get("slug").and_then(Value::as_str)?;
+                    let mut out = json!({ "slug": slug });
+                    if let Some(at) = entity.get("updated_at").and_then(Value::as_str)
+                        && !at.is_empty()
+                    {
+                        out["updated_at"] = json!(at);
+                        out["age"] = json!(age_of(at));
+                    }
+                    let facts: Vec<&str> = entity
+                        .get("facts")
+                        .and_then(Value::as_array)
+                        .map(|facts| facts.iter().filter_map(Value::as_str).collect())
+                        .unwrap_or_default();
+                    if !facts.is_empty() {
+                        out["facts"] = json!(facts);
+                    }
+                    Some(out)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let undigested = number("undigested");
+    let conflicts = number("conflicts");
+    if entities.is_empty() && undigested == 0 && conflicts == 0 {
+        return None;
+    }
+    Some(json!({
+        "entities": entities,
+        "undigested": undigested,
+        "conflicts": conflicts,
+    }))
 }
 
 /// Plan files, each with the number of comments filed against it.
@@ -697,6 +751,41 @@ mod tests {
         let d = digest(&json!({ "repos": [] }));
         assert_eq!(d["status"], "ok");
         assert_eq!(d["repos"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn memory_carries_the_slug_the_date_and_the_facts() {
+        let mut s = stanza();
+        s["repos"][0]["memory"] = json!({
+            "entities": [{
+                "slug": "postgres-migration",
+                "path": "brain/entities/postgres-migration.md",
+                "updated_at": "2026-08-19T10:00:00Z",
+                "facts": ["Scheduled for July (as of 2026-06-10, context/meeting/2026/06/b.md)"],
+            }],
+            "undigested": 2,
+            "conflicts": 1,
+        });
+        let memory = only_repo(&digest(&s))["memory"].clone();
+        assert_eq!(memory["entities"][0]["slug"], "postgres-migration");
+        assert_eq!(memory["entities"][0]["updated_at"], "2026-08-19T10:00:00Z");
+        assert!(memory["entities"][0]["age"].is_string());
+        assert_eq!(memory["entities"][0]["facts"].as_array().unwrap().len(), 1);
+        assert_eq!(memory["undigested"], 2);
+        assert_eq!(memory["conflicts"], 1);
+        // The slug names the file; the path is the aggregate's business.
+        assert!(memory["entities"][0].get("path").is_none(), "{memory}");
+    }
+
+    #[test]
+    fn a_memory_with_nothing_in_it_is_not_printed() {
+        let mut s = stanza();
+        s["repos"][0]["memory"] = json!({ "entities": [], "undigested": 0, "conflicts": 0 });
+        assert!(only_repo(&digest(&s)).get("memory").is_none());
+
+        // Undigested files alone are worth saying: the memory is behind the store.
+        s["repos"][0]["memory"] = json!({ "entities": [], "undigested": 3, "conflicts": 0 });
+        assert_eq!(only_repo(&digest(&s))["memory"]["undigested"], 3);
     }
 
     #[test]

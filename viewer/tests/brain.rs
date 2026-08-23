@@ -203,3 +203,73 @@ async fn without_a_key_the_route_is_a_404() {
         post_json(&bed.router, "/brain/ask", serde_json::json!({ "question": "?" })).await;
     assert_eq!(status, 404);
 }
+
+/// `memory` is the digest's output read back: the entity files, their last fact
+/// lines, and the counts that say whether anything is waiting or disputed.
+#[tokio::test]
+async fn memory_reports_the_entities_the_digest_wrote_and_what_is_still_undigested() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let remotes = root.path().join("remotes");
+    std::fs::create_dir_all(&remotes).expect("mkdir");
+    let work = stacked_fixture(&remotes, "demo");
+    work.write(
+        "brain/entities/postgres-migration.md",
+        "# Postgres migration\n\n\
+         - Started as a spike (as of 2026-06-01, context/note/2026/06/a.md)\n\
+         - Scheduled for July (as of 2026-06-10, context/meeting/2026/06/b.md)\n\
+         - Rob owns it (as of 2026-06-12, context/email/2026/06/c.md)\n\
+         - Budget approved (as of 2026-06-13, context/email/2026/06/d.md)\n\n\
+         ## Conflicts\n\n\
+         - Ships in July (as of 2026-06-10, context/meeting/2026/06/b.md)\n\
+         - Ships in August (as of 2026-06-13, context/email/2026/06/d.md)\n",
+    );
+    work.write(
+        "context/email/2026/06/2026-06-13-0905-re-invoice-deadbeef.md",
+        "---\nkind: \"email\"\nid: \"2026-06-13-0905-re-invoice-deadbeef\"\n\
+         title: \"Re: invoice\"\nat: \"2026-06-13T09:05:00Z\"\n\
+         ingested_at: \"2026-06-13T09:06:00.000000Z\"\nsource: \"18f2a\"\n\
+         entities: []\ndigested: false\n---\n\n# Re: invoice\n\nPaid.\n",
+    );
+    work.commit_all("context and memory");
+    work.push("main");
+
+    let bed = testbed_with(root, &["demo"], BTreeMap::new());
+    let (status, body) = get(&bed.router, "/brain?repo=demo").await;
+    assert_eq!(status, 200, "{body}");
+    let brain: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let memory = &brain["repos"][0]["memory"];
+
+    let entities = memory["entities"].as_array().expect("entities");
+    assert_eq!(entities.len(), 1, "{memory}");
+    assert_eq!(entities[0]["slug"], "postgres-migration");
+    assert_eq!(entities[0]["path"], "brain/entities/postgres-migration.md");
+    assert!(entities[0]["updated_at"].as_str().is_some_and(|at| at.contains('T')), "{memory}");
+
+    // The last three facts, and nothing from `## Conflicts`: the digest refused to
+    // pick a side there, so neither line is a fact to quote.
+    let facts: Vec<&str> = entities[0]["facts"]
+        .as_array()
+        .expect("facts")
+        .iter()
+        .filter_map(|fact| fact.as_str())
+        .collect();
+    assert_eq!(facts.len(), 3, "{memory}");
+    assert_eq!(facts[2], "Budget approved (as of 2026-06-13, context/email/2026/06/d.md)");
+    assert!(!facts.iter().any(|fact| fact.contains("Ships in")), "{memory}");
+
+    assert_eq!(memory["undigested"], 1, "{memory}");
+    assert_eq!(memory["conflicts"], 1, "{memory}");
+}
+
+/// A repo the digest has never run in says so with zeroes rather than a missing key.
+#[tokio::test]
+async fn a_repo_with_no_context_at_all_has_an_empty_memory() {
+    let bed = testbed_with(two_repo_root(), &["demo", "other"], BTreeMap::new());
+    let (status, body) = get(&bed.router, "/brain?repo=other").await;
+    assert_eq!(status, 200, "{body}");
+    let brain: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let memory = &brain["repos"][0]["memory"];
+    assert_eq!(memory["entities"].as_array().expect("entities").len(), 0, "{memory}");
+    assert_eq!(memory["undigested"], 0);
+    assert_eq!(memory["conflicts"], 0);
+}

@@ -225,7 +225,119 @@ async fn git_repo_json(
         "ready": ready,
         "conflicts": conflicts,
         "dangling": index.dangling,
+        "memory": memory_json(&repo, &default_tip).await,
     })
+}
+
+/// How many entity files the memory stanza names. Twenty is a first read, not an
+/// archive: the rest are one `nashcode grep <slug>` away.
+const MEMORY_ENTITIES: usize = 20;
+
+/// How many fact lines travel with each entity.
+const MEMORY_FACTS: usize = 3;
+
+/// What the digest has written down: `brain/entities/*.md`, newest first, each with
+/// its last few fact lines, plus the two counts that say whether the memory is
+/// current and whether anything in it is disputed.
+///
+/// This is the part of `/brain` a session reads before it searches, so it is the
+/// digest's output rather than the raw `context/` files: an agent that needs the exact
+/// wording follows the source path on the fact line.
+///
+/// ponytail: one `git log` and one `git show` per entity file, so the stanza costs
+/// O(n) subprocesses. It sits inside the tip cache, so a repo pays that once per push;
+/// when that stops being true the upgrade is `git cat-file --batch` for the contents
+/// and one `git log --name-only` walk for the dates.
+async fn memory_json(repo: &crate::git::Repo, tip: &str) -> serde_json::Value {
+    let mut entities: Vec<serde_json::Value> = Vec::new();
+    let mut conflicts = 0usize;
+    for path in repo.list_files(tip, ENTITIES_DIR).await.unwrap_or_default() {
+        if !path.ends_with(".md") {
+            continue;
+        }
+        let Ok(Some(bytes)) = repo.show_file(tip, &path).await else {
+            continue;
+        };
+        let (facts, disputed) = facts_of(&String::from_utf8_lossy(&bytes));
+        if disputed {
+            conflicts += 1;
+        }
+        // Staleness is `git log` on the file, the way the plan asks: no stored date to
+        // drift away from the commit that actually changed the fact.
+        let updated_at = repo.last_touched(tip, &path).await.ok().flatten().unwrap_or_default();
+        let slug = path
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.strip_suffix(".md"))
+            .unwrap_or_default()
+            .to_owned();
+        entities.push(serde_json::json!({
+            "slug": slug,
+            "path": path,
+            "updated_at": updated_at,
+            "facts": facts,
+        }));
+    }
+    // Newest first, and a file no commit dates sorts to the bottom rather than to the
+    // top: an empty string is not a recent one.
+    entities.sort_by(|a, b| {
+        let key = |v: &serde_json::Value| {
+            (
+                std::cmp::Reverse(v["updated_at"].as_str().unwrap_or_default().to_owned()),
+                v["slug"].as_str().unwrap_or_default().to_owned(),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    entities.truncate(MEMORY_ENTITIES);
+
+    let mut undigested = 0usize;
+    for path in repo.list_files(tip, CONTEXT_PREFIX).await.unwrap_or_default() {
+        if !path.ends_with(".md") {
+            continue;
+        }
+        let Ok(Some(bytes)) = repo.show_file(tip, &path).await else {
+            continue;
+        };
+        let (front, _) = crate::context::read(&path, &String::from_utf8_lossy(&bytes));
+        if !front.digested {
+            undigested += 1;
+        }
+    }
+
+    serde_json::json!({
+        "entities": entities,
+        "undigested": undigested,
+        "conflicts": conflicts,
+    })
+}
+
+const ENTITIES_DIR: &str = "brain/entities/";
+const CONTEXT_PREFIX: &str = "context/";
+
+/// An entity file's last few fact lines, and whether it carries a `## Conflicts`
+/// section.
+///
+/// A fact is a `- ` line outside `## Conflicts`. The conflicts section holds both
+/// sides of a disagreement the digest refused to settle, so its bullets are not facts
+/// — quoting one as if it were would be exactly the silent pick the digest avoided.
+fn facts_of(text: &str) -> (Vec<String>, bool) {
+    let mut facts: Vec<String> = Vec::new();
+    let mut disputed = false;
+    let mut in_conflicts = false;
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            in_conflicts = heading.trim().eq_ignore_ascii_case("conflicts");
+            disputed |= in_conflicts;
+            continue;
+        }
+        if !in_conflicts && let Some(fact) = trimmed.strip_prefix("- ") {
+            facts.push(fact.trim().to_owned());
+        }
+    }
+    let start = facts.len().saturating_sub(MEMORY_FACTS);
+    (facts.split_off(start), disputed)
 }
 
 /// Merges, restacks, comments, and CI runs — each with an author and an RFC3339

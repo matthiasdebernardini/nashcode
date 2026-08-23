@@ -92,8 +92,10 @@ graph LR
   end
   viewer_brain --> viewer_code
   viewer_brain --> viewer_config
+  viewer_brain --> viewer_context
   viewer_brain --> viewer_db
   viewer_brain --> viewer_docs
+  viewer_brain --> viewer_git
   viewer_brain --> viewer_mirror
   viewer_brain --> viewer_stack
   viewer_brain --> viewer_upstream
