@@ -2131,3 +2131,37 @@ true and the quotation does not.
 context — the file is the record, and an index would be a second copy to keep honest.
 When the subprocess count starts to hurt, the upgrade is one `git cat-file --batch` fed
 every path at once, marked `ponytail:` at both sites.
+
+**`max_open` counts every open task on the list, hand-made ones included.** The cap is
+about how long the list is to read, not about how much of it this sync put there. A list
+already full of six tasks the operator typed into Google by hand is a full list; adding a
+seventh from a card makes it worse whoever wrote the other six. At the cap the sync adds
+nothing and names the cards that are waiting, so a short list stays a real signal rather
+than a queue.
+
+**Stale is measured from the task's own `updated`, not from the commit that wrote
+`gtask`.** The field is already in the `get` answer this sync makes anyway, so it costs
+no extra call — and it means engaging with the task keeps it alive. Renaming it,
+reordering it, moving it under a parent all move `updated`, and any of those is the
+operator paying it attention. The commit date would measure "how long ago the sync filed
+it", which keeps counting down while somebody works on it.
+
+**Deletion demotes the card; it never re-adds the task.** Deleting a task in Google is
+the operator saying "not this, not now". The card keeps its status — the work is still
+todo or doing on the board — and loses `top: true` and `gtask`, which is exactly "not top
+of mind". Treating a deletion as an accident and inserting the task again on the next run
+would make the list impossible to prune, and pruning is the only way a short list stays
+short. Getting back on the list is a person setting `top: true` again.
+
+**The sync never lists in order to delete.** It touches only tasks whose id it holds in a
+card's `gtask`: `get`, then `patch` or `delete` on that one id. The single read of the
+whole list is `max_open`'s count, and it decides whether to *add*. Nothing about a task
+this sync did not create can reach a `delete`, so the list is safe to share with the
+operator's own tasks — which is the whole point of putting them on one list.
+
+**The list id, `me`, `max_open` and `stale_days` are config, not source.** They live as
+top-level keys in `~/.nashcode/context.toml` beside `host`. A tasklist id names one
+person's Google account and `me` is a person's name; neither belongs in a tracked file,
+so `bin/context-tasks` knows only the key names. `me` or `tasklist` missing means the
+sync says so and exits 0 — an operator who has not set up a list still gets their digest
+pushed.
