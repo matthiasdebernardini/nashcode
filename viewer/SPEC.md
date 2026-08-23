@@ -346,8 +346,9 @@ the Mac's file and never hands the copy back out.
 - There is no `GET /people`. Client phones and emails stay on the Mac; the viewer only
   answers "which project". Reads are anonymous on the tailnet today, so the answer is
   already the least it can say: project ids, repo names, and who matched by id.
-- `GET /brain` gains `people: {projects, people, pushed_at}` once per viewer, not per
-  repo, and `null` before a push.
+- `GET /brain` gains `people: {projects, people, pushed_at, pushed_by}` once per
+  viewer, not per repo, and `null` before a push. `pushed_by` is the Tailscale login
+  the push arrived from.
 - `people` joins `RESERVED_ROUTES` next to `brain` and `context`.
 
 ### CLI
@@ -379,11 +380,13 @@ the Mac's file and never hands the copy back out.
   matches the first project in file order wins. A message that arrives before the file
   exists waits; it is not marked handled. The enrichment config lives in
   `~/.imsg-router/config.json`.
-- **Desktop.** `nashcode-people` (workspace member `people/`) shows projects and people
-  side by side, edits them, saves the file, and pushes it. The last push time comes
-  from brain. A third view is the contact map: every phone and email in the file, the
-  person it belongs to, and the projects that person is on, so the operator sees at a
-  glance which number or address routes where, and which routes nowhere.
+- **Desktop.** `nashcode-people` (workspace member `people/`) is one canvas: three
+  lanes, contacts, people, projects, with a drawn link from each phone or email to its
+  person and from each person to each project they are on. Clicking a card lights up
+  everything it routes through and dims the rest; an inspector beside the lanes edits
+  the selected person or project, and toggles a person's projects. A contact or a
+  person on no project sits in a "routes nowhere" band. Save writes the file; Push
+  sends it; the status line shows the last push from brain.
 
 ## Code browser parity
 
