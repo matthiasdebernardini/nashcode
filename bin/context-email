@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# Push filtered email into a nashcode repository as context.
+#
+# One [[source]] per client in ~/.nashcode/context.toml: which repo the mail is about,
+# which Google account to read it from, and the gws query that decides what counts.
+# Filtering happens here, at the source — the server never fetches mail, and a repo
+# full of everything is a repo nobody reads.
+#
+# Each message becomes one `nashcode context put email --source <gmail message id>`.
+# The source id makes the put idempotent, so a crash before the marker is written
+# costs one `existing: true` on the next run rather than a duplicate.
+#
+# This only lists and reads. It never sends mail, and it never replies to one.
+#
+# Usage:
+#   bin/context-email            every [[source]] in the config
+#   bin/context-email <repo>     just the sources for that repository
+set -euo pipefail
+
+NASHCODE_HOME="${NASHCODE_HOME:-$HOME/.nashcode}"
+CONFIG="$NASHCODE_HOME/context.toml"
+STATE="$NASHCODE_HOME/state"
+
+# A message shorter than this is a "thanks", a calendar blip, or an auto-reply. It
+# costs a commit and a digest run and says nothing.
+MIN_WORDS=10
+
+# How far back a source with no marker looks the first time. A week: enough to seed a
+# new client with the live threads, short enough not to import a year of history.
+FIRST_RUN_LOOKBACK=$((7 * 24 * 3600))
+
+die() { printf 'context-email: %s\n' "$*" >&2; exit 1; }
+say() { printf 'context-email: %s\n' "$*"; }
+
+command -v gws >/dev/null 2>&1 || die "gws is not on PATH"
+command -v nashcode >/dev/null 2>&1 || die "nashcode is not on PATH"
+command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH"
+[ -f "$CONFIG" ] || die "no config at $CONFIG"
+
+# --- config ------------------------------------------------------------------------
+
+sources() { # -> repo<TAB>account<TAB>query, one per line
+  python3 - "$CONFIG" <<'PY'
+import pathlib, sys, tomllib
+
+data = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
+for source in data.get("source", []):
+    repo = str(source.get("repo", "")).strip()
+    account = str(source.get("account", "")).strip()
+    query = str(source.get("query", "")).strip()
+    if repo and account and query:
+        print("\t".join((repo, account, query)))
+PY
+}
+
+# --- gws ---------------------------------------------------------------------------
+#
+# These two read gws's answer on standard input, so the program itself travels in
+# `-c`. `python3 - <<PY` would put the source where the JSON has to go.
+
+LIST_IDS_PY=$(cat <<'PY'
+import json, sys
+
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(0)
+ids = [m.get("id") for m in data.get("messages") or [] if m.get("id")]
+# Gmail answers newest first, and the marker can only be advanced in order.
+print("\n".join(reversed(ids)))
+PY
+)
+
+READ_MESSAGE_PY=$(cat <<'PY'
+import base64, datetime, email, email.policy, email.utils, json, pathlib, sys
+
+out = pathlib.Path(sys.argv[1])
+data = json.load(sys.stdin)
+raw = data.get("raw") or ""
+message = email.message_from_bytes(
+    base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), policy=email.policy.default
+)
+
+# The plain-text part. An HTML-only message is not worth guessing at: it lands empty
+# and the word floor drops it.
+body = ""
+part = message.get_body(preferencelist=("plain",))
+if part is not None:
+    try:
+        body = part.get_content()
+    except (LookupError, UnicodeDecodeError):
+        body = ""
+
+subject = " ".join(str(message.get("Subject", "")).split()) or "(no subject)"
+
+stamp = data.get("internalDate")
+if stamp is not None:
+    epoch = int(stamp) // 1000
+else:
+    epoch = int(email.utils.parsedate_to_datetime(str(message.get("Date", ""))).timestamp())
+at = datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+out.write_text(body)
+print(subject)
+print(at)
+print(epoch)
+print(len(body.split()))
+PY
+)
+
+# The message ids the query matches, oldest first, so the marker only moves forward.
+list_ids() { # <account> <query>
+  local params
+  params="$(python3 -c 'import json,sys; print(json.dumps({"userId": sys.argv[1], "q": sys.argv[2], "maxResults": 100}))' "$1" "$2")"
+  gws gmail users messages list --params "$params" --format json | python3 -c "$LIST_IDS_PY"
+}
+
+# One message, split into the four things a put needs. The body lands in a file so no
+# amount of quoting in a stranger's email can reach a shell.
+read_message() { # <account> <id> <body-file> -> subject / rfc3339 / epoch / words
+  local params
+  params="$(python3 -c 'import json,sys; print(json.dumps({"userId": sys.argv[1], "id": sys.argv[2], "format": "raw"}))' "$1" "$2")"
+  gws gmail users messages get --params "$params" --format json \
+    | python3 -c "$READ_MESSAGE_PY" "$3"
+}
+
+# --- the loop ----------------------------------------------------------------------
+
+only="${1:-}"
+mkdir -p "$STATE"
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+
+# Set by any source that gave up part way. The run still tries the other sources — one
+# dead mailbox must not stop the rest — but it exits nonzero so launchd's log says so.
+trouble=0
+
+while IFS=$'\t' read -r repo account query; do
+  [ -n "$repo" ] || continue
+  if [ -n "$only" ] && [ "$only" != "$repo" ]; then
+    continue
+  fi
+
+  marker_file="$STATE/$repo-email.since"
+  if [ -s "$marker_file" ]; then
+    marker="$(cat "$marker_file")"
+  else
+    marker=$(( $(date +%s) - FIRST_RUN_LOOKBACK ))
+    say "$repo: no marker yet, looking back seven days"
+  fi
+
+  filed=0
+  skipped=0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    body="$scratch/body.txt"
+    if ! meta="$(read_message "$account" "$id" "$body")"; then
+      say "$repo: could not read message $id; stopping here so the marker stays put"
+      trouble=1
+      break
+    fi
+    subject="$(printf '%s\n' "$meta" | sed -n 1p)"
+    at="$(printf '%s\n' "$meta" | sed -n 2p)"
+    epoch="$(printf '%s\n' "$meta" | sed -n 3p)"
+    words="$(printf '%s\n' "$meta" | sed -n 4p)"
+
+    if [ "${words:-0}" -lt "$MIN_WORDS" ]; then
+      skipped=$((skipped + 1))
+      # The marker still moves: a "thanks" that is skipped forever is a message the
+      # next run has to fetch and skip again.
+      printf '%s\n' "$epoch" > "$marker_file"
+      continue
+    fi
+
+    if nashcode context put email \
+      --repo "$repo" --title "$subject" --at "$at" --source "$id" < "$body" >/dev/null; then
+      # Only now. A put that failed must be retried, and `existing: true` exits 0, so
+      # a retry of one already filed costs nothing.
+      printf '%s\n' "$epoch" > "$marker_file"
+      filed=$((filed + 1))
+    else
+      say "$repo: put failed for $id; the marker stays where it is so the next run retries"
+      trouble=1
+      break
+    fi
+  done < <(list_ids "$account" "$query after:$marker")
+
+  say "$repo: $filed filed, $skipped under $MIN_WORDS words"
+done < <(sources)
+
+exit "$trouble"
